@@ -1,0 +1,82 @@
+version: "3"
+
+vars:
+  VERSIONARY_VERSION: "1.2.0"
+
+tasks:
+  fmt:
+    desc: Check Rust, TOML, and Nix formatting.
+    cmds:
+      - task: fmt:rust
+      - task: fmt:toml
+      - task: fmt:nix
+
+  fmt:rust:
+    internal: true
+    cmds:
+      - coterie-rustfmt
+
+  fmt:toml:
+    internal: true
+    cmds:
+      - coterie-taplo
+
+  fmt:nix:
+    internal: true
+    cmds:
+      - coterie-nixfmt
+
+  lint:
+    desc: Run Rust and GitHub Actions linters with warnings denied.
+    cmds:
+      - task: lint:rust
+      - actionlint
+
+  lint:rust:
+    internal: true
+    cmds:
+      - coterie-clippy
+
+  test:
+    desc: Run the Rust test suite with nextest.
+    cmds:
+      - cargo nextest run --workspace --all-features --no-tests pass
+
+  docs:
+    desc: Build rustdoc with warnings denied.
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    cmds:
+      - cargo doc --workspace --all-features --no-deps
+
+  audit:
+    desc: Check vulnerabilities and dependency policy.
+    cmds:
+      - cargo audit
+      - cargo deny check advisories bans licenses sources
+
+  check:
+    desc: Run every required local and CI gate except coverage.
+    cmds:
+      - task: fmt
+      - task: lint
+      - task: test
+      - task: docs
+      - task: audit
+      - task: release:verify
+      - task: nix:eval
+
+  coverage:
+    desc: Generate an HTML coverage report without enforcing a threshold.
+    cmds:
+      - cargo llvm-cov nextest --workspace --all-features --no-tests pass --html --output-dir target/llvm-cov
+
+  release:verify:
+    internal: true
+    cmds:
+      - npx --yes versionary@{{.VERSIONARY_VERSION}} verify
+
+  nix:eval:
+    internal: true
+    cmds:
+      - devenv info

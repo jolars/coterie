@@ -10,42 +10,42 @@ later milestones complete the broader initial product target in `DESIGN.md`.
 
 ## M0: Development foundation
 
-The repository currently contains a generic devenv scaffold, but no Rust package
-or project-specific checks.
+The repository now contains the Rust package and project-specific checks that
+later milestones build on.
 
-- [ ] Replace the generic `devenv.nix` template with a Rust environment modeled
+- [x] Replace the generic `devenv.nix` template with a Rust environment modeled
   on `../basin`: enable the pinned toolchain from `rust-toolchain.toml`, and
   install Git, Go Task, SQLite, `cargo-nextest`, `cargo-llvm-cov`,
   `cargo-audit`, `cargo-deny`, `nixfmt`, `taplo`, and `actionlint`.
-- [ ] Scaffold one edition-2024 binary crate named `coterie`. Start at version
-  `0.0.0`, keep the runtime in internal modules, and commit `Cargo.lock`.
-- [ ] Pin Rust 1.98.0 with rustfmt and Clippy. Do not declare an independent
+- [x] Scaffold one edition-2024 binary crate named `coterie`. Start at version
+  `0.1.0`, keep the runtime in internal modules, and commit `Cargo.lock`.
+- [x] Pin Rust 1.98.0 with rustfmt and Clippy. Do not declare an independent
   MSRV before release hardening establishes one from evidence.
-- [ ] Add a `Taskfile.yml` with `fmt`, `lint`, `test`, `docs`, `audit`, `check`,
+- [x] Add a `Taskfile.yml` with `fmt`, `lint`, `test`, `docs`, `audit`, `check`,
   and `coverage` tasks. `check` must reproduce every required local and CI
   gate except coverage.
-- [ ] Enable pre-commit rustfmt, Clippy, TOML formatting, and Nix formatting
+- [x] Enable pre-commit rustfmt, Clippy, TOML formatting, and Nix formatting
   through devenv. Hooks must call the same underlying commands as
   `task check`.
-- [ ] Add CI for formatting, Clippy with warnings denied, nextest, rustdoc with
+- [x] Add CI for formatting, Clippy with warnings denied, nextest, rustdoc with
   warnings denied, dependency policy, and Nix evaluation. Cache build
   artifacts without making the cache part of correctness.
-- [ ] Add the README, dual MIT/Apache-2.0 license files, `CHANGELOG.md`, package
+- [x] Add the README, dual MIT/Apache-2.0 license files, `CHANGELOG.md`, package
   metadata, `deny.toml`, formatting configuration, and dependency-update
   policy.
-- [ ] Configure Versionary's Rust release-PR workflow with Conventional Commits,
+- [x] Configure Versionary's Rust release-PR workflow with Conventional Commits,
   pre-major feature bumps, stable-major releases disabled, commit authors,
-  and best-effort issue references. Keep the package unpublished and do not
-  merge the first release PR before the MVP gate.
+  and best-effort issue references. Keep the package unpublished and release
+  `v0.1.0` manually after the MVP gate; keep automation disabled until then.
 - [x] Add an operational `AGENTS.md` that records project invariants, the
   test-first workflow, verification commands, and documentation
   synchronization rules.
 
 ### M0 gate
 
-- [ ] A fresh `devenv shell` can run `task check` successfully.
-- [ ] The pre-commit hooks pass on the scaffold without rewriting tracked files.
-- [ ] CI passes from a clean checkout, and Versionary configuration verifies
+- [x] A fresh `devenv shell` can run `task check` successfully.
+- [x] The pre-commit hooks pass on the scaffold without rewriting tracked files.
+- [x] CI passes from a clean checkout, and Versionary configuration verifies
   without creating a tag or publishing a package.
 
 ## M1: Core contracts and durable state

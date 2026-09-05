@@ -1,0 +1,18 @@
+[package]
+name = "coterie"
+version = "0.1.0"
+edition = "2024"
+authors = ["Johan Larsson <johan@jolars.co>"]
+description = "Project-native orchestration for coding agents"
+repository = "https://github.com/jolars/coterie"
+homepage = "https://github.com/jolars/coterie"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["agents", "automation", "cli", "orchestration"]
+categories = ["command-line-utilities", "development-tools"]
+publish = false
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"

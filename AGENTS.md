@@ -8,11 +8,11 @@ milestone acceptance criteria.
 
 ## Current status
 
-Coterie is at the design stage. The repository has a generic devenv scaffold,
-but no Rust crate or meaningful automated checks yet. M0 in `TODO.md` owns that
-foundation. Until it lands, do not report that Rust formatting, linting, or
-tests passed; documentation changes should at least pass `git diff --check` and
-manual link and terminology review.
+Coterie has completed the M0 development foundation. The repository contains a
+behavior-free Rust binary and the canonical Task, devenv, pre-commit, CI,
+documentation, and release-configuration gates. M1 in `TODO.md` owns the first
+runtime contracts and durable state; do not imply that orchestration behavior
+exists before its acceptance criteria pass.
 
 ## Project priorities
 
