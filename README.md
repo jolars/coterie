@@ -1,5 +1,9 @@
 # Coterie
 
+[![CI](https://github.com/jolars/coterie/actions/workflows/ci.yml/badge.svg)](https://github.com/jolars/coterie/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/coterie.svg)](https://crates.io/crates/coterie)
+[![docs.rs](https://img.shields.io/docsrs/coterie)](https://docs.rs/coterie)
+
 > [!WARNING]
 > Coterie is at the design and foundation stage. The binary does not yet expose
 > orchestration behavior.
@@ -37,10 +41,10 @@ pre-commit hooks.
 
 ## Releases
 
-The crate starts at `0.1.0` and is not published to crates.io. The first tag and
-GitHub Release will be created manually after the MVP gate. Versionary is
-configured for later release PRs, but its workflow remains dormant while the
-GitHub repository variable `VERSIONARY_ENABLED` is not `true`.
+Version `0.1.0` was published to crates.io and released on GitHub manually.
+Versionary prepares and publishes later GitHub releases. Version tags trigger a
+separate trusted-publishing workflow that publishes the matching crate to
+crates.io without a long-lived registry token.
 
 ## Project documentation
 
