@@ -7,4 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Coterie is preparing its initial manual `0.1.0` release.
+## [0.1.0] - 2026-09-05
+
+### Added
+
+- The behavior-free Coterie binary crate and its development foundation.
+- Reproducible formatting, linting, testing, documentation, audit, coverage,
+  pre-commit, and CI gates.
+
+[Unreleased]: https://github.com/jolars/coterie/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jolars/coterie/releases/tag/v0.1.0

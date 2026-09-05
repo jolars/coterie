@@ -35,8 +35,8 @@ later milestones build on.
   policy.
 - [x] Configure Versionary's Rust release-PR workflow with Conventional Commits,
   pre-major feature bumps, stable-major releases disabled, commit authors,
-  and best-effort issue references. Keep the package unpublished and release
-  `v0.1.0` manually after the MVP gate; keep automation disabled until then.
+  and best-effort issue references. Release `v0.1.0` manually, then enable
+  Versionary and trusted crates.io publishing for later releases.
 - [x] Add an operational `AGENTS.md` that records project invariants, the
   test-first workflow, verification commands, and documentation
   synchronization rules.
