@@ -4,6 +4,12 @@
 
 This document describes the intended architecture and initial scope of Coterie. It is a design target rather than a compatibility promise.
 
+[`TODO.md`](TODO.md) separates delivery into milestones. Its `v0.1.0` MVP is a
+deliberately smaller single-project vertical slice; the complete initial product
+target described here follows after that MVP. Unless a passage explicitly names
+the MVP, references to the initial product target mean the complete scope in the
+section of that name below.
+
 ## Purpose
 
 Coterie is a project-native CLI for orchestrating coding agents. From a user's perspective, it should feel like launching an ordinary agent harness in the current project:
@@ -89,7 +95,7 @@ tools = {
 
 Coterie must behave correctly as a foreground terminal program: preserve the working directory, forward signals and terminal resize events, avoid unsolicited terminal output while the provider TUI is active, and return meaningful exit codes.
 
-In the initial implementation, the foreground Coterie process owns the lead TUI, while the supervisor owns background workers. Closing the foreground process ends that live TUI but does not discard the run or stop active workers. A later invocation resumes a recorded provider session when the adapter supports reliable resume; otherwise it starts a fresh lead session and reconstructs orchestration context through `coterie prime`. The first release does not promise transparent process reattachment.
+In the initial product target, the foreground Coterie process owns the lead TUI, while the supervisor owns background workers. Closing the foreground process ends that live TUI but does not discard the run or stop active workers. A later invocation resumes a recorded provider session when the adapter supports reliable resume; otherwise it starts a fresh lead session and reconstructs orchestration context through `coterie prime`. The initial product target does not promise transparent process reattachment.
 
 `SIGINT` is forwarded to the foreground provider. It does not implicitly stop the run. Stopping all agents and cleaning up eligible resources requires `coterie stop`.
 
@@ -197,7 +203,7 @@ permission_profile = "review"
 capabilities = ["send:lead", "task:read", "task:comment"]
 ```
 
-`max_instances` is a capacity limit, not a request to start idle agents. The lead creates agents explicitly, and the supervisor rejects spawns that exceed role or global limits. Automatic demand-based pool scaling is not part of the first release.
+`max_instances` is a capacity limit, not a request to start idle agents. The lead creates agents explicitly, and the supervisor rejects spawns that exceed role or global limits. Automatic demand-based pool scaling is not part of the initial product target.
 
 An optional project configuration contains only selection and monotone-safe overrides. A project may disable roles, reduce capacities, choose a globally defined permission profile that is no more permissive, and tighten resource limits. It cannot increase authority or resource ceilings.
 
@@ -237,7 +243,7 @@ Project configuration is untrusted. It cannot define provider executables, instr
 
 The primary project selects the run archetype. When another project is attached, Coterie loads that project's restrictions and lock, applies them to work targeting that project, and snapshots the result. An attached project's archetype selector cannot replace the active run archetype; an incompatible selector, lock, or restriction fails attachment with an actionable diagnostic.
 
-The run-level effective configuration and its fingerprint are snapshotted when a run starts; each additional project's effective restriction overlay is snapshotted when it is attached. The first release does not hot-apply configuration changes to an active run. Starting Coterie or attaching a project with a conflicting archetype or configuration reports the active snapshot and requires an explicit resolution.
+The run-level effective configuration and its fingerprint are snapshotted when a run starts; each additional project's effective restriction overlay is snapshotted when it is attached. The initial product target does not hot-apply configuration changes to an active run. Starting Coterie or attaching a project with a conflicting archetype or configuration reports the active snapshot and requires an explicit resolution.
 
 ## Runtime architecture
 
@@ -265,7 +271,7 @@ For a Git project, the identity includes both the canonical Git common directory
 
 An active run holds a nonblocking exclusive lease for every attached project identity, including its primary project. Runtime locks and a supervisor socket handshake enforce ownership; a PID file or durable index entry alone is never treated as proof of liveness. Because attachment never waits for another project lease, two runs attempting to cross-attach each other's projects fail visibly rather than deadlock. Stale sockets, leases, index entries, and interrupted attachment are repaired conservatively.
 
-Launching Coterie from any project leased by a live run connects to that run or reports its identity before performing a conflicting action. An exclusive lease is the simple first-release rule; concurrent read-only attachment may be added later if it can preserve comprehensible ownership.
+Launching Coterie from any project leased by a live run connects to that run or reports its identity before performing a conflicting action. The initial product target uses an exclusive lease; concurrent read-only attachment may be added later if it can preserve comprehensible ownership.
 
 The supervisor is the single writer for the run database. CLI processes issue typed RPC requests rather than opening the database directly. This makes ordering explicit and keeps project attachment, dependency, claim, and assignment transactions local to one process.
 
@@ -305,7 +311,7 @@ Database transactions cannot include process or filesystem side effects. Operati
 4. Record the observed result.
 5. Let reconciliation repair an interrupted sequence.
 
-The first release provides local durability across crashes and sessions, not cross-machine task synchronization. Export, import, and external tracker adapters may be designed later without changing the internal task interface.
+The initial product target provides local durability across crashes and sessions, not cross-machine task synchronization. Export, import, and external tracker adapters may be designed later without changing the internal task interface.
 
 ## Agent bootstrap and identity
 
@@ -426,7 +432,7 @@ Relevant provider capabilities include:
 
 Capabilities are discovered from the installed provider version where possible, not merely asserted by configuration. An archetype is validated against them before launch.
 
-Codex is the first provider. In the initial implementation:
+Codex is the first provider. In the initial product target:
 
 - the lead runs as an ordinary foreground Codex TUI owned by the foreground Coterie process;
 - background workers run as bounded, non-interactive jobs using Codex's documented JSONL output;
@@ -436,7 +442,7 @@ Codex is the first provider. In the initial implementation:
 
 Attaching a project does not silently widen a live provider's filesystem sandbox. If the foreground provider cannot add a root safely at runtime, the current lead coordinates that project through task-scoped workers and Coterie's structured result and integration operations. An adapter may instead restart or resume the lead with the expanded project set when the provider supports that transition explicitly. `coterie prime` reports the distinction between a project attached to the run and a project directly accessible to the current provider session.
 
-A structured Codex app-server adapter is a future capability path, not a first-release requirement. The provider interface must accommodate it without making an experimental protocol part of Coterie's core contract.
+A structured Codex app-server adapter is a future capability path, not a requirement for the initial product target. The provider interface must accommodate it without making an experimental protocol part of Coterie's core contract.
 
 Every provider adapter has a shared conformance suite covering launch, output framing, exit classification, cancellation, timeout, resume where claimed, transcript tails, malformed events, and idempotent termination. Deterministic fake providers exercise reconciliation and failure paths without invoking a model.
 
@@ -467,7 +473,7 @@ Before cleanup, Coterie verifies all of the following:
 
 Coterie never automatically destroys a dirty, unintegrated, or otherwise recoverable worktree. Failed cleanup leaves a diagnostic and a recoverable path. `coterie doctor` reports stale and inconsistent ownership but does not repair destructive cases without explicit approval.
 
-Workers report their target project, base commit, result commit, summary, and tests to the lead. The first release does not implement an autonomous merge queue. The lead decides when to invoke guarded integration, validate the result, and close the task. Integration in one project never changes another project's worktree or branch.
+Workers report their target project, base commit, result commit, summary, and tests to the lead. The initial product target does not implement an autonomous merge queue. The lead decides when to invoke guarded integration, validate the result, and close the task. Integration in one project never changes another project's worktree or branch.
 
 Non-Git projects support `project` and enforceable `read-only` roles. An archetype requiring `worktree` fails clearly for a task targeting a non-Git project; Coterie does not silently weaken isolation.
 
@@ -547,9 +553,9 @@ Secrets and ambient environment variables are denied by default and passed only 
 - No role name or delegation strategy is hardcoded into the runtime.
 - Provider arguments are passed as structured arrays; untrusted text is never evaluated by a shell.
 
-## Initial implementation
+## Initial product target
 
-The first usable release includes:
+The complete initial product target includes:
 
 1. A single compiled `coterie` binary, apart from the selected agent provider.
 2. Versioned built-in archetypes, trusted global archetypes, safe project restrictions, provenance, and optional lock files.
@@ -582,7 +588,7 @@ transcript   append-only provider output and normalized event ingestion
 
 Implementation proceeds test-first around state transitions. Unit tests cover configuration lattices, task readiness, cross-project dependency release, atomic claims, capability checks, and reconciliation plans. Integration tests use multiple temporary Git repositories and fake providers to exercise attachment conflicts, project-specific working directories, guarded integration, and crashes at every durable-intent boundary. Provider contract tests are shared by fakes and the Codex adapter.
 
-## Non-goals for the first release
+## Non-goals for the initial product target
 
 Coterie initially does not provide:
 
