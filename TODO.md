@@ -1,4 +1,4 @@
-# Coterie roadmap
+# Majordomo roadmap
 
 This roadmap is ordered by dependency and recommended implementation sequence.
 [`DESIGN.md`](DESIGN.md) is the architectural authority; this file divides that
@@ -17,7 +17,7 @@ or project-specific checks.
   on `../basin`: enable the pinned toolchain from `rust-toolchain.toml`, and
   install Git, Go Task, SQLite, `cargo-nextest`, `cargo-llvm-cov`,
   `cargo-audit`, `cargo-deny`, `nixfmt`, `taplo`, and `actionlint`.
-- [ ] Scaffold one edition-2024 binary crate named `coterie`. Start at version
+- [ ] Scaffold one edition-2024 binary crate named `majordomo`. Start at version
   `0.0.0`, keep the runtime in internal modules, and commit `Cargo.lock`.
 - [ ] Pin Rust 1.98.0 with rustfmt and Clippy. Do not declare an independent
   MSRV before release hardening establishes one from evidence.
@@ -54,8 +54,8 @@ or project-specific checks.
   `providers`, `tasks`, `workspace`, `state`, and `transcript` modules. Keep
   one deployable binary; extract a crate only after a concrete boundary
   requires it.
-- [ ] Define stable, type-specific IDs using a short Coterie prefix and a ULID,
-  including run, project, agent, session, task, assignment, message,
+- [ ] Define stable, type-specific IDs using a short Majordomo prefix and a
+  ULID, including run, project, agent, session, task, assignment, message,
   operation, and event identities.
 - [ ] Define versioned JSON success envelopes, machine-readable error bodies,
   documented exit-code categories, and operation IDs for every mutating
@@ -116,7 +116,7 @@ or project-specific checks.
 - [ ] Probe the installed Codex version and required capabilities before launch;
   reject incompatible versions with an actionable diagnostic.
 - [ ] Launch the foreground Codex TUI with inherited terminal streams, working
-  directory, resize behavior, and signal forwarding. Inject only Coterie's
+  directory, resize behavior, and signal forwarding. Inject only Majordomo's
   orchestration bootstrap through Codex's documented
   `developer_instructions` setting, leaving repository `AGENTS.md` discovery
   intact.
@@ -127,7 +127,7 @@ or project-specific checks.
   closed when a requested filesystem, network, approval, bootstrap, or
   working directory capability cannot be enforced.
 - [ ] Implement the workspace trait with `git2`: record a base commit, create a
-  task-owned worktree and reference below Coterie's state directory, and
+  task-owned worktree and reference below Majordomo's state directory, and
   record the resulting commit without invoking the Git CLI.
 - [ ] Implement explicit guarded integration. Refuse dirty targets, unexpected
   tips, ambiguous histories, and conflicts; never remove dirty,
@@ -144,7 +144,7 @@ or project-specific checks.
 
 ### v0.1.0 MVP gate
 
-- [ ] From a clean Git repository, `coterie` starts or reconnects to its
+- [ ] From a clean Git repository, `majordomo` starts or reconnects to its
   supervisor and opens the foreground Codex lead without unsolicited wrapper
   output corrupting the TUI.
 - [ ] The lead can create one task, spawn one Codex worker in an isolated
@@ -154,7 +154,7 @@ or project-specific checks.
   invocation reconstructs orchestration context even when transparent Codex
   session reattachment is unavailable.
 - [ ] Interrupting the foreground reaches Codex but does not stop the run;
-  `coterie stop` performs bounded shutdown and preserves recoverable work.
+  `majordomo stop` performs bounded shutdown and preserves recoverable work.
 - [ ] Unit, fake-provider, temporary-repository, and opt-in real-Codex contract
   tests pass. CI never requires networked or account-authenticated Codex
   runs.

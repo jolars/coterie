@@ -8,7 +8,7 @@ milestone acceptance criteria.
 
 ## Current status
 
-Coterie is at the design stage. The repository has a generic devenv scaffold,
+Majordomo is at the design stage. The repository has a generic devenv scaffold,
 but no Rust crate or meaningful automated checks yet. M0 in `TODO.md` owns that
 foundation. Until it lands, do not report that Rust formatting, linting, or
 tests passed; documentation changes should at least pass `git diff --check` and
@@ -16,12 +16,12 @@ manual link and terminology review.
 
 ## Project priorities
 
-Coterie is a project-native Rust CLI that lets one foreground lead agent
+Majordomo is a project-native Rust CLI that lets one foreground lead agent
 coordinate declaratively configured workers. It owns durable orchestration,
 tasks, messages, workspaces, and reconciliation while agent harnesses remain
 out-of-process providers.
 
-- Preserve the project-native experience: running `coterie` in a project is
+- Preserve the project-native experience: running `majordomo` in a project is
   sufficient, and additional projects are attached only to an active run.
 - Keep mechanics in Rust and judgment in agents. The binary enforces policy,
   ownership, state transitions, and transport; it does not decide how work
@@ -82,11 +82,11 @@ only when a tested boundary or independent consumer justifies it.
 
 - The supervisor is the only writer to a run database. Other processes use typed
   RPC and never open it for mutation.
-- SQLite provides transactions and storage; Coterie owns task and orchestration
-  semantics. Add schema changes as forward migrations and test upgrades from
-  every released schema.
-- Keep Git behavior behind the workspace trait. Coterie-owned code uses `git2`,
-  not the Git CLI, for repository state and worktree mutations.
+- SQLite provides transactions and storage; Majordomo owns task and
+  orchestration semantics. Add schema changes as forward migrations and test
+  upgrades from every released schema.
+- Keep Git behavior behind the workspace trait. Majordomo-owned code uses
+  `git2`, not the Git CLI, for repository state and worktree mutations.
 - Keep provider behavior behind a capability-probed adapter. Never link to a
   provider's internal crates or rely on undocumented terminal text.
 - Represent commands as argument arrays and execute them directly. Never pass
@@ -124,8 +124,8 @@ abstraction and tests.
   capability-checked RPCs and is never encoded as message text.
 - Refuse dirty, moved, ambiguous, or conflicting integration targets. Never
   delete a dirty or unintegrated worktree automatically.
-- Coterie injects only orchestration bootstrap instructions. It does not create,
-  modify, replace, or shadow a target repository's `AGENTS.md`.
+- Majordomo injects only orchestration bootstrap instructions. It does not
+  create, modify, replace, or shadow a target repository's `AGENTS.md`.
 
 ## Testing expectations
 
