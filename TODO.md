@@ -18,7 +18,7 @@ or project-specific checks.
   install Git, Go Task, SQLite, `cargo-nextest`, `cargo-llvm-cov`,
   `cargo-audit`, `cargo-deny`, `nixfmt`, `taplo`, and `actionlint`.
 - [ ] Scaffold one edition-2024 binary crate named `coterie`. Start at version
-  `0.0.0`, keep the runtime in internal modules, and commit `Cargo.lock`.
+  `0.1.0`, keep the runtime in internal modules, and commit `Cargo.lock`.
 - [ ] Pin Rust 1.98.0 with rustfmt and Clippy. Do not declare an independent
   MSRV before release hardening establishes one from evidence.
 - [ ] Add a `Taskfile.yml` with `fmt`, `lint`, `test`, `docs`, `audit`, `check`,
@@ -35,8 +35,8 @@ or project-specific checks.
   policy.
 - [ ] Configure Versionary's Rust release-PR workflow with Conventional Commits,
   pre-major feature bumps, stable-major releases disabled, commit authors,
-  and best-effort issue references. Keep the package unpublished and do not
-  merge the first release PR before the MVP gate.
+  and best-effort issue references. Keep the package unpublished and release
+  `v0.1.0` manually after the MVP gate; keep automation disabled until then.
 - [x] Add an operational `AGENTS.md` that records project invariants, the
   test-first workflow, verification commands, and documentation
   synchronization rules.

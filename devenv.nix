@@ -1,46 +1,71 @@
-{ pkgs, lib, config, inputs, ... }:
-
 {
-  # https://devenv.sh/basics/
-  env.GREET = "devenv";
+  pkgs,
+  ...
+}:
+{
+  packages = with pkgs; [
+    actionlint
+    cargo-audit
+    cargo-deny
+    cargo-llvm-cov
+    cargo-nextest
+    git
+    go-task
+    nixfmt
+    nodejs_24
+    sqlite
+    taplo
+  ];
 
-  # https://devenv.sh/packages/
-  packages = [ pkgs.git ];
+  languages.rust = {
+    enable = true;
+    toolchainFile = ./rust-toolchain.toml;
+  };
 
-  # https://devenv.sh/languages/
-  # languages.rust.enable = true;
+  scripts = {
+    coterie-rustfmt.exec = "cargo fmt --all -- --check";
+    coterie-clippy.exec = "cargo clippy --workspace --all-targets --all-features -- -D warnings";
+    coterie-taplo.exec = ''
+      git ls-files --cached --others --exclude-standard -z '*.toml' \
+        | xargs -0 --no-run-if-empty taplo fmt --check
+    '';
+    coterie-nixfmt.exec = ''
+      git ls-files --cached --others --exclude-standard -z '*.nix' \
+        | xargs -0 --no-run-if-empty nixfmt --check
+    '';
+  };
 
-  # https://devenv.sh/processes/
-  # processes.dev.exec = "${lib.getExe pkgs.watchexec} -n -- ls -la";
+  git-hooks.hooks = {
+    coterie-rustfmt = {
+      enable = true;
+      name = "rustfmt";
+      entry = "coterie-rustfmt";
+      pass_filenames = false;
+    };
 
-  # https://devenv.sh/services/
-  # services.postgres.enable = true;
+    coterie-clippy = {
+      enable = true;
+      name = "clippy";
+      entry = "coterie-clippy";
+      pass_filenames = false;
+    };
 
-  # https://devenv.sh/scripts/
-  scripts.hello.exec = ''
-    echo hello from $GREET
-  '';
+    coterie-taplo = {
+      enable = true;
+      name = "taplo";
+      entry = "coterie-taplo";
+      pass_filenames = false;
+    };
 
-  # https://devenv.sh/basics/
-  enterShell = ''
-    hello         # Run scripts directly
-    git --version # Use packages
-  '';
+    coterie-nixfmt = {
+      enable = true;
+      name = "nixfmt";
+      entry = "coterie-nixfmt";
+      pass_filenames = false;
+    };
+  };
 
-  # https://devenv.sh/tasks/
-  # tasks = {
-  #   "myproj:setup".exec = "mytool build";
-  #   "devenv:enterShell".after = [ "myproj:setup" ];
-  # };
-
-  # https://devenv.sh/tests/
   enterTest = ''
-    echo "Running tests"
-    git --version | grep --color=auto "${pkgs.git.version}"
+    task check
   '';
-
-  # https://devenv.sh/git-hooks/
-  # git-hooks.hooks.shellcheck.enable = true;
-
-  # See full reference at https://devenv.sh/reference/options/
 }
