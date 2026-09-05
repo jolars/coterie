@@ -1,9 +1,9 @@
-# Majordomo
+# Coterie
 
 ## Status
 
-This document describes the intended architecture and initial scope of
-Majordomo. It is a design target rather than a compatibility promise.
+This document describes the intended architecture and initial scope of Coterie.
+It is a design target rather than a compatibility promise.
 
 [`TODO.md`](TODO.md) separates delivery into milestones. Its `v0.1.0` MVP is a
 deliberately smaller single-project vertical slice; the complete initial product
@@ -13,46 +13,46 @@ section of that name below.
 
 ## Purpose
 
-Majordomo is a project-native CLI for orchestrating coding agents. From a user's
+Coterie is a project-native CLI for orchestrating coding agents. From a user's
 perspective, it should feel like launching an ordinary agent harness in the
 current project:
 
 ```console
 cd my-project
-majordomo
+coterie
 ```
 
-The user interacts with one foreground lead agent—the majordomo—which directs a
-declaratively configured group of workers. Majordomo gives this agent an
-embedded durable task graph, isolated workspaces, and a CLI protocol for
-coordination. A run begins in one primary project and may attach other projects
-when a request spans repositories.
+The user interacts with one foreground lead agent. Coterie supplies that agent
+with a declaratively configured group of workers, an embedded durable task
+graph, isolated workspaces, and a CLI protocol for coordination. A run begins in
+one primary project and may attach other projects when a request spans
+repositories.
 
-Majordomo is inspired by Gas Town, Gas City, and Firstmate, but differs in five
+Coterie is inspired by Gas Town, Gas City, and Firstmate, but differs in five
 important respects:
 
 1. Configuration is declarative and centered on reusable, versioned archetypes.
 2. A run is anchored in the current project and may attach explicit additional
    projects; projects are not permanently registered in a separate city or
    fleet.
-3. Majordomo behaves as an agent harness and can run directly in a terminal
+3. Coterie behaves as an agent harness and can run directly in a terminal
    integration such as sidekick.nvim.
 4. Orchestration behavior and durable work tracking belong in the compiled
    binary rather than shell scripts or required companion CLIs.
-5. Agent harnesses remain out-of-process providers. Majordomo does not absorb
+5. Agent harnesses remain out-of-process providers. Coterie does not absorb
    their model clients, authentication, tools, or sandboxes.
 
 The central product principle is:
 
-> Running Majordomo in a project should be as natural as running Codex or Claude
+> Running Coterie in a project should be as natural as running Codex or Claude
 > Code there directly.
 
 ## Design principles
 
 - **Project-native operation**: launching in a project is sufficient. Additional
-  projects are attached only when a run needs them; there is no Majordomo
+  projects are attached only when a run needs them; there is no Coterie
   initialization or permanent project registry.
-- **Libraries inside, protocols outside**: Majordomo uses Rust libraries for
+- **Libraries inside, protocols outside**: Coterie uses Rust libraries for
   state, Git operations, configuration, IPC, and process management. External
   processes exist only at deliberate provider boundaries.
 - **Durable work, disposable sessions**: tasks, assignments, messages, and
@@ -60,14 +60,14 @@ The central product principle is:
 - **Configuration-defined behavior**: role names and delegation strategies are
   data. The binary contains no special cases for `lead`, `worker`, `reviewer`,
   or other archetype-defined names.
-- **Mechanics in Rust, judgment in agents**: Majordomo enforces policy,
-  ownership, state transitions, and transport. Agents decide how to decompose
-  work, what to delegate, and whether an outcome satisfies the user's request.
+- **Mechanics in Rust, judgment in agents**: Coterie enforces policy, ownership,
+  state transitions, and transport. Agents decide how to decompose work, what to
+  delegate, and whether an outcome satisfies the user's request.
 - **Desired-state reconciliation**: crashes and partial operations are repaired
   by comparing durable intent with observed state, not by assuming each
   multi-step operation completed.
 - **Explicit uncertainty**: unknown provider or process state remains unknown.
-  Majordomo does not infer semantic idleness from CPU use, elapsed time, or
+  Coterie does not infer semantic idleness from CPU use, elapsed time, or
   terminal text.
 
 Before adding a new core abstraction, ask whether it can be composed from
@@ -78,7 +78,7 @@ would move judgment from an agent into Rust.
 
 - **Project**: a canonical Git worktree, or a canonical directory for a non-Git
   project, attached to a run under a unique human-readable alias.
-- **Primary project**: the project from which Majordomo was launched. It anchors
+- **Primary project**: the project from which Coterie was launched. It anchors
   configuration, run discovery, and the lead's initial working directory.
 - **Attached project**: an additional project root granted to an active run.
   Attachment is run-scoped and does not register the project permanently.
@@ -107,58 +107,58 @@ additional project membership lasts only for that run.
 The primary interface is the foreground lead agent:
 
 ```console
-majordomo                              # use the project or global default
-majordomo --archetype builtin:review@1 # select another archetype
-majordomo status                       # inspect the current project run
-majordomo logs worker-2                # stream a worker's transcript
-majordomo project list                 # inspect projects attached to the run
-majordomo project attach ../library-py # attach another project to the run
-majordomo task ready                   # inspect ready work
-majordomo events --follow              # follow the typed event stream
-majordomo doctor                       # diagnose recoverable inconsistencies
-majordomo stop                         # stop the run safely
+coterie                              # use the project or global default
+coterie --archetype builtin:review@1 # select another archetype
+coterie status                       # inspect the current project run
+coterie logs worker-2                # stream a worker's transcript
+coterie project list                 # inspect projects attached to the run
+coterie project attach ../library-py # attach another project to the run
+coterie task ready                   # inspect ready work
+coterie events --follow              # follow the typed event stream
+coterie doctor                       # diagnose recoverable inconsistencies
+coterie stop                         # stop the run safely
 ```
 
-No initialization or project registration is required. Majordomo discovers the
+No initialization or project registration is required. Coterie discovers the
 primary project root, starts or connects to its run supervisor, and launches the
 lead agent there. The operator or an authorized lead may attach another
 canonical project root for the lifetime of the run.
 
-An optional `majordomo.toml` selects a versioned archetype and applies a narrow
-set of safe project overrides. An optional `majordomo.lock` verifies the
-portable, non-secret effective configuration. Both files may be committed.
-Majordomo must also work without either one.
+An optional `coterie.toml` selects a versioned archetype and applies a narrow
+set of safe project overrides. An optional `coterie.lock` verifies the portable,
+non-secret effective configuration. Both files may be committed. Coterie must
+also work without either one.
 
-For sidekick.nvim, Majordomo should require only a normal custom CLI entry:
+For sidekick.nvim, Coterie should require only a normal custom CLI entry:
 
 ```lua
 tools = {
-  majordomo = {
-    cmd = { "majordomo" },
+  coterie = {
+    cmd = { "coterie" },
   },
 }
 ```
 
-Majordomo must behave correctly as a foreground terminal program: preserve the
+Coterie must behave correctly as a foreground terminal program: preserve the
 working directory, forward signals and terminal resize events, avoid unsolicited
 terminal output while the provider TUI is active, and return meaningful exit
 codes.
 
-In the initial product target, the foreground Majordomo process owns the lead
-TUI, while the supervisor owns background workers. Closing the foreground
-process ends that live TUI but does not discard the run or stop active workers.
-A later invocation resumes a recorded provider session when the adapter supports
+In the initial product target, the foreground Coterie process owns the lead TUI,
+while the supervisor owns background workers. Closing the foreground process
+ends that live TUI but does not discard the run or stop active workers. A later
+invocation resumes a recorded provider session when the adapter supports
 reliable resume; otherwise it starts a fresh lead session and reconstructs
-orchestration context through `majordomo prime`. The initial product target does
+orchestration context through `coterie prime`. The initial product target does
 not promise transparent process reattachment.
 
 `SIGINT` is forwarded to the foreground provider. It does not implicitly stop
 the run. Stopping all agents and cleaning up eligible resources requires
-`majordomo stop`.
+`coterie stop`.
 
 ## Native dependencies and external boundaries
 
-Majordomo should be a single compiled Rust binary apart from the agent harnesses
+Coterie should be a single compiled Rust binary apart from the agent harnesses
 the operator chooses to run.
 
 Core facilities use in-process Rust libraries:
@@ -171,16 +171,16 @@ Core facilities use in-process Rust libraries:
 - `tokio` and focused Unix process, signal, socket, and PTY crates for runtime
   management.
 
-Majordomo owns the task domain and schema; SQLite and `rusqlite` supply storage
+Coterie owns the task domain and schema; SQLite and `rusqlite` supply storage
 and transactions rather than task semantics. Dependencies are locked, use
 narrowly selected features, and are reviewed like other trusted code. The `git2`
-boundary remains behind a trait so Majordomo can move to a pure-Rust Git
+boundary remains behind a trait so Coterie can move to a pure-Rust Git
 implementation when one supports the required worktree mutations reliably.
 
-Majordomo-owned code does not invoke `bd`, `git`, `sh -c`, or another
+Coterie-owned code does not invoke `bd`, `git`, `sh -c`, or another
 general-purpose CLI to implement its state machine. A provider process may
 invoke tools such as Git as part of its own agent work; that behavior belongs to
-the provider's sandbox and permission policy, not to Majordomo's internal
+the provider's sandbox and permission policy, not to Coterie's internal
 implementation.
 
 Agent harnesses remain external because the process boundary isolates
@@ -192,8 +192,8 @@ the harness offers, in this order:
 2. A documented JSON or JSONL non-interactive mode.
 3. A foreground terminal interface for interactive use.
 
-Majordomo does not link against internal Codex or other provider crates. Such
-crates are implementation details of their products and would couple Majordomo's
+Coterie does not link against internal Codex or other provider crates. Such
+crates are implementation details of their products and would couple Coterie's
 release cycle to theirs more tightly than a process protocol.
 
 External task trackers may be added later as explicit interoperability adapters.
@@ -202,8 +202,8 @@ for a run using the built-in tracker.
 
 ## Declarative configuration
 
-Global configuration lives at `$XDG_CONFIG_HOME/majordomo/config.toml`, falling
-back to `~/.config/majordomo/config.toml`.
+Global configuration lives at `$XDG_CONFIG_HOME/coterie/config.toml`, falling
+back to `~/.config/coterie/config.toml`.
 
 ```toml
 schema = 1
@@ -245,7 +245,7 @@ mode = "interactive"
 workspace = "project"
 permission_profile = "interactive"
 instructions = """
-Coordinate work through Majordomo. Delegate independent implementation and
+Coordinate work through Coterie. Delegate independent implementation and
 review tasks when useful, and report consolidated outcomes to the user.
 """
 capabilities = [
@@ -308,13 +308,13 @@ Configuration is resolved in this order:
 Later values replace earlier scalar and array values. Tables merge recursively.
 Every effective value retains provenance identifying its source layer and file.
 
-Majordomo provides the following inspection commands:
+Coterie provides the following inspection commands:
 
 ```console
-majordomo config check
-majordomo config show --effective --provenance
-majordomo config schema
-majordomo config lock
+coterie config check
+coterie config show --effective --provenance
+coterie config schema
+coterie config lock
 ```
 
 Unknown fields and unsupported schema versions are errors. Includes are
@@ -323,10 +323,10 @@ including file.
 
 Built-in archetypes use the reserved `builtin:` namespace and cannot be shadowed
 by global configuration. Global archetypes use `global:`. If no configuration
-exists, Majordomo uses `builtin:standard@1`.
+exists, Coterie uses `builtin:standard@1`.
 
-`majordomo config lock` explicitly writes `majordomo.lock`. The lock records the
-selected archetype reference, configuration schema, compatible Majordomo version
+`coterie config lock` explicitly writes `coterie.lock`. The lock records the
+selected archetype reference, configuration schema, compatible Coterie version
 range, provider requirements, and a SHA-256 digest of the portable effective
 configuration. It contains no secrets, executable paths, or host-specific
 values. When a lock is present, a mismatch fails with an actionable diagnostic
@@ -336,10 +336,10 @@ Project configuration is untrusted. It cannot define provider executables,
 instructions, hooks, host paths, environment-variable passthrough, capabilities,
 or permission profiles. Effective project settings are intersected with trusted
 global policy. Commands are represented as argument arrays and executed
-directly; Majordomo never evaluates configuration with `sh -c`.
+directly; Coterie never evaluates configuration with `sh -c`.
 
 The primary project selects the run archetype. When another project is attached,
-Majordomo loads that project's restrictions and lock, applies them to work
+Coterie loads that project's restrictions and lock, applies them to work
 targeting that project, and snapshots the result. An attached project's
 archetype selector cannot replace the active run archetype; an incompatible
 selector, lock, or restriction fails attachment with an actionable diagnostic.
@@ -347,21 +347,21 @@ selector, lock, or restriction fails attachment with an actionable diagnostic.
 The run-level effective configuration and its fingerprint are snapshotted when a
 run starts; each additional project's effective restriction overlay is
 snapshotted when it is attached. The initial product target does not hot-apply
-configuration changes to an active run. Starting Majordomo or attaching a
-project with a conflicting archetype or configuration reports the active
-snapshot and requires an explicit resolution.
+configuration changes to an active run. Starting Coterie or attaching a project
+with a conflicting archetype or configuration reports the active snapshot and
+requires an explicit resolution.
 
 ## Runtime architecture
 
 Each run has a supervisor process that is started automatically on demand. The
-foreground Majordomo process connects to the supervisor before it launches the
+foreground Coterie process connects to the supervisor before it launches the
 provider TUI.
 
 ```text
 sidekick.nvim or terminal
         |
         v
-foreground Majordomo process ---- foreground lead TUI
+foreground Coterie process ---- foreground lead TUI
         |
         v
 per-run supervisor
@@ -374,9 +374,9 @@ per-run supervisor
 ```
 
 The supervisor communicates through a Unix-domain socket under
-`$XDG_RUNTIME_DIR/majordomo/`. Durable state lives under
-`$XDG_STATE_HOME/majordomo/runs/<run-id>/`. A small local index beneath
-`$XDG_STATE_HOME/majordomo/projects/` records which active run, if any, holds a
+`$XDG_RUNTIME_DIR/coterie/`. Durable state lives under
+`$XDG_STATE_HOME/coterie/runs/<run-id>/`. A small local index beneath
+`$XDG_STATE_HOME/coterie/projects/` records which active run, if any, holds a
 project identity. This is disposable coordination metadata, not project
 registration or configuration.
 
@@ -395,10 +395,10 @@ lease, two runs attempting to cross-attach each other's projects fail visibly
 rather than deadlock. Stale sockets, leases, index entries, and interrupted
 attachment are repaired conservatively.
 
-Launching Majordomo from any project leased by a live run connects to that run
-or reports its identity before performing a conflicting action. The initial
-product target uses an exclusive lease; concurrent read-only attachment may be
-added later if it can preserve comprehensible ownership.
+Launching Coterie from any project leased by a live run connects to that run or
+reports its identity before performing a conflicting action. The initial product
+target uses an exclusive lease; concurrent read-only attachment may be added
+later if it can preserve comprehensible ownership.
 
 The supervisor is the single writer for the run database. CLI processes issue
 typed RPC requests rather than opening the database directly. This makes
@@ -438,7 +438,7 @@ dependency, and has no active claim.
 Claims are compare-and-set transitions performed in an immediate transaction.
 Claiming a task and creating its assignment are one database operation. Each
 initial job agent has at most one active assignment. Stable task IDs use a
-Majordomo namespace and collision-resistant identifier rather than database row
+Coterie namespace and collision-resistant identifier rather than database row
 numbers.
 
 A completed assignment moves its task to `submitted`; it does not by itself
@@ -454,7 +454,7 @@ sequences precise semantics: a bindings task remains blocked until the upstream
 library change has been integrated and validated in the library project. The
 closed task exposes a compact result record---including its project, relevant
 commits, summary, and test outcome---to downstream agents through
-`majordomo prime`.
+`coterie prime`.
 
 The store uses foreign keys, explicit schema migrations, bounded busy timeouts,
 and WAL mode where the platform supports it. Every mutating RPC accepts an
@@ -477,84 +477,82 @@ interface.
 
 ## Agent bootstrap and identity
 
-Majordomo injects a small provider-specific bootstrap instruction before an
-agent begins work. For providers such as Codex, this uses a supported developer-
-or system-instruction mechanism rather than modifying `AGENTS.md` or sending an
+Coterie injects a small provider-specific bootstrap instruction before an agent
+begins work. For providers such as Codex, this uses a supported developer- or
+system-instruction mechanism rather than modifying `AGENTS.md` or sending an
 ordinary first chat message.
 
 The bootstrap establishes only orchestration behavior:
 
 ```text
-You are the lead agent for Majordomo run 7b2f.
-Use the majordomo CLI for delegation and communication.
-Run `majordomo prime` now for current identity, peers, tasks, and command
-guidance.
+You are the lead agent for Coterie run 7b2f.
+Use the coterie CLI for delegation and communication.
+Run `coterie prime` now for current identity, peers, tasks, and command guidance.
 Follow the repository's AGENTS.md instructions for work in the project.
 ```
 
-Repository instructions remain the source of project conventions. Majordomo does
+Repository instructions remain the source of project conventions. Coterie does
 not generate, modify, shadow, or replace `AGENTS.md`. Each agent receives the
 instructions that apply to its assigned project's working directory. The
 bootstrap must avoid conflicting work instructions, while recognizing that the
 provider's instruction hierarchy may place injected developer instructions above
 repository files.
 
-Dynamic context is obtained through `majordomo prime` so agents can recover
-after compaction, provider resume, or a fresh session. Every agent process
-receives an identity-scoped environment:
+Dynamic context is obtained through `coterie prime` so agents can recover after
+compaction, provider resume, or a fresh session. Every agent process receives an
+identity-scoped environment:
 
 ```text
-MAJORDOMO_PROJECT_ROOT
-MAJORDOMO_PROJECT_ID
-MAJORDOMO_PRIMARY_PROJECT_ROOT
-MAJORDOMO_RUN_ID
-MAJORDOMO_AGENT_ID
-MAJORDOMO_ROLE
-MAJORDOMO_TASK_ID
-MAJORDOMO_SOCKET
-MAJORDOMO_TOKEN
+COTERIE_PROJECT_ROOT
+COTERIE_PROJECT_ID
+COTERIE_PRIMARY_PROJECT_ROOT
+COTERIE_RUN_ID
+COTERIE_AGENT_ID
+COTERIE_ROLE
+COTERIE_TASK_ID
+COTERIE_SOCKET
+COTERIE_TOKEN
 ```
 
-For a job agent, `MAJORDOMO_PROJECT_ROOT` and the process working directory
+For a job agent, `COTERIE_PROJECT_ROOT` and the process working directory
 identify the task's target project or isolated worktree. For the lead, they
-initially identify the primary project. `majordomo prime` always reports every
+initially identify the primary project. `coterie prime` always reports every
 attached project, its alias, the caller's access, and the target project of each
 visible task; agents should not infer project identity from repository names or
 relative paths.
 
 The token is random, scoped to one run, agent, and session generation, and
 rotated when the session is replaced. The supervisor stores a verifier rather
-than the raw token. Known credentials are redacted from Majordomo-controlled
-logs and transcripts.
+than the raw token. Known credentials are redacted from Coterie-controlled logs
+and transcripts.
 
 Startup injection is a declared provider capability. If an archetype requires
 guaranteed bootstrap instructions and the selected provider cannot supply them,
-Majordomo fails clearly rather than silently degrading to a normal user message.
+Coterie fails clearly rather than silently degrading to a normal user message.
 
 ## Agent and operator protocol
 
-Agents coordinate through the installed Majordomo binary:
+Agents coordinate through the installed Coterie binary:
 
 ```console
-majordomo whoami --json
-majordomo prime
-majordomo peers --json
+coterie whoami --json
+coterie prime
+coterie peers --json
 
-majordomo project attach ~/projects/eunoia-py --alias eunoia-py
-majordomo project list --json
+coterie project attach ~/projects/eunoia-py --alias eunoia-py
+coterie project list --json
 
-majordomo send reviewer-1 "Review the public API and error handling."
-majordomo inbox --wait --json
+coterie send reviewer-1 "Review the public API and error handling."
+coterie inbox --wait --json
 
-majordomo task ready --json
-majordomo task create "Implement API" --project primary --group feature-7
-majordomo task create "Update Python bindings" --project eunoia-py \
-  --after mt-01KUPSTREAM --input-from mt-01KUPSTREAM --group feature-7
-majordomo spawn worker --task mt-01K...
-majordomo finish --status completed \
-  --summary "Implemented the parser and added tests."
-majordomo workspace integrate --assignment ma-01K...
-majordomo task close mt-01K... --summary "Integrated and verified."
+coterie task ready --json
+coterie task create "Implement API" --project primary --group feature-7
+coterie task create "Update Python bindings" --project eunoia-py \
+  --after ct-01KUPSTREAM --input-from ct-01KUPSTREAM --group feature-7
+coterie spawn worker --task ct-01K...
+coterie finish --status completed --summary "Implemented the parser and added tests."
+coterie workspace integrate --assignment ca-01K...
+coterie task close ct-01K... --summary "Integrated and verified."
 ```
 
 This is the ordinary cross-project workflow, not a separate orchestration mode.
@@ -583,9 +581,9 @@ return their operation ID.
 Ordinary communication and lifecycle control are separate planes:
 
 ```console
-majordomo send worker-1 "Please check the failing integration test."
-majordomo agent interrupt worker-1
-majordomo agent terminate worker-1
+coterie send worker-1 "Please check the failing integration test."
+coterie agent interrupt worker-1
+coterie agent terminate worker-1
 ```
 
 A text message can never be interpreted as a process-control command. Lifecycle
@@ -597,19 +595,19 @@ idempotent. Delivery to a provider's live-steering interface is an optimization,
 not the durable acknowledgement. Agents check their inbox at startup, task
 boundaries, and before finishing.
 
-`majordomo finish` records the assignment outcome, summary, final session state,
+`coterie finish` records the assignment outcome, summary, final session state,
 and result metadata in one transaction. For a completed implementation task, it
 also records the reported base and result commits and moves the task to
 `submitted`. Task closure is permitted only when the caller has `task:close` and
 the task's acceptance condition is met; otherwise the submitted task remains
 visibly awaiting integration, review, or lead action.
 
-`majordomo workspace integrate` is an explicit, capability-checked operation
+`coterie workspace integrate` is an explicit, capability-checked operation
 requested by the lead or operator. It uses the workspace backend to apply a
 submitted result to that task's target project and records exact
 before-and-after identities. It preflights the operation without changing the
 target and refuses dirty targets, unexpected target tips, ambiguous histories,
-and conflicts. Majordomo does not autonomously choose an integration order or
+and conflicts. Coterie does not autonomously choose an integration order or
 resolve conflicts.
 
 ## Providers and session state
@@ -654,7 +652,7 @@ before launch.
 Codex is the first provider. In the initial product target:
 
 - the lead runs as an ordinary foreground Codex TUI owned by the foreground
-  Majordomo process;
+  Coterie process;
 - background workers run as bounded, non-interactive jobs using Codex's
   documented JSONL output;
 - each background worker starts in its assigned project or worktree, independent
@@ -665,16 +663,16 @@ Codex is the first provider. In the initial product target:
 
 Attaching a project does not silently widen a live provider's filesystem
 sandbox. If the foreground provider cannot add a root safely at runtime, the
-current lead coordinates that project through task-scoped workers and
-Majordomo's structured result and integration operations. An adapter may instead
-restart or resume the lead with the expanded project set when the provider
-supports that transition explicitly. `majordomo prime` reports the distinction
-between a project attached to the run and a project directly accessible to the
-current provider session.
+current lead coordinates that project through task-scoped workers and Coterie's
+structured result and integration operations. An adapter may instead restart or
+resume the lead with the expanded project set when the provider supports that
+transition explicitly. `coterie prime` reports the distinction between a project
+attached to the run and a project directly accessible to the current provider
+session.
 
 A structured Codex app-server adapter is a future capability path, not a
 requirement for the initial product target. The provider interface must
-accommodate it without making an experimental protocol part of Majordomo's core
+accommodate it without making an experimental protocol part of Coterie's core
 contract.
 
 Every provider adapter has a shared conformance suite covering launch, output
@@ -699,28 +697,28 @@ from the supervisor's or caller's current directory. This rule keeps
 cross-project delegation deterministic even when two repositories have similar
 names or layouts.
 
-For a Git-backed `--input-from` dependency, Majordomo materializes the closed
+For a Git-backed `--input-from` dependency, Coterie materializes the closed
 task's accepted tree, without repository administrative data, at its recorded
-integration commit beneath the consumer's workspace. It reports the alias,
-path, and commit through `majordomo prime`. This snapshot is contextual input,
-never an integration target, so provider writes to it cannot alter the upstream
-project. A task that requires a live external path or a non-Git input must
-request it explicitly and can launch only when the permission profile and
-provider can enforce the requested access.
+integration commit beneath the consumer's workspace. It reports the alias, path,
+and commit through `coterie prime`. This snapshot is contextual input, never an
+integration target, so provider writes to it cannot alter the upstream project.
+A task that requires a live external path or a non-Git input must request it
+explicitly and can launch only when the permission profile and provider can
+enforce the requested access.
 
-Majordomo uses `git2` for its own repository and worktree operations. Git
-behavior is isolated behind an internal workspace trait so its safety rules can
-be tested independently of provider behavior.
+Coterie uses `git2` for its own repository and worktree operations. Git behavior
+is isolated behind an internal workspace trait so its safety rules can be tested
+independently of provider behavior.
 
 A worker worktree is created from a recorded base commit beneath the run's state
 directory, partitioned by project and assignment identity. It uses a dedicated
-Majordomo-owned reference in the target repository named by run and assignment
-identity. Majordomo records desired ownership before creation and observed
+Coterie-owned reference in the target repository named by run and assignment
+identity. Coterie records desired ownership before creation and observed
 repository identity afterward.
 
-Before cleanup, Majordomo verifies all of the following:
+Before cleanup, Coterie verifies all of the following:
 
-- the path resolves beneath the expected Majordomo state directory;
+- the path resolves beneath the expected Coterie state directory;
 - the database records ownership by the current run and generation;
 - the Git administrative data identifies the expected repository and worktree;
 - no provider process still owns the workspace;
@@ -728,9 +726,9 @@ Before cleanup, Majordomo verifies all of the following:
   preserved;
 - the work has been integrated or the operator explicitly approves removal.
 
-Majordomo never automatically destroys a dirty, unintegrated, or otherwise
+Coterie never automatically destroys a dirty, unintegrated, or otherwise
 recoverable worktree. Failed cleanup leaves a diagnostic and a recoverable path.
-`majordomo doctor` reports stale and inconsistent ownership but does not repair
+`coterie doctor` reports stale and inconsistent ownership but does not repair
 destructive cases without explicit approval.
 
 Workers report their target project, base commit, result commit, summary, and
@@ -741,7 +739,7 @@ project's worktree or branch.
 
 Non-Git projects support `project` and enforceable `read-only` roles. An
 archetype requiring `worktree` fails clearly for a task targeting a non-Git
-project; Majordomo does not silently weaken isolation.
+project; Coterie does not silently weaken isolation.
 
 ## Reconciliation and supervision
 
@@ -785,31 +783,31 @@ that records the transition. Events have:
 - a concise human-readable summary.
 
 Watchers resume after a sequence cursor. This supports
-`majordomo events --follow`, status reconstruction, audit trails, and future
+`coterie events --follow`, status reconstruction, audit trails, and future
 editor integrations without coupling producers to consumers.
 
-Provider-native event frames may be retained separately, but Majordomo emits
+Provider-native event frames may be retained separately, but Coterie emits
 normalized lifecycle events for portable behavior. Unknown provider fields are
-preserved only in the raw transcript, not promoted into the stable Majordomo
-event schema accidentally.
+preserved only in the raw transcript, not promoted into the stable Coterie event
+schema accidentally.
 
-`majordomo doctor` checks at least supervisor reachability, database migrations,
+`coterie doctor` checks at least supervisor reachability, database migrations,
 configuration and lock compatibility, provider versions and capabilities,
 abandoned operations, stale assignments, task cycles, transcript accessibility,
 and worktree ownership.
 
 ## Trust and permission model
 
-Majordomo distinguishes these trust classes:
+Coterie distinguishes these trust classes:
 
-| Input or component                         | Trust                                 | Rule                                                                                                 |
-| ------------------------------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| Compiled defaults and global configuration | Trusted operator policy               | May select provider executables and grant maximum authority.                                         |
-| Project `majordomo.toml`                   | Untrusted declarative request         | May only select trusted definitions and reduce authority or limits.                                  |
-| Operator-attached project path             | Trusted host authority                | Must be canonicalized and explicitly attached; it grants no authority beyond resolved global policy. |
-| Repository content and task text           | Untrusted data to Majordomo           | Never becomes a command, path authority, or policy value through interpolation.                      |
-| Provider executable                        | Trusted operator-selected code        | Runs only with the resolved permission profile and explicit environment.                             |
-| Agent behavior                             | Untrusted within granted capabilities | Supervisor RPCs enforce identity, state transitions, and limits.                                     |
+  | Input or component                         | Trust                                 | Rule                                                                                                 |
+  | ------------------------------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+  | Compiled defaults and global configuration | Trusted operator policy               | May select provider executables and grant maximum authority.                                         |
+  | Project `coterie.toml`                     | Untrusted declarative request         | May only select trusted definitions and reduce authority or limits.                                  |
+  | Operator-attached project path             | Trusted host authority                | Must be canonicalized and explicitly attached; it grants no authority beyond resolved global policy. |
+  | Repository content and task text           | Untrusted data to Coterie             | Never becomes a command, path authority, or policy value through interpolation.                      |
+  | Provider executable                        | Trusted operator-selected code        | Runs only with the resolved permission profile and explicit environment.                             |
+  | Agent behavior                             | Untrusted within granted capabilities | Supervisor RPCs enforce identity, state transitions, and limits.                                     |
 
 Role capabilities and tokens protect the supervisor protocol from confused or
 accidental use. When agents and the operator run as the same Unix user with
@@ -832,7 +830,7 @@ allowlist. Attachment authority and provider filesystem authority are checked
 separately.
 
 Secrets and ambient environment variables are denied by default and passed only
-through trusted global configuration. Majordomo redacts exact known credential
+through trusted global configuration. Coterie redacts exact known credential
 values from storage it controls, stores token verifiers rather than raw tokens,
 and keeps runtime files private to the current user. It does not promise to
 sanitize a provider's independently managed transcript if the provider itself
@@ -869,7 +867,7 @@ prints or stores a secret.
 
 The complete initial product target includes:
 
-1. A single compiled `majordomo` binary, apart from the selected agent provider.
+1. A single compiled `coterie` binary, apart from the selected agent provider.
 2. Versioned built-in archetypes, trusted global archetypes, safe project
    restrictions, provenance, and optional lock files.
 3. Primary-project discovery, attached-project identities, exclusive leases, and
@@ -880,7 +878,7 @@ The complete initial product target includes:
    assignments, messages, operations, and typed events.
 6. Codex as the first provider, with one foreground lead and bounded one-shot
    background workers.
-7. Provider-level bootstrap injection and `majordomo prime`.
+7. Provider-level bootstrap injection and `coterie prime`.
 8. Authenticated agent RPC with durable inboxes and explicit acknowledgements.
 9. Native `git2` worktree creation, guarded integration, ownership fencing, and
    conservative cleanup in each target project.
@@ -917,7 +915,7 @@ fakes and the Codex adapter.
 
 ## Non-goals for the initial product target
 
-Majordomo initially does not provide:
+Coterie initially does not provide:
 
 - Beads or another required external task tracker;
 - cross-machine task synchronization;
@@ -934,14 +932,14 @@ Majordomo initially does not provide:
 - compatibility with every coding-agent CLI.
 
 These features may be considered later, but should not compromise the
-project-native experience or turn Majordomo into a general infrastructure
+project-native experience or turn Coterie into a general infrastructure
 platform.
 
 ## Design criterion
 
-The design succeeds when a user can open a project in Neovim, launch Majordomo
+The design succeeds when a user can open a project in Neovim, launch Coterie
 through sidekick.nvim, and converse naturally with one lead agent while that
-agent safely delegates work through the Majordomo CLI. The same conversation can
+agent safely delegates work through the Coterie CLI. The same conversation can
 implement a change in one project and then update a dependent project, with each
 worker launched in the correct working directory and the downstream task blocked
 until the upstream result is integrated and verified. Configuration is
