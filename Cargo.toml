@@ -10,7 +10,6 @@ license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["agents", "automation", "cli", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
-publish = false
 
 [dependencies]
 
