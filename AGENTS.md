@@ -80,8 +80,8 @@ components in `DESIGN.md`: `cli`, `config`, `project`, `supervisor`, `protocol`,
 `providers`, `tasks`, `workspace`, `state`, and `transcript`. Extract a crate
 only when a tested boundary or independent consumer justifies it.
 
-- The supervisor is the only writer to a run database. Other processes use
-  typed RPC and never open it for mutation.
+- The supervisor is the only writer to a run database. Other processes use typed
+  RPC and never open it for mutation.
 - SQLite provides transactions and storage; Coterie owns task and orchestration
   semantics. Add schema changes as forward migrations and test upgrades from
   every released schema.
@@ -162,4 +162,3 @@ messages, and include `Fixes`, `Closes`, or `Refs` when a change corresponds to
 an issue. Create a branch when a change spans multiple project areas, alters a
 public interface or schema, or requires a migration; otherwise work on the
 default branch.
-
