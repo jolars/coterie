@@ -18,16 +18,17 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep};
 
-use crate::id::{OperationId, ProjectId, RunId};
+use crate::auth::{AgentToken, SessionScope};
+use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
 use crate::project::{
     ActiveRunEntry, ActiveRunIndex, CoterieDirectories, DiscoveredProject,
     LeaseAttempt, ProjectError, ProjectLease,
 };
 use crate::protocol::{
-    ClientMessage, FrameError, HandshakeRequest, HandshakeResponse,
-    PROTOCOL_VERSION, RpcFailure, RpcFailureCode, RpcRequest, RpcResponse,
-    RpcResult, ServerMessage, VersionedRequest, VersionedResponse, read_frame,
-    write_frame,
+    ClientMessage, ConnectionChannel, FrameError, HandshakeRequest,
+    HandshakeResponse, PROTOCOL_VERSION, RequestAuthentication, RpcFailure,
+    RpcFailureCode, RpcRequest, RpcResponse, RpcResult, ServerMessage,
+    VersionedRequest, VersionedResponse, read_frame, write_frame,
 };
 use crate::state::{
     Mutation, MutationOutcome, ProjectRecord, RunRecord, Store, StoreError,
@@ -92,7 +93,8 @@ pub(crate) async fn run_from_environment() -> Result<(), SupervisorError> {
                 .ok_or(SupervisorError::NoActiveRun)?;
             let socket_path = checked_socket_path(&directories, entry.run_id)?;
             let mut client =
-                SupervisorClient::connect_at(&socket_path, &entry).await?;
+                SupervisorClient::connect_operator_at(&socket_path, &entry)
+                    .await?;
             let operation_id = OperationId::generate();
             let response = client.shutdown(operation_id).await?;
             if response
@@ -173,7 +175,7 @@ pub(crate) async fn connect_or_start(
     let index = ActiveRunIndex::new(directories);
     let indexed = index.lookup(&project.identity)?;
     if let Some(entry) = &indexed {
-        match SupervisorClient::connect_at(
+        match SupervisorClient::connect_operator_at(
             &checked_socket_path(directories, entry.run_id)?,
             entry,
         )
@@ -243,7 +245,7 @@ async fn await_startup(
     let mut child_status = None;
     loop {
         if let Some(entry) = index.lookup(&project.identity)? {
-            match SupervisorClient::connect_at(
+            match SupervisorClient::connect_operator_at(
                 &checked_socket_path(directories, entry.run_id)?,
                 &entry,
             )
@@ -396,6 +398,12 @@ async fn serve_listener(
 }
 
 enum SupervisorCommand {
+    AuthenticateAgent {
+        agent_id: AgentId,
+        session_id: SessionId,
+        token: AgentToken,
+        response: oneshot::Sender<Result<Option<SessionScope>, RpcFailure>>,
+    },
     Shutdown {
         operation_id: OperationId,
         response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
@@ -408,6 +416,22 @@ fn handle_command(
     command: SupervisorCommand,
 ) {
     match command {
+        SupervisorCommand::AuthenticateAgent {
+            agent_id,
+            session_id,
+            token,
+            response,
+        } => {
+            let result =
+                authenticate_agent(store, run_id, agent_id, session_id, &token)
+                    .map_err(|error| {
+                        RpcFailure::new(
+                            RpcFailureCode::Internal,
+                            error.to_string(),
+                        )
+                    });
+            let _request_may_have_disconnected = response.send(result);
+        }
         SupervisorCommand::Shutdown {
             operation_id,
             response,
@@ -420,6 +444,32 @@ fn handle_command(
             let _request_may_have_disconnected = response.send(result);
         }
     }
+}
+
+fn authenticate_agent(
+    store: &mut Store,
+    run_id: RunId,
+    agent_id: AgentId,
+    session_id: SessionId,
+    token: &AgentToken,
+) -> Result<Option<SessionScope>, StoreError> {
+    store.transaction(|repositories| {
+        let Some(credential) = repositories
+            .active_session_credential(run_id, agent_id, session_id)?
+        else {
+            return Ok(None);
+        };
+        let scope = SessionScope {
+            run_id: credential.run_id,
+            agent_id: credential.agent_id,
+            session_id: credential.session_id,
+            generation: credential.generation,
+        };
+        Ok(credential
+            .token_verifier
+            .verify(token, scope)
+            .then_some(scope))
+    })
 }
 
 fn persist_shutdown(
@@ -573,12 +623,52 @@ pub(crate) struct SupervisorClient {
     stream: UnixStream,
     run_id: crate::id::RunId,
     next_request_id: u64,
+    authentication: RequestAuthentication,
 }
 
 impl SupervisorClient {
-    pub(crate) async fn connect_at(
+    pub(crate) async fn connect_operator_at(
         socket_path: &Path,
         expected: &ActiveRunEntry,
+    ) -> Result<Self, SupervisorError> {
+        Self::connect_with(
+            socket_path,
+            expected,
+            ConnectionChannel::Operator,
+            RequestAuthentication::Operator,
+        )
+        .await
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the next M2 provider-lifecycle item launches the first agent client"
+    )]
+    pub(crate) async fn connect_agent_at(
+        socket_path: &Path,
+        expected: &ActiveRunEntry,
+        agent_id: AgentId,
+        session_id: SessionId,
+        token: AgentToken,
+    ) -> Result<Self, SupervisorError> {
+        Self::connect_with(
+            socket_path,
+            expected,
+            ConnectionChannel::Agent,
+            RequestAuthentication::Agent {
+                agent_id,
+                session_id,
+                token,
+            },
+        )
+        .await
+    }
+
+    async fn connect_with(
+        socket_path: &Path,
+        expected: &ActiveRunEntry,
+        channel: ConnectionChannel,
+        authentication: RequestAuthentication,
     ) -> Result<Self, SupervisorError> {
         let mut stream =
             UnixStream::connect(socket_path).await.map_err(|source| {
@@ -594,6 +684,7 @@ impl SupervisorClient {
                 protocol_version: PROTOCOL_VERSION,
                 expected_run_id: expected.run_id,
                 project_key: expected.project_key.clone(),
+                channel,
             }),
         )
         .await?;
@@ -609,6 +700,7 @@ impl SupervisorClient {
                     stream,
                     run_id: response.run_id,
                     next_request_id: 1,
+                    authentication,
                 })
             }
             ServerMessage::Handshake(_) => Err(SupervisorError::InvalidProof),
@@ -653,6 +745,7 @@ impl SupervisorClient {
             &ClientMessage::Request(VersionedRequest {
                 protocol_version: PROTOCOL_VERSION,
                 request_id,
+                authentication: self.authentication.clone(),
                 request,
             }),
         )
@@ -712,6 +805,7 @@ async fn serve_connection(
     )
     .await?;
 
+    let channel = handshake.channel;
     let mut last_request_id = 0;
     loop {
         let request = match read_frame::<_, ClientMessage>(&mut stream).await? {
@@ -752,22 +846,43 @@ async fn serve_connection(
             )
         } else {
             last_request_id = request.request_id;
-            match request.request {
-                RpcRequest::Ping => (
-                    RpcResult::Ok(RpcResponse::Pong {
-                        run_id: active.run_id,
-                    }),
-                    false,
-                ),
-                RpcRequest::Shutdown { operation_id } => {
-                    let result =
-                        request_shutdown(&commands, operation_id).await?;
-                    let shutting_down = matches!(
-                        result,
-                        RpcResult::Ok(RpcResponse::ShuttingDown { .. })
-                    );
-                    (result, shutting_down)
-                }
+            match authenticate_request(
+                &commands,
+                active.run_id,
+                channel,
+                request.authentication,
+            )
+            .await?
+            {
+                Ok(caller) => match request.request {
+                    RpcRequest::Ping => (
+                        RpcResult::Ok(RpcResponse::Pong {
+                            run_id: active.run_id,
+                        }),
+                        false,
+                    ),
+                    RpcRequest::Shutdown { operation_id } => {
+                        if caller.is_operator() {
+                            let result =
+                                request_shutdown(&commands, operation_id)
+                                    .await?;
+                            let shutting_down = matches!(
+                                result,
+                                RpcResult::Ok(RpcResponse::ShuttingDown { .. })
+                            );
+                            (result, shutting_down)
+                        } else {
+                            (
+                                RpcResult::Err(RpcFailure::new(
+                                    RpcFailureCode::PermissionDenied,
+                                    "agent credentials do not grant operator authority",
+                                )),
+                                false,
+                            )
+                        }
+                    }
+                },
+                Err(failure) => (RpcResult::Err(failure), false),
             }
         };
         write_frame(
@@ -786,6 +901,70 @@ async fn serve_connection(
                 .map_err(|_| SupervisorError::ShutdownChannelClosed)?;
             return Ok(());
         }
+    }
+}
+
+enum AuthenticatedCaller {
+    Operator,
+    Agent(SessionScope),
+}
+
+impl AuthenticatedCaller {
+    fn is_operator(&self) -> bool {
+        match self {
+            Self::Operator => true,
+            Self::Agent(scope) => {
+                let _authenticated_identity = scope;
+                false
+            }
+        }
+    }
+}
+
+async fn authenticate_request(
+    commands: &mpsc::Sender<SupervisorCommand>,
+    run_id: RunId,
+    channel: ConnectionChannel,
+    authentication: RequestAuthentication,
+) -> Result<Result<AuthenticatedCaller, RpcFailure>, SupervisorError> {
+    match (channel, authentication) {
+        (ConnectionChannel::Operator, RequestAuthentication::Operator) => {
+            Ok(Ok(AuthenticatedCaller::Operator))
+        }
+        (
+            ConnectionChannel::Agent,
+            RequestAuthentication::Agent {
+                agent_id,
+                session_id,
+                token,
+            },
+        ) => {
+            let (response, receiver) = oneshot::channel();
+            commands
+                .send(SupervisorCommand::AuthenticateAgent {
+                    agent_id,
+                    session_id,
+                    token,
+                    response,
+                })
+                .await
+                .map_err(|_| SupervisorError::CommandChannelClosed)?;
+            match receiver.await {
+                Ok(Ok(Some(scope))) if scope.run_id == run_id => {
+                    Ok(Ok(AuthenticatedCaller::Agent(scope)))
+                }
+                Ok(Ok(Some(_)) | Ok(None)) => Ok(Err(RpcFailure::new(
+                    RpcFailureCode::Unauthenticated,
+                    "agent credentials are invalid or no longer active",
+                ))),
+                Ok(Err(failure)) => Ok(Err(failure)),
+                Err(_) => Err(SupervisorError::CommandChannelClosed),
+            }
+        }
+        _ => Ok(Err(RpcFailure::new(
+            RpcFailureCode::Unauthenticated,
+            "request credentials do not match the established channel",
+        ))),
     }
 }
 
@@ -979,18 +1158,28 @@ mod tests {
 
     use super::{
         SupervisorClient, SupervisorCommand, SupervisorError, persist_shutdown,
-        serve_connection, validate_handshake, validate_socket_path,
+        serve_connection, serve_listener, validate_handshake,
+        validate_socket_path,
     };
-    use crate::id::{OperationId, ProjectId, RunId};
+    use crate::auth::{AgentToken, SessionScope};
+    use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
     use crate::project::{ActiveRunEntry, ProjectIdentity};
     use crate::protocol::{
-        ClientMessage, HandshakeRequest, RpcFailureCode, RpcResponse,
-        ServerMessage, VersionedRequest, read_frame, write_frame,
+        ClientMessage, ConnectionChannel, HandshakeRequest,
+        RequestAuthentication, RpcFailureCode, RpcResponse, ServerMessage,
+        VersionedRequest, read_frame, write_frame,
     };
-    use crate::state::{RunRecord, Store, StoreError};
+    use crate::state::{
+        AgentRecord, RunRecord, SessionCredentialRecord, SessionRecord, Store,
+        StoreError,
+    };
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
+    const AGENT_ID: &str = "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX";
+    const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+    const TOKEN: &str =
+        "cot1_000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
     #[tokio::test]
     async fn live_handshake_and_typed_ping_prove_the_indexed_owner() {
@@ -1006,13 +1195,21 @@ mod tests {
             .parse::<OperationId>()
             .expect("valid operation ID");
         let command_server = tokio::spawn(async move {
-            let SupervisorCommand::Shutdown {
-                operation_id,
-                response,
-            } = command_rx
+            let (operation_id, response) = match command_rx
                 .recv()
                 .await
-                .expect("the shutdown command should arrive");
+                .expect("the shutdown command should arrive")
+            {
+                SupervisorCommand::Shutdown {
+                    operation_id,
+                    response,
+                } => (operation_id, response),
+                SupervisorCommand::AuthenticateAgent { .. } => {
+                    panic!(
+                        "the operator ping must not use agent authentication"
+                    )
+                }
+            };
             response
                 .send(Ok(RpcResponse::ShuttingDown {
                     run_id: server_entry.run_id,
@@ -1028,7 +1225,7 @@ mod tests {
                 .await
         });
 
-        let mut client = SupervisorClient::connect_at(&socket, &entry)
+        let mut client = SupervisorClient::connect_operator_at(&socket, &entry)
             .await
             .expect("the handshake should succeed");
         assert_eq!(
@@ -1079,9 +1276,10 @@ mod tests {
                 .await
         });
 
-        let error = SupervisorClient::connect_at(&socket, &client_entry)
-            .await
-            .expect_err("the project mismatch must be rejected");
+        let error =
+            SupervisorClient::connect_operator_at(&socket, &client_entry)
+                .await
+                .expect_err("the project mismatch must be rejected");
 
         assert!(matches!(
             error,
@@ -1104,6 +1302,7 @@ mod tests {
             protocol_version: crate::protocol::PROTOCOL_VERSION,
             expected_run_id: RunId::generate(),
             project_key: active.project_key.clone(),
+            channel: ConnectionChannel::Operator,
         };
 
         assert_eq!(
@@ -1159,6 +1358,7 @@ mod tests {
             &ClientMessage::Request(VersionedRequest {
                 protocol_version: 1,
                 request_id: 1,
+                authentication: RequestAuthentication::Operator,
                 request: crate::protocol::RpcRequest::Ping,
             }),
         )
@@ -1177,6 +1377,129 @@ mod tests {
             .await
             .expect("the server task should finish")
             .expect("a rejected sequence is handled normally");
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_authenticates_the_current_session_without_operator_authority()
+     {
+        let fixture = TestDirectory::new();
+        let socket = fixture.join("supervisor.sock");
+        let active = entry(&fixture.join("project"));
+        let listener = UnixListener::bind(&socket)
+            .expect("the fixture socket should bind");
+        let agent_id = AGENT_ID.parse::<AgentId>().expect("valid agent ID");
+        let session_id =
+            SESSION_ID.parse::<SessionId>().expect("valid session ID");
+        let token = TOKEN.parse::<AgentToken>().expect("valid agent token");
+        let scope = SessionScope {
+            run_id: active.run_id,
+            agent_id,
+            session_id,
+            generation: 2,
+        };
+        let mut store = Store::open(&fixture.join("state.sqlite3"))
+            .expect("the store should open");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: active.run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_agent(&AgentRecord {
+                    id: agent_id,
+                    run_id: active.run_id,
+                    role: "worker".to_owned(),
+                    generation: scope.generation,
+                    state: "running".to_owned(),
+                    created_at: 11,
+                })?;
+                repositories.insert_session(&SessionRecord {
+                    id: session_id,
+                    run_id: active.run_id,
+                    agent_id,
+                    generation: scope.generation,
+                    provider: "fake".to_owned(),
+                    state: "running".to_owned(),
+                    transcript_path: PathBuf::from("transcripts/session.jsonl"),
+                    created_at: 12,
+                    ended_at: None,
+                })?;
+                repositories.activate_session_credential(
+                    &SessionCredentialRecord {
+                        session_id,
+                        run_id: active.run_id,
+                        agent_id,
+                        generation: scope.generation,
+                        token_verifier: token.verifier(scope),
+                        created_at: 12,
+                        revoked_at: None,
+                    },
+                )
+            })
+            .expect("the active session should be inserted");
+        let served_entry = active.clone();
+        let server = tokio::spawn(async move {
+            serve_listener(listener, served_entry, &mut store).await
+        });
+
+        let mut wrong_token_client = SupervisorClient::connect_agent_at(
+            &socket,
+            &active,
+            agent_id,
+            session_id,
+            AgentToken::generate().expect("randomness should be available"),
+        )
+        .await
+        .expect("the agent channel handshake should succeed");
+        assert!(matches!(
+            wrong_token_client.ping().await,
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::Unauthenticated,
+                ..
+            })
+        ));
+        wrong_token_client.authentication = RequestAuthentication::Operator;
+        assert!(matches!(
+            wrong_token_client.ping().await,
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::Unauthenticated,
+                ..
+            })
+        ));
+
+        let mut agent = SupervisorClient::connect_agent_at(
+            &socket, &active, agent_id, session_id, token,
+        )
+        .await
+        .expect("the agent channel handshake should succeed");
+        assert_eq!(
+            agent.ping().await.expect("the token should authenticate"),
+            RpcResponse::Pong {
+                run_id: active.run_id,
+            }
+        );
+        assert!(matches!(
+            agent.shutdown(OperationId::generate()).await,
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::PermissionDenied,
+                ..
+            })
+        ));
+
+        let mut operator =
+            SupervisorClient::connect_operator_at(&socket, &active)
+                .await
+                .expect("the operator channel handshake should succeed");
+        operator
+            .shutdown(OperationId::generate())
+            .await
+            .expect("the operator should stop the run");
+        server
+            .await
+            .expect("the server task should finish")
+            .expect("the listener should shut down cleanly");
     }
 
     #[test]

@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::id::{OperationId, ProjectId, RunId};
+use crate::auth::AgentToken;
+use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
 use crate::project::ProjectKey;
 
 pub(crate) const PROTOCOL_VERSION: u16 = 1;
@@ -27,6 +28,15 @@ pub(crate) struct HandshakeRequest {
     pub(crate) protocol_version: u16,
     pub(crate) expected_run_id: RunId,
     pub(crate) project_key: ProjectKey,
+    pub(crate) channel: ConnectionChannel,
+}
+
+/// The intentionally separate caller path established for one connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConnectionChannel {
+    Operator,
+    Agent,
 }
 
 /// A typed request with connection-local correlation.
@@ -35,7 +45,20 @@ pub(crate) struct HandshakeRequest {
 pub(crate) struct VersionedRequest {
     pub(crate) protocol_version: u16,
     pub(crate) request_id: u64,
+    pub(crate) authentication: RequestAuthentication,
     pub(crate) request: RpcRequest,
+}
+
+/// Credentials carried by each request after the channel handshake.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "caller", rename_all = "snake_case")]
+pub(crate) enum RequestAuthentication {
+    Operator,
+    Agent {
+        agent_id: AgentId,
+        session_id: SessionId,
+        token: AgentToken,
+    },
 }
 
 /// Operations currently provided by the supervisor transport.
@@ -125,6 +148,8 @@ pub(crate) enum RpcFailureCode {
     ProjectMismatch,
     HandshakeRequired,
     InvalidRequestSequence,
+    Unauthenticated,
+    PermissionDenied,
     Internal,
 }
 
@@ -194,10 +219,12 @@ mod tests {
     use tokio::io::{AsyncWriteExt, duplex};
 
     use super::{
-        ClientMessage, FrameError, HandshakeRequest, MAXIMUM_FRAME_LENGTH,
-        RpcRequest, VersionedRequest, read_frame, write_frame,
+        ClientMessage, ConnectionChannel, FrameError, HandshakeRequest,
+        MAXIMUM_FRAME_LENGTH, RequestAuthentication, RpcRequest,
+        VersionedRequest, read_frame, write_frame,
     };
-    use crate::id::{OperationId, RunId};
+    use crate::auth::AgentToken;
+    use crate::id::{AgentId, OperationId, RunId, SessionId};
     use crate::project::ProjectKey;
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -210,6 +237,7 @@ mod tests {
         let message = ClientMessage::Request(VersionedRequest {
             protocol_version: 1,
             request_id: 7,
+            authentication: RequestAuthentication::Operator,
             request: RpcRequest::Shutdown { operation_id },
         });
 
@@ -220,6 +248,9 @@ mod tests {
                 "body": {
                     "protocol_version": 1,
                     "request_id": 7,
+                    "authentication": {
+                        "caller": "operator"
+                    },
                     "request": {
                         "method": "shutdown",
                         "parameters": {
@@ -241,6 +272,7 @@ mod tests {
                 "8da92545f14c259a7e013179f6d9709517f20fe830df519c48e21d393f53f7a5",
             )
             .expect("valid project key"),
+            channel: ConnectionChannel::Operator,
         });
 
         write_frame(&mut writer, &message)
@@ -259,6 +291,7 @@ mod tests {
         let message = ClientMessage::Request(VersionedRequest {
             protocol_version: 1,
             request_id: 42,
+            authentication: RequestAuthentication::Operator,
             request: RpcRequest::Ping,
         });
 
@@ -272,6 +305,48 @@ mod tests {
                 .expect("the request should decode"),
             message
         );
+    }
+
+    #[test]
+    fn agent_request_wire_shape_carries_scoped_credentials_but_debug_redacts_them()
+     {
+        let token: AgentToken =
+            "cot1_000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+                .parse()
+                .expect("valid token");
+        let message = ClientMessage::Request(VersionedRequest {
+            protocol_version: 1,
+            request_id: 9,
+            authentication: RequestAuthentication::Agent {
+                agent_id: "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX"
+                    .parse::<AgentId>()
+                    .expect("valid agent ID"),
+                session_id: "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY"
+                    .parse::<SessionId>()
+                    .expect("valid session ID"),
+                token: token.clone(),
+            },
+            request: RpcRequest::Ping,
+        });
+
+        assert_eq!(
+            serde_json::to_value(&message).expect("the request should encode"),
+            json!({
+                "type": "request",
+                "body": {
+                    "protocol_version": 1,
+                    "request_id": 9,
+                    "authentication": {
+                        "caller": "agent",
+                        "agent_id": "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                        "session_id": "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY",
+                        "token": token.expose_secret(),
+                    },
+                    "request": { "method": "ping" }
+                }
+            })
+        );
+        assert!(!format!("{message:?}").contains(&token.expose_secret()));
     }
 
     #[tokio::test]

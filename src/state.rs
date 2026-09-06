@@ -3,6 +3,7 @@
 #[cfg(test)]
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value as JsonValue, json};
 use thiserror::Error;
 
+use crate::auth::TokenVerifier;
 use crate::id::{
     AgentId, AssignmentId, EventId, MessageId, OperationId, ProjectId, RunId,
     SessionId, TaskId,
@@ -34,6 +36,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "claim_invariants",
         sql: include_str!("state/migrations/0002_claim_invariants.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "session_credentials",
+        sql: include_str!("state/migrations/0003_session_credentials.sql"),
     },
 ];
 
@@ -84,6 +91,10 @@ pub(crate) enum StoreError {
     /// Orderly shutdown did not find the expected active run.
     #[error("run `{id}` is not active during orderly shutdown")]
     RunNotActive { id: RunId },
+
+    /// A credential already marked inactive cannot be activated again.
+    #[error("session `{session_id}` credential is already revoked")]
+    CredentialAlreadyRevoked { session_id: SessionId },
 }
 
 /// The supervisor-owned connection to one run database.
@@ -149,6 +160,18 @@ pub(crate) struct SessionRecord {
     pub(crate) transcript_path: PathBuf,
     pub(crate) created_at: i64,
     pub(crate) ended_at: Option<i64>,
+}
+
+/// The durable, non-secret verifier for one provider session credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionCredentialRecord {
+    pub(crate) session_id: SessionId,
+    pub(crate) run_id: RunId,
+    pub(crate) agent_id: AgentId,
+    pub(crate) generation: i64,
+    pub(crate) token_verifier: TokenVerifier,
+    pub(crate) created_at: i64,
+    pub(crate) revoked_at: Option<i64>,
 }
 
 /// A lightweight group of related tasks.
@@ -873,6 +896,93 @@ impl Repositories<'_, '_> {
                         ended_at: row.get(8)?,
                     })
                 },
+            )
+            .optional()?)
+    }
+
+    /// Replaces an agent's active credential with the verifier for a new session.
+    pub(crate) fn activate_session_credential(
+        &self,
+        credential: &SessionCredentialRecord,
+    ) -> Result<(), StoreError> {
+        if credential.revoked_at.is_some() {
+            return Err(StoreError::CredentialAlreadyRevoked {
+                session_id: credential.session_id,
+            });
+        }
+        self.transaction.execute(
+            "UPDATE session_credentials SET revoked_at = ?3 \
+             WHERE run_id = ?1 AND agent_id = ?2 AND revoked_at IS NULL",
+            params![
+                credential.run_id,
+                credential.agent_id,
+                credential.created_at,
+            ],
+        )?;
+        self.transaction.execute(
+            "INSERT INTO session_credentials (\
+                 session_id, run_id, agent_id, generation, token_verifier, created_at, revoked_at\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+            params![
+                credential.session_id,
+                credential.run_id,
+                credential.agent_id,
+                credential.generation,
+                credential.token_verifier.as_bytes().as_slice(),
+                credential.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn session_credential(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Option<SessionCredentialRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT session_id, run_id, agent_id, generation, token_verifier, \
+                        created_at, revoked_at \
+                 FROM session_credentials WHERE session_id = ?1",
+                [session_id],
+                decode_session_credential,
+            )
+            .optional()?)
+    }
+
+    /// Resolves only the unrevoked credential for the agent's current live generation.
+    pub(crate) fn active_session_credential(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) -> Result<Option<SessionCredentialRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT credential.session_id, credential.run_id, credential.agent_id, \
+                        credential.generation, credential.token_verifier, \
+                        credential.created_at, credential.revoked_at \
+                 FROM session_credentials AS credential \
+                 JOIN sessions AS session \
+                   ON session.run_id = credential.run_id \
+                  AND session.agent_id = credential.agent_id \
+                  AND session.id = credential.session_id \
+                  AND session.generation = credential.generation \
+                 JOIN agents AS agent \
+                   ON agent.run_id = credential.run_id \
+                  AND agent.id = credential.agent_id \
+                  AND agent.generation = credential.generation \
+                 JOIN runs AS run ON run.id = credential.run_id \
+                 WHERE credential.run_id = ?1 \
+                   AND credential.agent_id = ?2 \
+                   AND credential.session_id = ?3 \
+                   AND credential.revoked_at IS NULL \
+                   AND session.ended_at IS NULL \
+                   AND run.status = 'active'",
+                params![run_id, agent_id, session_id],
+                decode_session_credential,
             )
             .optional()?)
     }
@@ -1745,6 +1855,35 @@ fn decode_path(
     Ok(PathBuf::from(OsString::from_vec(bytes)))
 }
 
+fn decode_session_credential(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SessionCredentialRecord> {
+    let verifier = row.get::<_, Vec<u8>>(4)?;
+    let verifier: [u8; 32] =
+        verifier.try_into().map_err(|bytes: Vec<u8>| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                Type::Blob,
+                Box::new(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "credential verifier has {} bytes, expected 32",
+                        bytes.len()
+                    ),
+                )),
+            )
+        })?;
+    Ok(SessionCredentialRecord {
+        session_id: row.get(0)?,
+        run_id: row.get(1)?,
+        agent_id: row.get(2)?,
+        generation: row.get(3)?,
+        token_verifier: TokenVerifier::from_bytes(verifier),
+        created_at: row.get(5)?,
+        revoked_at: row.get(6)?,
+    })
+}
+
 fn decode_json<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
 where
     T: DeserializeOwned,
@@ -1792,10 +1931,11 @@ mod tests {
         ClaimRejection, ClaimTaskMutation, ClaimTaskResult, CommentRecord,
         ConfigurationSnapshotRecord, DependencyRecord, EventRecord, MIGRATIONS,
         MessageRecord, Mutation, MutationOutcome, OperationRecord,
-        ProjectRecord, RunRecord, SessionRecord, Store, TaskGroupRecord,
-        TaskRecord, TaskTransitionMutation, TaskTransitionRejection,
-        TaskTransitionResult, WorkspaceRecord,
+        ProjectRecord, RunRecord, SessionCredentialRecord, SessionRecord,
+        Store, TaskGroupRecord, TaskRecord, TaskTransitionMutation,
+        TaskTransitionRejection, TaskTransitionResult, WorkspaceRecord,
     };
+    use crate::auth::{AgentToken, SessionScope};
     use crate::id::{
         AgentId, AssignmentId, EventId, MessageId, OperationId, ProjectId,
         RunId, SessionId, TaskId,
@@ -1816,6 +1956,9 @@ mod tests {
     const SECOND_ASSIGNMENT_ID: &str = "ca-01ARZ3NDEKTSV4RRFFQ69G5FB5";
     const SECOND_OPERATION_ID: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FB6";
     const SECOND_TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FB7";
+    const SECOND_SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FB8";
+    const TOKEN: &str =
+        "cot1_000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
     #[test]
     fn a_new_store_applies_the_complete_initial_schema() {
@@ -1834,6 +1977,7 @@ mod tests {
             "projects",
             "runs",
             "schema_migrations",
+            "session_credentials",
             "sessions",
             "task_dependencies",
             "task_groups",
@@ -2701,59 +2845,114 @@ mod tests {
             })
             .expect("the migration ledger should be readable");
 
-        assert_eq!(applied, 2);
+        assert_eq!(applied, 3);
     }
 
     #[test]
-    fn a_version_one_database_upgrades_through_the_forward_migration() {
-        let database = TestDatabase::new();
-        let connection = Connection::open(&database.0)
-            .expect("the version-one database should open");
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_migrations (\
-                     version INTEGER PRIMARY KEY,\
-                     name TEXT NOT NULL,\
-                     source TEXT NOT NULL,\
-                     applied_at INTEGER NOT NULL DEFAULT (unixepoch())\
-                 ) STRICT;",
-            )
-            .expect("the migration ledger should be created");
-        connection
-            .execute_batch(MIGRATIONS[0].sql)
-            .expect("the version-one schema should be created");
-        connection
-            .execute(
-                "INSERT INTO schema_migrations (version, name, source) VALUES (1, ?1, ?2)",
-                (MIGRATIONS[0].name, MIGRATIONS[0].sql),
-            )
-            .expect("the version-one migration should be recorded");
-        drop(connection);
+    fn every_released_schema_upgrades_through_all_forward_migrations() {
+        for prior_count in 1..MIGRATIONS.len() {
+            let database = TestDatabase::new();
+            let connection = Connection::open(&database.0)
+                .expect("the prior database should open");
+            connection
+                .execute_batch(
+                    "CREATE TABLE schema_migrations (\
+                         version INTEGER PRIMARY KEY,\
+                         name TEXT NOT NULL,\
+                         source TEXT NOT NULL,\
+                         applied_at INTEGER NOT NULL DEFAULT (unixepoch())\
+                     ) STRICT;",
+                )
+                .expect("the migration ledger should be created");
+            for migration in &MIGRATIONS[..prior_count] {
+                connection
+                    .execute_batch(migration.sql)
+                    .expect("the prior schema should be created");
+                connection
+                    .execute(
+                        "INSERT INTO schema_migrations (version, name, source) \
+                         VALUES (?1, ?2, ?3)",
+                        (migration.version, migration.name, migration.sql),
+                    )
+                    .expect("the prior migration should be recorded");
+            }
+            connection
+                .execute(
+                    "INSERT INTO runs (id, status, created_at) \
+                     VALUES (?1, 'active', 10)",
+                    [RUN_ID],
+                )
+                .expect("the prior run should be inserted");
+            connection
+                .execute(
+                    "INSERT INTO agents (\
+                         id, run_id, role, generation, state, created_at\
+                     ) VALUES (?1, ?2, 'worker', 2, 'running', 11)",
+                    rusqlite::params![AGENT_ID, RUN_ID],
+                )
+                .expect("the prior agent should be inserted");
+            connection
+                .execute(
+                    "INSERT INTO sessions (\
+                         id, run_id, agent_id, generation, provider, state, \
+                         transcript_path, created_at\
+                     ) VALUES (\
+                         ?1, ?2, ?3, 2, 'fake', 'running', ?4, 12\
+                     )",
+                    rusqlite::params![
+                        SESSION_ID,
+                        RUN_ID,
+                        AGENT_ID,
+                        b"transcripts/prior.jsonl".as_slice(),
+                    ],
+                )
+                .expect("the prior session should be inserted");
+            drop(connection);
 
-        let store =
-            Store::open(&database.0).expect("the database should upgrade");
-        let applied = store
-            .connection
-            .query_row("SELECT count(*) FROM schema_migrations", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("the migration ledger should be readable");
-        let claim_indexes = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM sqlite_schema \
-                 WHERE type = 'index' AND name IN (\
-                     'one_claim_per_operation',\
-                     'one_assignment_per_claim',\
-                     'one_active_assignment_per_agent'\
-                 )",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .expect("the claim indexes should be inspectable");
+            let store =
+                Store::open(&database.0).expect("the database should upgrade");
+            let applied = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM schema_migrations",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("the migration ledger should be readable");
+            let credential_table = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema \
+                     WHERE type = 'table' AND name = 'session_credentials'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("the credential table should be inspectable");
+            let claim_indexes = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema \
+                     WHERE type = 'index' AND name IN (\
+                         'one_claim_per_operation',\
+                         'one_assignment_per_claim',\
+                         'one_active_assignment_per_agent'\
+                     )",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("the claim indexes should be inspectable");
+            let preserved_sessions = store
+                .connection
+                .query_row("SELECT count(*) FROM sessions", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("prior sessions should remain readable");
 
-        assert_eq!(applied, 2);
-        assert_eq!(claim_indexes, 3);
+            assert_eq!(applied, MIGRATIONS.len() as i64);
+            assert_eq!(credential_table, 1);
+            assert_eq!(claim_indexes, 3);
+            assert_eq!(preserved_sessions, 1);
+        }
     }
 
     #[test]
@@ -2802,7 +3001,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO schema_migrations (version, name, source) \
-                 VALUES (3, 'future', '-- future migration')",
+                 VALUES (4, 'future', '-- future migration')",
                 [],
             )
             .expect("the test should simulate a newer Coterie version");
@@ -2815,8 +3014,8 @@ mod tests {
         assert!(matches!(
             error,
             super::StoreError::UnsupportedSchema {
-                found: 3,
-                supported: 2,
+                found: 4,
+                supported: 3,
             }
         ));
     }
@@ -2843,6 +3042,8 @@ mod tests {
                     .insert_configuration_snapshot(&records.configuration)?;
                 repositories.insert_agent(&records.agent)?;
                 repositories.insert_session(&records.session)?;
+                repositories
+                    .activate_session_credential(&records.credential)?;
                 repositories.insert_task_group(&records.group)?;
                 repositories.insert_task(&records.dependency_task)?;
                 repositories.insert_task(&records.task)?;
@@ -2891,6 +3092,10 @@ mod tests {
                     Some(records.session.clone())
                 );
                 assert_eq!(
+                    repositories.session_credential(records.session.id)?,
+                    Some(records.credential.clone())
+                );
+                assert_eq!(
                     repositories.task_group(records.group.id)?,
                     Some(records.group.clone())
                 );
@@ -2936,6 +3141,113 @@ mod tests {
                 Ok(())
             })
             .expect("the committed records should load");
+    }
+
+    #[test]
+    fn credentials_store_only_verifiers_and_fence_replaced_generations() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_agent(&records.agent)?;
+                repositories.insert_session(&records.session)?;
+                repositories.activate_session_credential(&records.credential)
+            })
+            .expect("the credential prerequisites should commit");
+
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories.active_session_credential(
+                        records.run.id,
+                        records.agent.id,
+                        records.session.id,
+                    )?,
+                    Some(records.credential.clone())
+                );
+                Ok(())
+            })
+            .expect("the active credential should be readable");
+
+        let stored: Vec<u8> = store
+            .connection
+            .query_row(
+                "SELECT token_verifier FROM session_credentials WHERE session_id = ?1",
+                [records.session.id],
+                |row| row.get(0),
+            )
+            .expect("the verifier should be stored");
+        assert_eq!(stored, records.credential.token_verifier.as_bytes());
+        assert_ne!(stored, token().expose_secret().as_bytes());
+
+        let replacement_session = SessionRecord {
+            id: SECOND_SESSION_ID.parse().expect("valid session ID"),
+            generation: records.session.generation + 1,
+            created_at: 30,
+            ..records.session.clone()
+        };
+        let replacement_token =
+            AgentToken::generate().expect("randomness should be available");
+        let replacement_credential = SessionCredentialRecord {
+            run_id: records.run.id,
+            agent_id: records.agent.id,
+            session_id: replacement_session.id,
+            generation: replacement_session.generation,
+            token_verifier: replacement_token.verifier(SessionScope {
+                run_id: records.run.id,
+                agent_id: records.agent.id,
+                session_id: replacement_session.id,
+                generation: replacement_session.generation,
+            }),
+            created_at: 30,
+            revoked_at: None,
+        };
+        store
+            .transaction(|repositories| {
+                repositories.transaction.execute(
+                    "UPDATE agents SET generation = ?2 WHERE id = ?1",
+                    rusqlite::params![
+                        records.agent.id,
+                        replacement_session.generation
+                    ],
+                )?;
+                repositories.insert_session(&replacement_session)?;
+                repositories
+                    .activate_session_credential(&replacement_credential)
+            })
+            .expect("the replacement credential should commit");
+
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories.active_session_credential(
+                        records.run.id,
+                        records.agent.id,
+                        records.session.id,
+                    )?,
+                    None
+                );
+                assert_eq!(
+                    repositories.active_session_credential(
+                        records.run.id,
+                        records.agent.id,
+                        replacement_session.id,
+                    )?,
+                    Some(replacement_credential)
+                );
+                assert_eq!(
+                    repositories
+                        .session_credential(records.session.id)?
+                        .expect(
+                            "the replaced credential should remain auditable"
+                        )
+                        .revoked_at,
+                    Some(30)
+                );
+                Ok(())
+            })
+            .expect("credential rotation should be inspectable");
     }
 
     #[test]
@@ -3004,6 +3316,7 @@ mod tests {
         project: ProjectRecord,
         agent: AgentRecord,
         session: SessionRecord,
+        credential: SessionCredentialRecord,
         group: TaskGroupRecord,
         task: TaskRecord,
         dependency_task: TaskRecord,
@@ -3099,6 +3412,12 @@ mod tests {
             let assignment_id = ASSIGNMENT_ID
                 .parse::<AssignmentId>()
                 .expect("valid assignment ID");
+            let session_scope = SessionScope {
+                run_id,
+                agent_id,
+                session_id,
+                generation: 2,
+            };
 
             Self {
                 run: RunRecord {
@@ -3159,6 +3478,15 @@ mod tests {
                     transcript_path: PathBuf::from("transcripts/session.jsonl"),
                     created_at: 14,
                     ended_at: None,
+                },
+                credential: SessionCredentialRecord {
+                    run_id,
+                    agent_id,
+                    session_id,
+                    generation: 2,
+                    token_verifier: token().verifier(session_scope),
+                    created_at: 14,
+                    revoked_at: None,
                 },
                 group: TaskGroupRecord {
                     id: 1,
@@ -3284,5 +3612,9 @@ mod tests {
                 },
             }
         }
+    }
+
+    fn token() -> AgentToken {
+        TOKEN.parse().expect("the fixture token should parse")
     }
 }

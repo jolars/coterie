@@ -89,7 +89,7 @@ later milestones build on.
 - [x] Implement a nonblocking exclusive project lease, active-run index, Unix
   socket handshake, automatic singleton supervisor startup, and typed local
   RPC.
-- [ ] Authenticate agents with random, generation-scoped tokens whose stored
+- [x] Authenticate agents with random, generation-scoped tokens whose stored
   representation is a verifier; keep the operator path distinct.
 - [ ] Implement a deterministic fake provider and use it to drive agent and
   session lifecycles without model access.
