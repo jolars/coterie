@@ -83,7 +83,7 @@ later milestones build on.
 
 ## M2: Supervised runtime with deterministic fakes
 
-- [ ] Discover the canonical Git project or non-Git directory, derive its
+- [x] Discover the canonical Git project or non-Git directory, derive its
   identity, and place private runtime and durable data beneath the
   appropriate XDG directories.
 - [ ] Implement a nonblocking exclusive project lease, active-run index, Unix

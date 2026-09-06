@@ -13,6 +13,10 @@ mod config;
     reason = "M1 defines stable identifiers before later milestones consume them"
 )]
 mod id;
+#[allow(
+    dead_code,
+    reason = "M2 defines project discovery before supervisor startup consumes it"
+)]
 mod project;
 mod protocol;
 mod providers;

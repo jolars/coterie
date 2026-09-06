@@ -19,6 +19,7 @@ use crate::id::{
     AgentId, AssignmentId, EventId, MessageId, OperationId, ProjectId, RunId,
     SessionId, TaskId,
 };
+use crate::project::ProjectIdentity;
 use crate::tasks::{TaskReadiness, TaskStatus, TaskTransition};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -116,7 +117,7 @@ pub(crate) struct ProjectRecord {
     pub(crate) alias: String,
     pub(crate) original_path: PathBuf,
     pub(crate) canonical_path: PathBuf,
-    pub(crate) identity: JsonValue,
+    pub(crate) identity: ProjectIdentity,
     pub(crate) is_primary: bool,
     pub(crate) attached_at: i64,
 }
@@ -1722,10 +1723,10 @@ fn decode_path(
     Ok(PathBuf::from(OsString::from_vec(bytes)))
 }
 
-fn decode_json(
-    row: &rusqlite::Row<'_>,
-    index: usize,
-) -> rusqlite::Result<JsonValue> {
+fn decode_json<T>(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<T>
+where
+    T: DeserializeOwned,
+{
     let encoded = row.get::<_, String>(index)?;
     serde_json::from_str(&encoded).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -1777,6 +1778,7 @@ mod tests {
         AgentId, AssignmentId, EventId, MessageId, OperationId, ProjectId,
         RunId, SessionId, TaskId,
     };
+    use crate::project::ProjectIdentity;
     use crate::tasks::{TaskStatus, TaskTransition};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -2885,6 +2887,43 @@ mod tests {
     }
 
     #[test]
+    fn project_reads_reject_a_malformed_typed_identity() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_project(&records.project)?;
+                Ok(())
+            })
+            .expect("the project prerequisites should commit");
+        store
+            .connection
+            .execute(
+                "UPDATE projects SET identity_json = ?1 WHERE id = ?2",
+                (
+                    r#"{"kind":"directory","canonical_directory":"lossy"}"#,
+                    records.project.id,
+                ),
+            )
+            .expect("the fixture should simulate a malformed identity");
+
+        let error = store
+            .transaction(|repositories| {
+                repositories.project(records.project.id)?;
+                Ok(())
+            })
+            .expect_err("malformed durable identity must not enter the domain");
+
+        assert!(matches!(
+            error,
+            super::StoreError::Database(
+                rusqlite::Error::FromSqlConversionFailure(..)
+            )
+        ));
+    }
+
+    #[test]
     fn a_repository_error_rolls_back_the_whole_transaction() {
         let mut store = Store::open_in_memory().expect("the store should open");
         let run = Records::fixture().run;
@@ -3044,7 +3083,9 @@ mod tests {
                         b"/tmp/project-\xff".to_vec(),
                     )),
                     canonical_path: PathBuf::from("/tmp/project"),
-                    identity: json!({"kind": "directory", "key": "fixture"}),
+                    identity: ProjectIdentity::Directory {
+                        canonical_directory: PathBuf::from("/tmp/project"),
+                    },
                     is_primary: true,
                     attached_at: 11,
                 },
