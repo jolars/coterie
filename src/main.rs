@@ -3,6 +3,10 @@
     reason = "M1 defines CLI contracts before later milestones dispatch commands"
 )]
 mod cli;
+#[allow(
+    dead_code,
+    reason = "M1 defines configuration policy before later milestones resolve it"
+)]
 mod config;
 #[allow(
     dead_code,

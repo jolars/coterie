@@ -75,10 +75,10 @@ later milestones build on.
 
 ### M1 gate
 
-- [ ] Tests cover every task transition, dependency release, atomic claim,
+- [x] Tests cover every task transition, dependency release, atomic claim,
   retry, authorization decision, migration, invalid ID, and corrupt-state
   error.
-- [ ] Golden tests lock the versioned JSON and exit-code contracts before other
+- [x] Golden tests lock the versioned JSON and exit-code contracts before other
   processes depend on them.
 
 ## M2: Supervised runtime with deterministic fakes

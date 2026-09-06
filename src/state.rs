@@ -2002,6 +2002,67 @@ mod tests {
     }
 
     #[test]
+    fn retries_reject_incomplete_and_corrupt_durable_results() {
+        let cases = [
+            ("pending", None, "incomplete"),
+            ("succeeded", None, "missing"),
+            ("succeeded", Some(json!({"unexpected": true})), "invalid"),
+        ];
+
+        for (status, result, expected) in cases {
+            let mut store =
+                Store::open_in_memory().expect("the store should open");
+            let records = Records::fixture();
+            let mutation = Mutation {
+                id: records.operation.id,
+                run_id: records.run.id,
+                kind: "run.stop".to_owned(),
+                actor_agent_id: None,
+                request: json!({"reason": "done"}),
+                created_at: 20,
+            };
+            store
+                .transaction(|repositories| {
+                    repositories.insert_run(&records.run)?;
+                    repositories.insert_operation(&OperationRecord {
+                        id: mutation.id,
+                        run_id: mutation.run_id,
+                        kind: mutation.kind.clone(),
+                        actor_agent_id: mutation.actor_agent_id,
+                        status: status.to_owned(),
+                        request: mutation.request.clone(),
+                        result: result.clone(),
+                        attempt_count: 1,
+                        created_at: mutation.created_at,
+                        updated_at: mutation.created_at,
+                    })
+                })
+                .expect("the corrupt operation fixture should commit");
+
+            let retry: Result<MutationOutcome<bool>, _> =
+                store.mutate(&mutation, |_| Ok(true));
+            let error =
+                retry.expect_err("corrupt retry state must be rejected");
+            match expected {
+                "incomplete" => assert!(matches!(
+                    error,
+                    super::StoreError::OperationIncomplete { id, ref status }
+                        if id == mutation.id && status == "pending"
+                )),
+                "missing" => assert!(matches!(
+                    error,
+                    super::StoreError::MissingOperationResult { id }
+                        if id == mutation.id
+                )),
+                "invalid" => {
+                    assert!(matches!(error, super::StoreError::EncodeJson(_)));
+                }
+                _ => unreachable!("the test cases are exhaustive"),
+            }
+        }
+    }
+
+    #[test]
     fn claiming_a_task_atomically_creates_one_claim_and_assignment() {
         let mut store = Store::open_in_memory().expect("the store should open");
         let records = Records::fixture();
@@ -2185,6 +2246,46 @@ mod tests {
                 ClaimRejection::AgentBusy
             ))
         );
+    }
+
+    #[test]
+    fn claim_precondition_rejections_are_durable_and_idempotent() {
+        let cases = [
+            ("agent_not_found", ClaimRejection::AgentNotFound),
+            ("task_not_found", ClaimRejection::TaskNotFound),
+            ("task_not_open", ClaimRejection::TaskNotOpen),
+        ];
+
+        for (case, expected) in cases {
+            let mut store =
+                Store::open_in_memory().expect("the store should open");
+            let mut records = Records::fixture();
+            if case == "task_not_open" {
+                records.task.status = TaskStatus::Submitted;
+            }
+            insert_claim_prerequisites(&mut store, &records);
+            let mut mutation = claim_mutation(&records);
+            match case {
+                "agent_not_found" => mutation.agent_id = AgentId::generate(),
+                "task_not_found" => mutation.task_id = TaskId::generate(),
+                "task_not_open" => {}
+                _ => unreachable!("the test cases are exhaustive"),
+            }
+
+            let rejected = store
+                .claim_task(&mutation)
+                .expect("a failed precondition should be a durable result");
+            assert_eq!(
+                rejected,
+                MutationOutcome::Applied(ClaimTaskResult::Rejected(expected))
+            );
+            assert_eq!(
+                store
+                    .claim_task(&mutation)
+                    .expect("a rejected claim should replay"),
+                rejected.as_replayed()
+            );
+        }
     }
 
     #[test]
@@ -2455,7 +2556,7 @@ mod tests {
         let invalid = TaskTransitionMutation {
             operation_id: OperationId::generate(),
             transition: TaskTransition::Reopen,
-            ..mutation
+            ..mutation.clone()
         };
         let rejected = store
             .transition_task(&invalid)
@@ -2472,6 +2573,27 @@ mod tests {
             store
                 .transition_task(&invalid)
                 .expect("the rejection should replay"),
+            rejected.as_replayed()
+        );
+
+        let missing = TaskTransitionMutation {
+            operation_id: OperationId::generate(),
+            task_id: TaskId::generate(),
+            ..mutation
+        };
+        let rejected = store
+            .transition_task(&missing)
+            .expect("a missing task should be a domain result");
+        assert_eq!(
+            rejected,
+            MutationOutcome::Applied(TaskTransitionResult::Rejected(
+                TaskTransitionRejection::TaskNotFound
+            ))
+        );
+        assert_eq!(
+            store
+                .transition_task(&missing)
+                .expect("the missing-task result should replay"),
             rejected.as_replayed()
         );
     }

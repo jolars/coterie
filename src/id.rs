@@ -248,6 +248,36 @@ mod tests {
         }};
     }
 
+    macro_rules! assert_invalid_id_contract {
+        ($id_type:ty, $prefix:literal) => {{
+            assert!(matches!(
+                format!("wrong-{ULID}").parse::<$id_type>(),
+                Err(ParseIdError::InvalidPrefix { expected })
+                    if expected == concat!($prefix, "-")
+            ));
+            assert!(matches!(
+                concat!($prefix, "-short").parse::<$id_type>(),
+                Err(ParseIdError::InvalidUlid(DecodeError::InvalidLength))
+            ));
+            assert!(matches!(
+                concat!($prefix, "-01ARZ3NDEKTSV4RRFFQ69G5FAI")
+                    .parse::<$id_type>(),
+                Err(ParseIdError::InvalidUlid(DecodeError::InvalidChar))
+            ));
+            assert!(matches!(
+                concat!($prefix, "-81ARZ3NDEKTSV4RRFFQ69G5FAV")
+                    .parse::<$id_type>(),
+                Err(ParseIdError::NonCanonicalUlid)
+            ));
+            assert!(
+                serde_json::from_str::<$id_type>(&format!(
+                    "\"wrong-{ULID}\""
+                ))
+                .is_err()
+            );
+        }};
+    }
+
     #[test]
     fn each_id_type_has_the_stable_contract() {
         assert_id_contract!(RunId, "cr");
@@ -259,6 +289,19 @@ mod tests {
         assert_id_contract!(MessageId, "cm");
         assert_id_contract!(OperationId, "co");
         assert_id_contract!(EventId, "ce");
+    }
+
+    #[test]
+    fn every_id_type_rejects_invalid_values_at_parse_and_json_boundaries() {
+        assert_invalid_id_contract!(RunId, "cr");
+        assert_invalid_id_contract!(ProjectId, "cp");
+        assert_invalid_id_contract!(AgentId, "cg");
+        assert_invalid_id_contract!(SessionId, "cs");
+        assert_invalid_id_contract!(TaskId, "ct");
+        assert_invalid_id_contract!(AssignmentId, "ca");
+        assert_invalid_id_contract!(MessageId, "cm");
+        assert_invalid_id_contract!(OperationId, "co");
+        assert_invalid_id_contract!(EventId, "ce");
     }
 
     #[test]

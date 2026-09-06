@@ -193,7 +193,20 @@ mod tests {
 
     #[test]
     fn lifecycle_actions_select_the_expected_next_status() {
-        let cases = [
+        let statuses = [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::Submitted,
+            TaskStatus::Closed,
+            TaskStatus::Canceled,
+        ];
+        let transitions = [
+            TaskTransition::Reopen,
+            TaskTransition::Submit,
+            TaskTransition::Close,
+            TaskTransition::Cancel,
+        ];
+        let allowed = [
             (
                 TaskStatus::InProgress,
                 TaskTransition::Reopen,
@@ -231,18 +244,19 @@ mod tests {
             ),
         ];
 
-        for (from, transition, expected) in cases {
-            assert_eq!(from.transition(transition), Some(expected));
-        }
-
-        for status in [TaskStatus::Closed, TaskStatus::Canceled] {
-            for transition in [
-                TaskTransition::Reopen,
-                TaskTransition::Submit,
-                TaskTransition::Close,
-                TaskTransition::Cancel,
-            ] {
-                assert_eq!(status.transition(transition), None);
+        for status in statuses {
+            for transition in transitions {
+                let expected = allowed
+                    .iter()
+                    .find(|(from, action, _)| {
+                        *from == status && *action == transition
+                    })
+                    .map(|(_, _, next)| *next);
+                assert_eq!(
+                    status.transition(transition),
+                    expected,
+                    "unexpected result for {status} and {transition}",
+                );
             }
         }
     }
