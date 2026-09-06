@@ -50,7 +50,7 @@ later milestones build on.
 
 ## M1: Core contracts and durable state
 
-- [ ] Create the internal `cli`, `config`, `project`, `supervisor`, `protocol`,
+- [x] Create the internal `cli`, `config`, `project`, `supervisor`, `protocol`,
   `providers`, `tasks`, `workspace`, `state`, and `transcript` modules. Keep
   one deployable binary; extract a crate only after a concrete boundary
   requires it.
