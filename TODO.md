@@ -67,7 +67,7 @@ later milestones build on.
   configuration snapshots, projects, agents, sessions, tasks, dependencies,
   task groups, comments, claims, assignments, messages, workspaces,
   operations, and events. Store provider transcripts outside the database.
-- [ ] Enforce foreign keys, bounded busy timeouts, single-writer access, WAL
+- [x] Enforce foreign keys, bounded busy timeouts, single-writer access, WAL
   where supported, compare-and-set claims, and idempotent mutations.
 - [ ] Implement task readiness and the `open`, `in_progress`, `submitted`,
   `closed`, and `canceled` lifecycle. Dependencies are satisfied only by

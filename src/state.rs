@@ -5,10 +5,14 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::types::Type;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde_json::Value as JsonValue;
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params,
+};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value as JsonValue, json};
 use thiserror::Error;
 
 use crate::id::{
@@ -17,11 +21,20 @@ use crate::id::{
 };
 use crate::tasks::TaskStatus;
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial",
-    sql: include_str!("state/migrations/0001_initial.sql"),
-}];
+const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial",
+        sql: include_str!("state/migrations/0001_initial.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "claim_invariants",
+        sql: include_str!("state/migrations/0002_claim_invariants.sql"),
+    },
+];
 
 #[derive(Debug)]
 struct Migration {
@@ -50,6 +63,18 @@ pub(crate) enum StoreError {
         "database schema version {found} is newer than supported version {supported}"
     )]
     UnsupportedSchema { found: i64, supported: i64 },
+
+    /// An operation ID was previously bound to a different mutation.
+    #[error("operation `{id}` is already bound to a different request")]
+    OperationConflict { id: OperationId },
+
+    /// An atomic mutation encountered an operation it cannot safely resume.
+    #[error("operation `{id}` has nonterminal status `{status}`")]
+    OperationIncomplete { id: OperationId, status: String },
+
+    /// A completed operation did not contain the result required for replay.
+    #[error("completed operation `{id}` has no durable result")]
+    MissingOperationResult { id: OperationId },
 }
 
 /// The supervisor-owned connection to one run database.
@@ -176,6 +201,70 @@ pub(crate) struct OperationRecord {
     pub(crate) updated_at: i64,
 }
 
+/// The identity and request bound to one idempotent database mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Mutation {
+    pub(crate) id: OperationId,
+    pub(crate) run_id: RunId,
+    pub(crate) kind: String,
+    pub(crate) actor_agent_id: Option<AgentId>,
+    pub(crate) request: JsonValue,
+    pub(crate) created_at: i64,
+}
+
+/// Whether a mutation was applied now or replayed from durable state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MutationOutcome<T> {
+    Applied(T),
+    Replayed(T),
+}
+
+impl<T: Clone> MutationOutcome<T> {
+    #[must_use]
+    pub(crate) fn as_replayed(&self) -> Self {
+        match self {
+            Self::Applied(result) | Self::Replayed(result) => {
+                Self::Replayed(result.clone())
+            }
+        }
+    }
+}
+
+/// The complete input to an atomic task-claim mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ClaimTaskMutation {
+    pub(crate) operation_id: OperationId,
+    pub(crate) run_id: RunId,
+    pub(crate) actor_agent_id: Option<AgentId>,
+    pub(crate) task_id: TaskId,
+    pub(crate) agent_id: AgentId,
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) claimed_at: i64,
+}
+
+/// The durable result of trying to claim a task.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", content = "reason", rename_all = "snake_case")]
+pub(crate) enum ClaimTaskResult {
+    Claimed {
+        claim_id: i64,
+        assignment_id: AssignmentId,
+    },
+    Rejected(ClaimRejection),
+}
+
+/// Why a task claim did not satisfy its compare-and-set preconditions.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ClaimRejection {
+    TaskNotFound,
+    TaskNotOpen,
+    Blocked,
+    AlreadyClaimed,
+    AgentNotFound,
+    AgentBusy,
+}
+
 /// A durable claim on a task.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ClaimRecord {
@@ -262,15 +351,34 @@ impl Store {
     /// Opens a run database and applies every pending migration in order.
     pub(crate) fn open(path: &std::path::Path) -> Result<Self, StoreError> {
         let connection = Connection::open(path)?;
-        let mut store = Self { connection };
-        store.migrate()?;
-        Ok(store)
+        Self::from_connection(connection)
     }
 
     #[cfg(test)]
     fn open_in_memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
+        Self::from_connection(connection)
+    }
+
+    fn from_connection(connection: Connection) -> Result<Self, StoreError> {
+        connection.busy_timeout(BUSY_TIMEOUT)?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+
+        // In-memory databases retain `memory`; filesystems without WAL support
+        // retain their current mode. The returned mode is therefore advisory.
+        let _journal_mode = connection.pragma_update_and_check(
+            None,
+            "journal_mode",
+            "wal",
+            |row| row.get::<_, String>(0),
+        )?;
+
         let mut store = Self { connection };
+        // Reserving SQLite's writer slot at transaction start makes mutation
+        // ordering explicit and prevents deferred transactions from racing.
+        store
+            .connection
+            .set_transaction_behavior(TransactionBehavior::Immediate);
         store.migrate()?;
         Ok(store)
     }
@@ -360,6 +468,92 @@ impl Store {
         })?;
         transaction.commit()?;
         Ok(result)
+    }
+
+    /// Applies a database-only mutation once and replays its durable result.
+    pub(crate) fn mutate<T>(
+        &mut self,
+        mutation: &Mutation,
+        apply: impl FnOnce(&Repositories<'_, '_>) -> Result<T, StoreError>,
+    ) -> Result<MutationOutcome<T>, StoreError>
+    where
+        T: DeserializeOwned + Serialize,
+    {
+        let transaction = self.connection.transaction()?;
+        let repositories = Repositories {
+            transaction: &transaction,
+        };
+
+        if let Some(existing) = repositories.operation(mutation.id)? {
+            if existing.run_id != mutation.run_id
+                || existing.kind != mutation.kind
+                || existing.actor_agent_id != mutation.actor_agent_id
+                || existing.request != mutation.request
+            {
+                return Err(StoreError::OperationConflict { id: mutation.id });
+            }
+            if existing.status != "succeeded" {
+                return Err(StoreError::OperationIncomplete {
+                    id: mutation.id,
+                    status: existing.status,
+                });
+            }
+
+            let encoded =
+                existing.result.ok_or(StoreError::MissingOperationResult {
+                    id: mutation.id,
+                })?;
+            let result = serde_json::from_value(encoded)?;
+            transaction.commit()?;
+            return Ok(MutationOutcome::Replayed(result));
+        }
+
+        repositories.insert_operation(&OperationRecord {
+            id: mutation.id,
+            run_id: mutation.run_id,
+            kind: mutation.kind.clone(),
+            actor_agent_id: mutation.actor_agent_id,
+            status: "pending".to_owned(),
+            request: mutation.request.clone(),
+            result: None,
+            attempt_count: 1,
+            created_at: mutation.created_at,
+            updated_at: mutation.created_at,
+        })?;
+
+        let result = apply(&repositories)?;
+        let encoded = serde_json::to_string(&result)?;
+        repositories.transaction.execute(
+            "UPDATE operations SET status = 'succeeded', result_json = ?2, updated_at = ?3 \
+             WHERE id = ?1",
+            params![mutation.id, encoded, mutation.created_at],
+        )?;
+        transaction.commit()?;
+        Ok(MutationOutcome::Applied(result))
+    }
+
+    /// Atomically claims a ready task and creates its active assignment.
+    pub(crate) fn claim_task(
+        &mut self,
+        claim: &ClaimTaskMutation,
+    ) -> Result<MutationOutcome<ClaimTaskResult>, StoreError> {
+        let mutation = Mutation {
+            id: claim.operation_id,
+            run_id: claim.run_id,
+            kind: "task.claim".to_owned(),
+            actor_agent_id: claim.actor_agent_id,
+            // Retries may allocate fresh bookkeeping values before finding the
+            // durable result, so only caller intent belongs to request identity.
+            request: json!({
+                "agent_id": claim.agent_id,
+                "task_id": claim.task_id,
+            }),
+            created_at: claim.claimed_at,
+        };
+
+        self.mutate(&mutation, |repositories| {
+            repositories.compare_and_set_claim(claim)
+        })
     }
 
     #[cfg(test)]
@@ -884,6 +1078,160 @@ impl Repositories<'_, '_> {
             .optional()?)
     }
 
+    fn compare_and_set_claim(
+        &self,
+        claim: &ClaimTaskMutation,
+    ) -> Result<ClaimTaskResult, StoreError> {
+        let generation = self
+            .transaction
+            .query_row(
+                "SELECT generation FROM agents WHERE id = ?1 AND run_id = ?2",
+                params![claim.agent_id, claim.run_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(generation) = generation else {
+            return Ok(ClaimTaskResult::Rejected(
+                ClaimRejection::AgentNotFound,
+            ));
+        };
+
+        let changed = self.transaction.execute(
+            "UPDATE tasks AS candidate \
+             SET status = 'in_progress', updated_at = ?3 \
+             WHERE candidate.id = ?1 AND candidate.run_id = ?2 \
+               AND candidate.status = 'open' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM claims AS active_claim \
+                   WHERE active_claim.task_id = candidate.id \
+                     AND active_claim.run_id = candidate.run_id \
+                     AND active_claim.released_at IS NULL \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM task_dependencies AS edge \
+                   JOIN tasks AS dependency \
+                     ON dependency.id = edge.dependency_task_id \
+                    AND dependency.run_id = edge.run_id \
+                   WHERE edge.task_id = candidate.id \
+                     AND edge.run_id = candidate.run_id \
+                     AND dependency.status <> 'closed' \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM assignments AS active_assignment \
+                   WHERE active_assignment.agent_id = ?4 \
+                     AND active_assignment.run_id = candidate.run_id \
+                     AND active_assignment.completed_at IS NULL \
+               )",
+            params![
+                claim.task_id,
+                claim.run_id,
+                claim.claimed_at,
+                claim.agent_id,
+            ],
+        )?;
+
+        if changed == 0 {
+            return Ok(ClaimTaskResult::Rejected(self.claim_rejection(claim)?));
+        }
+
+        self.transaction.execute(
+            "INSERT INTO claims (\
+                 run_id, task_id, agent_id, operation_id, state, claimed_at, released_at\
+             ) VALUES (?1, ?2, ?3, ?4, 'active', ?5, NULL)",
+            params![
+                claim.run_id,
+                claim.task_id,
+                claim.agent_id,
+                claim.operation_id,
+                claim.claimed_at,
+            ],
+        )?;
+        let claim_id = self.transaction.last_insert_rowid();
+
+        self.insert_assignment(&AssignmentRecord {
+            id: claim.assignment_id,
+            run_id: claim.run_id,
+            task_id: claim.task_id,
+            agent_id: claim.agent_id,
+            session_id: None,
+            claim_id,
+            generation,
+            state: "active".to_owned(),
+            summary: None,
+            created_at: claim.claimed_at,
+            completed_at: None,
+        })?;
+
+        Ok(ClaimTaskResult::Claimed {
+            claim_id,
+            assignment_id: claim.assignment_id,
+        })
+    }
+
+    fn claim_rejection(
+        &self,
+        claim: &ClaimTaskMutation,
+    ) -> Result<ClaimRejection, StoreError> {
+        let already_claimed = self.transaction.query_row(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM claims \
+                 WHERE task_id = ?1 AND run_id = ?2 AND released_at IS NULL\
+             )",
+            params![claim.task_id, claim.run_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if already_claimed {
+            return Ok(ClaimRejection::AlreadyClaimed);
+        }
+
+        let status = self
+            .transaction
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1 AND run_id = ?2",
+                params![claim.task_id, claim.run_id],
+                |row| row.get::<_, TaskStatus>(0),
+            )
+            .optional()?;
+        let Some(status) = status else {
+            return Ok(ClaimRejection::TaskNotFound);
+        };
+        if status != TaskStatus::Open {
+            return Ok(ClaimRejection::TaskNotOpen);
+        }
+
+        let blocked = self.transaction.query_row(
+            "SELECT EXISTS (\
+                 SELECT 1 \
+                 FROM task_dependencies AS edge \
+                 JOIN tasks AS dependency \
+                   ON dependency.id = edge.dependency_task_id \
+                  AND dependency.run_id = edge.run_id \
+                 WHERE edge.task_id = ?1 AND edge.run_id = ?2 \
+                   AND dependency.status <> 'closed'\
+             )",
+            params![claim.task_id, claim.run_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if blocked {
+            return Ok(ClaimRejection::Blocked);
+        }
+
+        let agent_busy = self.transaction.query_row(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM assignments \
+                 WHERE agent_id = ?1 AND run_id = ?2 AND completed_at IS NULL\
+             )",
+            params![claim.agent_id, claim.run_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if agent_busy {
+            return Ok(ClaimRejection::AgentBusy);
+        }
+
+        Ok(ClaimRejection::TaskNotOpen)
+    }
+
     pub(crate) fn insert_assignment(
         &self,
         assignment: &AssignmentRecord,
@@ -1159,19 +1507,22 @@ fn decode_optional_json(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::collections::BTreeSet;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
 
-    use rusqlite::Connection;
+    use rusqlite::{Connection, ErrorCode};
     use serde_json::json;
 
     use super::{
-        AgentRecord, AssignmentRecord, ClaimRecord, CommentRecord,
-        ConfigurationSnapshotRecord, DependencyRecord, EventRecord,
-        MessageRecord, OperationRecord, ProjectRecord, RunRecord,
-        SessionRecord, Store, TaskGroupRecord, TaskRecord, WorkspaceRecord,
+        AgentRecord, AssignmentRecord, BUSY_TIMEOUT, ClaimRecord,
+        ClaimRejection, ClaimTaskMutation, ClaimTaskResult, CommentRecord,
+        ConfigurationSnapshotRecord, DependencyRecord, EventRecord, MIGRATIONS,
+        MessageRecord, Mutation, MutationOutcome, OperationRecord,
+        ProjectRecord, RunRecord, SessionRecord, Store, TaskGroupRecord,
+        TaskRecord, WorkspaceRecord,
     };
     use crate::id::{
         AgentId, AssignmentId, EventId, MessageId, OperationId, ProjectId,
@@ -1189,6 +1540,9 @@ mod tests {
     const MESSAGE_ID: &str = "cm-01ARZ3NDEKTSV4RRFFQ69G5FB2";
     const OPERATION_ID: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FB3";
     const EVENT_ID: &str = "ce-01ARZ3NDEKTSV4RRFFQ69G5FB4";
+    const SECOND_ASSIGNMENT_ID: &str = "ca-01ARZ3NDEKTSV4RRFFQ69G5FB5";
+    const SECOND_OPERATION_ID: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FB6";
+    const SECOND_TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FB7";
 
     #[test]
     fn a_new_store_applies_the_complete_initial_schema() {
@@ -1221,6 +1575,408 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_store_enables_the_required_connection_policy() {
+        let database = TestDatabase::new();
+        let store = Store::open(&database.0).expect("the store should open");
+
+        let foreign_keys = store
+            .connection
+            .pragma_query_value(None, "foreign_keys", |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("the foreign-key setting should be readable");
+        let busy_timeout = store
+            .connection
+            .pragma_query_value(None, "busy_timeout", |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("the busy timeout should be readable");
+        let journal_mode = store
+            .connection
+            .pragma_query_value(None, "journal_mode", |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("the journal mode should be readable");
+
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(busy_timeout, BUSY_TIMEOUT.as_millis() as i64);
+        assert_eq!(journal_mode, "wal");
+    }
+
+    #[test]
+    fn an_in_memory_store_keeps_its_supported_journal_mode() {
+        let store = Store::open_in_memory().expect("the store should open");
+
+        let journal_mode = store
+            .connection
+            .pragma_query_value(None, "journal_mode", |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("the journal mode should be readable");
+
+        assert_eq!(journal_mode, "memory");
+    }
+
+    #[test]
+    fn foreign_keys_are_enforced_without_caller_configuration() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let project = Records::fixture().project;
+
+        let error = store
+            .transaction(|repositories| repositories.insert_project(&project))
+            .expect_err("a project without its run must be rejected");
+
+        assert!(matches!(
+            error,
+            super::StoreError::Database(rusqlite::Error::SqliteFailure(
+                ref failure,
+                _
+            )) if failure.code == ErrorCode::ConstraintViolation
+        ));
+    }
+
+    #[test]
+    fn every_write_transaction_reserves_the_single_writer_slot_immediately() {
+        let database = TestDatabase::new();
+        let mut store =
+            Store::open(&database.0).expect("the store should open");
+        let competing_writer = Connection::open(&database.0)
+            .expect("a competing connection should open");
+        competing_writer
+            .busy_timeout(std::time::Duration::ZERO)
+            .expect("the competing timeout should be configurable");
+
+        store
+            .transaction(|_| {
+                let error = competing_writer
+                    .execute(
+                        "INSERT INTO runs (id, status, created_at) VALUES (?1, 'active', 1)",
+                        [RUN_ID],
+                    )
+                    .expect_err("the store transaction must already own the writer slot");
+                assert!(matches!(
+                    error,
+                    rusqlite::Error::SqliteFailure(ref failure, _)
+                        if failure.code == ErrorCode::DatabaseBusy
+                ));
+                Ok(())
+            })
+            .expect("the owning transaction should commit");
+    }
+
+    #[test]
+    fn mutations_replay_the_durable_result_without_reapplying_changes() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        store
+            .transaction(|repositories| repositories.insert_run(&records.run))
+            .expect("the run should commit");
+        let mutation = Mutation {
+            id: records.operation.id,
+            run_id: records.run.id,
+            kind: "project.attach".to_owned(),
+            actor_agent_id: None,
+            request: json!({"alias": records.project.alias}),
+            created_at: 20,
+        };
+        let applications = Cell::new(0);
+
+        let first = store
+            .mutate(&mutation, |repositories| {
+                applications.set(applications.get() + 1);
+                repositories.insert_project(&records.project)?;
+                Ok(json!({"project_id": records.project.id}))
+            })
+            .expect("the first mutation should commit");
+        let replay = store
+            .mutate(&mutation, |_| -> Result<_, super::StoreError> {
+                panic!("an idempotent replay must not execute its mutation")
+            })
+            .expect("the retry should replay its durable result");
+
+        assert_eq!(applications.get(), 1);
+        assert_eq!(
+            first,
+            MutationOutcome::Applied(json!({"project_id": records.project.id}))
+        );
+        assert_eq!(
+            replay,
+            MutationOutcome::Replayed(
+                json!({"project_id": records.project.id})
+            )
+        );
+        store
+            .transaction(|repositories| {
+                let operation = repositories
+                    .operation(mutation.id)?
+                    .expect("the operation should be durable");
+                assert_eq!(operation.status, "succeeded");
+                assert_eq!(operation.attempt_count, 1);
+                Ok(())
+            })
+            .expect("the operation should be inspectable");
+    }
+
+    #[test]
+    fn reusing_an_operation_id_for_a_different_request_is_rejected() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        store
+            .transaction(|repositories| repositories.insert_run(&records.run))
+            .expect("the run should commit");
+        let mutation = Mutation {
+            id: records.operation.id,
+            run_id: records.run.id,
+            kind: "run.stop".to_owned(),
+            actor_agent_id: None,
+            request: json!({"reason": "done"}),
+            created_at: 20,
+        };
+        store
+            .mutate(&mutation, |_| Ok(json!({"stopped": true})))
+            .expect("the first mutation should commit");
+        let conflicting = Mutation {
+            request: json!({"reason": "cancel"}),
+            ..mutation
+        };
+
+        let error = store
+            .mutate(&conflicting, |_| Ok(json!({"stopped": true})))
+            .expect_err(
+                "the operation identity must bind its original request",
+            );
+
+        assert!(matches!(
+            error,
+            super::StoreError::OperationConflict { id } if id == mutation.id
+        ));
+    }
+
+    #[test]
+    fn claiming_a_task_atomically_creates_one_claim_and_assignment() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        insert_claim_prerequisites(&mut store, &records);
+        let mutation = claim_mutation(&records);
+
+        let outcome = store
+            .claim_task(&mutation)
+            .expect("the ready task should be claimed");
+
+        assert_eq!(
+            outcome,
+            MutationOutcome::Applied(ClaimTaskResult::Claimed {
+                claim_id: 1,
+                assignment_id: records.assignment.id,
+            })
+        );
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .task(records.task.id)?
+                        .expect("the task should exist")
+                        .status,
+                    TaskStatus::InProgress
+                );
+                assert_eq!(
+                    repositories
+                        .claim(1)?
+                        .expect("the claim should exist")
+                        .operation_id,
+                    mutation.operation_id
+                );
+                assert_eq!(
+                    repositories
+                        .assignment(records.assignment.id)?
+                        .expect("the assignment should exist")
+                        .claim_id,
+                    1
+                );
+                Ok(())
+            })
+            .expect("the claim should be inspectable");
+    }
+
+    #[test]
+    fn claim_retries_and_contenders_observe_the_compare_and_set_result() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        insert_claim_prerequisites(&mut store, &records);
+        let mutation = claim_mutation(&records);
+        let applied = store
+            .claim_task(&mutation)
+            .expect("the first claim should commit");
+
+        let retry = ClaimTaskMutation {
+            assignment_id: SECOND_ASSIGNMENT_ID
+                .parse()
+                .expect("the assignment ID should parse"),
+            claimed_at: mutation.claimed_at + 10,
+            ..mutation.clone()
+        };
+        let replay = store
+            .claim_task(&retry)
+            .expect("the same operation should replay");
+        assert_eq!(replay, applied.as_replayed());
+
+        let contender = ClaimTaskMutation {
+            operation_id: SECOND_OPERATION_ID
+                .parse()
+                .expect("the operation ID should parse"),
+            assignment_id: SECOND_ASSIGNMENT_ID
+                .parse()
+                .expect("the assignment ID should parse"),
+            ..mutation
+        };
+        let rejected = store
+            .claim_task(&contender)
+            .expect("claim contention is a durable domain result");
+        assert_eq!(
+            rejected,
+            MutationOutcome::Applied(ClaimTaskResult::Rejected(
+                ClaimRejection::AlreadyClaimed
+            ))
+        );
+        assert_eq!(
+            store
+                .claim_task(&contender)
+                .expect("a rejected contention should also replay"),
+            rejected.as_replayed()
+        );
+
+        let (claims, assignments) = store
+            .transaction(|repositories| {
+                let claims = repositories.transaction.query_row(
+                    "SELECT count(*) FROM claims",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                let assignments = repositories.transaction.query_row(
+                    "SELECT count(*) FROM assignments",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                Ok((claims, assignments))
+            })
+            .expect("claim counts should be readable");
+        assert_eq!((claims, assignments), (1, 1));
+    }
+
+    #[test]
+    fn a_task_with_an_open_dependency_cannot_be_claimed() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let mut records = Records::fixture();
+        records.dependency_task.status = TaskStatus::Open;
+        insert_claim_prerequisites(&mut store, &records);
+        let mutation = claim_mutation(&records);
+
+        let outcome = store
+            .claim_task(&mutation)
+            .expect("a blocked claim should produce a durable result");
+
+        assert_eq!(
+            outcome,
+            MutationOutcome::Applied(ClaimTaskResult::Rejected(
+                ClaimRejection::Blocked
+            ))
+        );
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .task(records.task.id)?
+                        .expect("the task should exist")
+                        .status,
+                    TaskStatus::Open
+                );
+                assert_eq!(repositories.claim(1)?, None);
+                Ok(())
+            })
+            .expect("the rejected claim should not change task state");
+    }
+
+    #[test]
+    fn an_agent_cannot_hold_two_active_assignments() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        insert_claim_prerequisites(&mut store, &records);
+        store
+            .claim_task(&claim_mutation(&records))
+            .expect("the first claim should commit");
+        let second_task = TaskRecord {
+            id: SECOND_TASK_ID.parse().expect("the task ID should parse"),
+            title: "Second task".to_owned(),
+            ..records.task.clone()
+        };
+        store
+            .transaction(|repositories| repositories.insert_task(&second_task))
+            .expect("the second task should commit");
+        let contender = ClaimTaskMutation {
+            operation_id: SECOND_OPERATION_ID
+                .parse()
+                .expect("the operation ID should parse"),
+            run_id: records.run.id,
+            actor_agent_id: Some(records.agent.id),
+            task_id: second_task.id,
+            agent_id: records.agent.id,
+            assignment_id: SECOND_ASSIGNMENT_ID
+                .parse()
+                .expect("the assignment ID should parse"),
+            claimed_at: records.claim.claimed_at + 1,
+        };
+
+        let outcome = store
+            .claim_task(&contender)
+            .expect("agent contention should produce a durable result");
+
+        assert_eq!(
+            outcome,
+            MutationOutcome::Applied(ClaimTaskResult::Rejected(
+                ClaimRejection::AgentBusy
+            ))
+        );
+    }
+
+    #[test]
+    fn assignment_failure_rolls_back_the_claim_and_operation() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        insert_claim_prerequisites(&mut store, &records);
+        store
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_assignment BEFORE INSERT ON assignments \
+                 BEGIN SELECT RAISE(ABORT, 'injected assignment failure'); END;",
+            )
+            .expect("the failure-injection trigger should be installed");
+        let mutation = claim_mutation(&records);
+
+        let error = store
+            .claim_task(&mutation)
+            .expect_err("assignment failure must abort the atomic claim");
+        assert!(matches!(error, super::StoreError::Database(_)));
+
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .task(records.task.id)?
+                        .expect("the task should exist")
+                        .status,
+                    TaskStatus::Open
+                );
+                assert_eq!(repositories.claim(1)?, None);
+                assert_eq!(
+                    repositories.operation(mutation.operation_id)?,
+                    None
+                );
+                Ok(())
+            })
+            .expect("rolled-back state should be inspectable");
+    }
+
+    #[test]
     fn reopening_a_store_does_not_reapply_migrations() {
         let database = TestDatabase::new();
         drop(Store::open(&database.0).expect("the first open should migrate"));
@@ -1234,7 +1990,59 @@ mod tests {
             })
             .expect("the migration ledger should be readable");
 
-        assert_eq!(applied, 1);
+        assert_eq!(applied, 2);
+    }
+
+    #[test]
+    fn a_version_one_database_upgrades_through_the_forward_migration() {
+        let database = TestDatabase::new();
+        let connection = Connection::open(&database.0)
+            .expect("the version-one database should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (\
+                     version INTEGER PRIMARY KEY,\
+                     name TEXT NOT NULL,\
+                     source TEXT NOT NULL,\
+                     applied_at INTEGER NOT NULL DEFAULT (unixepoch())\
+                 ) STRICT;",
+            )
+            .expect("the migration ledger should be created");
+        connection
+            .execute_batch(MIGRATIONS[0].sql)
+            .expect("the version-one schema should be created");
+        connection
+            .execute(
+                "INSERT INTO schema_migrations (version, name, source) VALUES (1, ?1, ?2)",
+                (MIGRATIONS[0].name, MIGRATIONS[0].sql),
+            )
+            .expect("the version-one migration should be recorded");
+        drop(connection);
+
+        let store =
+            Store::open(&database.0).expect("the database should upgrade");
+        let applied = store
+            .connection
+            .query_row("SELECT count(*) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("the migration ledger should be readable");
+        let claim_indexes = store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema \
+                 WHERE type = 'index' AND name IN (\
+                     'one_claim_per_operation',\
+                     'one_assignment_per_claim',\
+                     'one_active_assignment_per_agent'\
+                 )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("the claim indexes should be inspectable");
+
+        assert_eq!(applied, 2);
+        assert_eq!(claim_indexes, 3);
     }
 
     #[test]
@@ -1283,7 +2091,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO schema_migrations (version, name, source) \
-                 VALUES (2, 'future', '-- future migration')",
+                 VALUES (3, 'future', '-- future migration')",
                 [],
             )
             .expect("the test should simulate a newer Coterie version");
@@ -1296,8 +2104,8 @@ mod tests {
         assert!(matches!(
             error,
             super::StoreError::UnsupportedSchema {
-                found: 2,
-                supported: 1,
+                found: 3,
+                supported: 2,
             }
         ));
     }
@@ -1477,6 +2285,33 @@ mod tests {
                 std::fs::remove_file(&self.0)
                     .expect("the test database should be removable");
             }
+        }
+    }
+
+    fn insert_claim_prerequisites(store: &mut Store, records: &Records) {
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_project(&records.project)?;
+                repositories.insert_agent(&records.agent)?;
+                repositories.insert_task_group(&records.group)?;
+                repositories.insert_task(&records.dependency_task)?;
+                repositories.insert_task(&records.task)?;
+                repositories.insert_dependency(&records.dependency)?;
+                Ok(())
+            })
+            .expect("the claim prerequisites should commit");
+    }
+
+    fn claim_mutation(records: &Records) -> ClaimTaskMutation {
+        ClaimTaskMutation {
+            operation_id: records.operation.id,
+            run_id: records.run.id,
+            actor_agent_id: Some(records.agent.id),
+            task_id: records.task.id,
+            agent_id: records.agent.id,
+            assignment_id: records.assignment.id,
+            claimed_at: records.claim.claimed_at,
         }
     }
 
