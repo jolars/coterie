@@ -19,7 +19,7 @@ use crate::id::{
     AgentId, AssignmentId, EventId, MessageId, OperationId, ProjectId, RunId,
     SessionId, TaskId,
 };
-use crate::tasks::TaskStatus;
+use crate::tasks::{TaskReadiness, TaskStatus, TaskTransition};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -75,6 +75,10 @@ pub(crate) enum StoreError {
     /// A completed operation did not contain the result required for replay.
     #[error("completed operation `{id}` has no durable result")]
     MissingOperationResult { id: OperationId },
+
+    /// Related task, claim, and assignment records violate a lifecycle invariant.
+    #[error("task `{id}` has corrupt lifecycle state: {reason}")]
+    CorruptTaskState { id: TaskId, reason: String },
 }
 
 /// The supervisor-owned connection to one run database.
@@ -240,6 +244,38 @@ pub(crate) struct ClaimTaskMutation {
     pub(crate) agent_id: AgentId,
     pub(crate) assignment_id: AssignmentId,
     pub(crate) claimed_at: i64,
+}
+
+/// The complete input to an idempotent task-lifecycle mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TaskTransitionMutation {
+    pub(crate) operation_id: OperationId,
+    pub(crate) run_id: RunId,
+    pub(crate) actor_agent_id: Option<AgentId>,
+    pub(crate) task_id: TaskId,
+    pub(crate) transition: TaskTransition,
+    pub(crate) result: Option<JsonValue>,
+    pub(crate) summary: Option<String>,
+    pub(crate) transitioned_at: i64,
+}
+
+/// The durable result of trying to change a task's lifecycle state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", content = "reason", rename_all = "snake_case")]
+pub(crate) enum TaskTransitionResult {
+    Transitioned {
+        previous_status: TaskStatus,
+        status: TaskStatus,
+    },
+    Rejected(TaskTransitionRejection),
+}
+
+/// Why a task-lifecycle mutation could not be applied.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TaskTransitionRejection {
+    TaskNotFound,
+    InvalidStatus { status: TaskStatus },
 }
 
 /// The durable result of trying to claim a task.
@@ -553,6 +589,30 @@ impl Store {
 
         self.mutate(&mutation, |repositories| {
             repositories.compare_and_set_claim(claim)
+        })
+    }
+
+    /// Applies a non-claim task transition and replays its durable result.
+    pub(crate) fn transition_task(
+        &mut self,
+        transition: &TaskTransitionMutation,
+    ) -> Result<MutationOutcome<TaskTransitionResult>, StoreError> {
+        let mutation = Mutation {
+            id: transition.operation_id,
+            run_id: transition.run_id,
+            kind: format!("task.{}", transition.transition),
+            actor_agent_id: transition.actor_agent_id,
+            request: json!({
+                "result": transition.result,
+                "summary": transition.summary,
+                "task_id": transition.task_id,
+                "transition": transition.transition,
+            }),
+            created_at: transition.transitioned_at,
+        };
+
+        self.mutate(&mutation, |repositories| {
+            repositories.apply_task_transition(transition)
         })
     }
 
@@ -883,6 +943,194 @@ impl Repositories<'_, '_> {
                 },
             )
             .optional()?)
+    }
+
+    /// Reads the current facts that determine whether a task is ready.
+    pub(crate) fn task_readiness(
+        &self,
+        id: TaskId,
+    ) -> Result<Option<TaskReadiness>, StoreError> {
+        let status = self
+            .transaction
+            .query_row("SELECT status FROM tasks WHERE id = ?1", [id], |row| {
+                row.get::<_, TaskStatus>(0)
+            })
+            .optional()?;
+        let Some(status) = status else {
+            return Ok(None);
+        };
+
+        let unresolved_dependencies = {
+            let mut statement = self.transaction.prepare(
+                "SELECT edge.dependency_task_id \
+                 FROM task_dependencies AS edge \
+                 JOIN tasks AS dependency \
+                   ON dependency.id = edge.dependency_task_id \
+                  AND dependency.run_id = edge.run_id \
+                 WHERE edge.task_id = ?1 AND dependency.status <> 'closed' \
+                 ORDER BY edge.dependency_task_id",
+            )?;
+            let rows =
+                statement.query_map([id], |row| row.get::<_, TaskId>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let has_active_claim = self.transaction.query_row(
+            "SELECT EXISTS (\
+                 SELECT 1 FROM claims WHERE task_id = ?1 AND released_at IS NULL\
+             )",
+            [id],
+            |row| row.get::<_, bool>(0),
+        )?;
+
+        Ok(Some(TaskReadiness {
+            status,
+            unresolved_dependencies,
+            has_active_claim,
+        }))
+    }
+
+    /// Lists ready tasks in stable creation order.
+    pub(crate) fn ready_tasks(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT candidate.id, candidate.run_id, candidate.project_id, \
+                    candidate.group_id, candidate.title, candidate.description, \
+                    candidate.status, candidate.result_json, candidate.created_at, \
+                    candidate.updated_at \
+             FROM tasks AS candidate \
+             WHERE candidate.run_id = ?1 AND candidate.status = 'open' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM claims AS active_claim \
+                   WHERE active_claim.task_id = candidate.id \
+                     AND active_claim.run_id = candidate.run_id \
+                     AND active_claim.released_at IS NULL \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM task_dependencies AS edge \
+                   JOIN tasks AS dependency \
+                     ON dependency.id = edge.dependency_task_id \
+                    AND dependency.run_id = edge.run_id \
+                   WHERE edge.task_id = candidate.id \
+                     AND edge.run_id = candidate.run_id \
+                     AND dependency.status <> 'closed' \
+               ) \
+             ORDER BY candidate.created_at, candidate.id",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok(TaskRecord {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                project_id: row.get(2)?,
+                group_id: row.get(3)?,
+                title: row.get(4)?,
+                description: row.get(5)?,
+                status: row.get(6)?,
+                result: decode_optional_json(row, 7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn apply_task_transition(
+        &self,
+        mutation: &TaskTransitionMutation,
+    ) -> Result<TaskTransitionResult, StoreError> {
+        let task = self.task(mutation.task_id)?;
+        let Some(task) = task.filter(|task| task.run_id == mutation.run_id)
+        else {
+            return Ok(TaskTransitionResult::Rejected(
+                TaskTransitionRejection::TaskNotFound,
+            ));
+        };
+        let Some(status) = task.status.transition(mutation.transition) else {
+            return Ok(TaskTransitionResult::Rejected(
+                TaskTransitionRejection::InvalidStatus {
+                    status: task.status,
+                },
+            ));
+        };
+
+        if task.status == TaskStatus::InProgress {
+            self.release_task_ownership(mutation)?;
+        }
+
+        let result = match mutation.transition {
+            TaskTransition::Reopen => None,
+            TaskTransition::Submit => mutation.result.clone(),
+            TaskTransition::Close => mutation.result.clone().or(task.result),
+            TaskTransition::Cancel => task.result,
+        }
+        .map(|result| serde_json::to_string(&result))
+        .transpose()?;
+        self.transaction.execute(
+            "UPDATE tasks SET status = ?2, result_json = ?3, updated_at = ?4 \
+             WHERE id = ?1 AND run_id = ?5",
+            params![
+                mutation.task_id,
+                status,
+                result,
+                mutation.transitioned_at,
+                mutation.run_id,
+            ],
+        )?;
+
+        Ok(TaskTransitionResult::Transitioned {
+            previous_status: task.status,
+            status,
+        })
+    }
+
+    fn release_task_ownership(
+        &self,
+        mutation: &TaskTransitionMutation,
+    ) -> Result<(), StoreError> {
+        let assignment_state = match mutation.transition {
+            TaskTransition::Reopen => "released",
+            TaskTransition::Submit => "completed",
+            TaskTransition::Cancel => "canceled",
+            TaskTransition::Close => {
+                return Err(StoreError::CorruptTaskState {
+                    id: mutation.task_id,
+                    reason: "an in-progress task cannot close directly"
+                        .to_owned(),
+                });
+            }
+        };
+        let assignments = self.transaction.execute(
+            "UPDATE assignments \
+             SET state = ?3, summary = COALESCE(?4, summary), completed_at = ?5 \
+             WHERE task_id = ?1 AND run_id = ?2 AND completed_at IS NULL",
+            params![
+                mutation.task_id,
+                mutation.run_id,
+                assignment_state,
+                mutation.summary,
+                mutation.transitioned_at,
+            ],
+        )?;
+        let claims = self.transaction.execute(
+            "UPDATE claims SET state = 'released', released_at = ?3 \
+             WHERE task_id = ?1 AND run_id = ?2 AND released_at IS NULL",
+            params![
+                mutation.task_id,
+                mutation.run_id,
+                mutation.transitioned_at,
+            ],
+        )?;
+        if assignments != 1 || claims != 1 {
+            return Err(StoreError::CorruptTaskState {
+                id: mutation.task_id,
+                reason: format!(
+                    "expected one active assignment and claim, found {assignments} and {claims}"
+                ),
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn insert_dependency(
@@ -1522,13 +1770,14 @@ mod tests {
         ConfigurationSnapshotRecord, DependencyRecord, EventRecord, MIGRATIONS,
         MessageRecord, Mutation, MutationOutcome, OperationRecord,
         ProjectRecord, RunRecord, SessionRecord, Store, TaskGroupRecord,
-        TaskRecord, WorkspaceRecord,
+        TaskRecord, TaskTransitionMutation, TaskTransitionRejection,
+        TaskTransitionResult, WorkspaceRecord,
     };
     use crate::id::{
         AgentId, AssignmentId, EventId, MessageId, OperationId, ProjectId,
         RunId, SessionId, TaskId,
     };
-    use crate::tasks::TaskStatus;
+    use crate::tasks::{TaskStatus, TaskTransition};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -1977,6 +2226,292 @@ mod tests {
     }
 
     #[test]
+    fn readiness_is_derived_from_status_dependencies_and_claims() {
+        for dependency_status in [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::Submitted,
+            TaskStatus::Closed,
+            TaskStatus::Canceled,
+        ] {
+            let mut store =
+                Store::open_in_memory().expect("the store should open");
+            let mut records = Records::fixture();
+            records.dependency_task.status = dependency_status;
+            insert_claim_prerequisites(&mut store, &records);
+
+            store
+                .transaction(|repositories| {
+                    let readiness = repositories
+                        .task_readiness(records.task.id)?
+                        .expect("the task should exist");
+                    let ready_ids = repositories
+                        .ready_tasks(records.run.id)?
+                        .into_iter()
+                        .map(|task| task.id)
+                        .collect::<Vec<_>>();
+
+                    assert_eq!(readiness.status, TaskStatus::Open);
+                    assert_eq!(
+                        readiness.unresolved_dependencies,
+                        if dependency_status == TaskStatus::Closed {
+                            Vec::new()
+                        } else {
+                            vec![records.dependency_task.id]
+                        }
+                    );
+                    assert!(!readiness.has_active_claim);
+                    assert_eq!(
+                        readiness.is_ready(),
+                        dependency_status == TaskStatus::Closed
+                    );
+                    assert_eq!(
+                        ready_ids.contains(&records.task.id),
+                        dependency_status == TaskStatus::Closed
+                    );
+                    Ok(())
+                })
+                .expect("readiness should be queryable");
+        }
+
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        insert_claim_prerequisites(&mut store, &records);
+        store
+            .claim_task(&claim_mutation(&records))
+            .expect("the task should be claimed");
+
+        store
+            .transaction(|repositories| {
+                let readiness = repositories
+                    .task_readiness(records.task.id)?
+                    .expect("the task should exist");
+
+                assert_eq!(readiness.status, TaskStatus::InProgress);
+                assert!(readiness.has_active_claim);
+                assert!(!readiness.is_ready());
+                Ok(())
+            })
+            .expect("claimed readiness should be queryable");
+    }
+
+    #[test]
+    fn lifecycle_transitions_persist_and_release_active_ownership() {
+        let cases = [
+            (
+                TaskStatus::Open,
+                TaskTransition::Cancel,
+                TaskStatus::Canceled,
+            ),
+            (
+                TaskStatus::InProgress,
+                TaskTransition::Reopen,
+                TaskStatus::Open,
+            ),
+            (
+                TaskStatus::InProgress,
+                TaskTransition::Submit,
+                TaskStatus::Submitted,
+            ),
+            (
+                TaskStatus::InProgress,
+                TaskTransition::Cancel,
+                TaskStatus::Canceled,
+            ),
+            (
+                TaskStatus::Submitted,
+                TaskTransition::Reopen,
+                TaskStatus::Open,
+            ),
+            (
+                TaskStatus::Submitted,
+                TaskTransition::Close,
+                TaskStatus::Closed,
+            ),
+            (
+                TaskStatus::Submitted,
+                TaskTransition::Cancel,
+                TaskStatus::Canceled,
+            ),
+        ];
+
+        for (from, transition, expected) in cases {
+            let mut store =
+                Store::open_in_memory().expect("the store should open");
+            let mut records = Records::fixture();
+            if from == TaskStatus::InProgress {
+                insert_claim_prerequisites(&mut store, &records);
+                store
+                    .claim_task(&claim_mutation(&records))
+                    .expect("the task should be claimed");
+            } else {
+                records.task.status = from;
+                insert_claim_prerequisites(&mut store, &records);
+            }
+            let mutation = transition_mutation(&records, transition);
+
+            let outcome = store
+                .transition_task(&mutation)
+                .expect("the lifecycle transition should commit");
+
+            assert_eq!(
+                outcome,
+                MutationOutcome::Applied(TaskTransitionResult::Transitioned {
+                    previous_status: from,
+                    status: expected,
+                })
+            );
+            store
+                .transaction(|repositories| {
+                    let task = repositories
+                        .task(records.task.id)?
+                        .expect("the task should exist");
+                    assert_eq!(task.status, expected);
+
+                    if from == TaskStatus::InProgress {
+                        let claim = repositories
+                            .claim(1)?
+                            .expect("the claim should remain auditable");
+                        let assignment = repositories
+                            .assignment(records.assignment.id)?
+                            .expect("the assignment should remain auditable");
+                        assert_eq!(claim.state, "released");
+                        assert_eq!(
+                            claim.released_at,
+                            Some(mutation.transitioned_at)
+                        );
+                        assert_eq!(
+                            assignment.state,
+                            match transition {
+                                TaskTransition::Reopen => "released",
+                                TaskTransition::Submit => "completed",
+                                TaskTransition::Cancel => "canceled",
+                                TaskTransition::Close => unreachable!(
+                                    "an in-progress task cannot close directly"
+                                ),
+                            }
+                        );
+                        assert_eq!(
+                            assignment.completed_at,
+                            Some(mutation.transitioned_at)
+                        );
+                    }
+                    Ok(())
+                })
+                .expect("the transition should be inspectable");
+        }
+    }
+
+    #[test]
+    fn closing_a_dependency_releases_its_dependents_without_stored_blocking_state()
+     {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let mut records = Records::fixture();
+        records.dependency_task.status = TaskStatus::Submitted;
+        insert_claim_prerequisites(&mut store, &records);
+
+        let before = store
+            .transaction(|repositories| {
+                repositories.task_readiness(records.task.id)
+            })
+            .expect("readiness should be queryable")
+            .expect("the task should exist");
+        assert!(!before.is_ready());
+
+        let mutation = TaskTransitionMutation {
+            task_id: records.dependency_task.id,
+            ..transition_mutation(&records, TaskTransition::Close)
+        };
+        store
+            .transition_task(&mutation)
+            .expect("the dependency should close");
+
+        let after = store
+            .transaction(|repositories| {
+                repositories.task_readiness(records.task.id)
+            })
+            .expect("readiness should be queryable")
+            .expect("the task should exist");
+        assert!(after.is_ready());
+        assert!(after.unresolved_dependencies.is_empty());
+    }
+
+    #[test]
+    fn invalid_and_retried_lifecycle_transitions_are_durable_results() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let mut records = Records::fixture();
+        records.task.status = TaskStatus::Submitted;
+        insert_claim_prerequisites(&mut store, &records);
+        let mutation = transition_mutation(&records, TaskTransition::Close);
+
+        let applied = store
+            .transition_task(&mutation)
+            .expect("the close should commit");
+        let replayed = store
+            .transition_task(&mutation)
+            .expect("the retry should replay");
+        assert_eq!(replayed, applied.as_replayed());
+
+        let invalid = TaskTransitionMutation {
+            operation_id: OperationId::generate(),
+            transition: TaskTransition::Reopen,
+            ..mutation
+        };
+        let rejected = store
+            .transition_task(&invalid)
+            .expect("an invalid transition should be a domain result");
+        assert_eq!(
+            rejected,
+            MutationOutcome::Applied(TaskTransitionResult::Rejected(
+                TaskTransitionRejection::InvalidStatus {
+                    status: TaskStatus::Closed,
+                }
+            ))
+        );
+        assert_eq!(
+            store
+                .transition_task(&invalid)
+                .expect("the rejection should replay"),
+            rejected.as_replayed()
+        );
+    }
+
+    #[test]
+    fn a_transition_refuses_corrupt_in_progress_ownership_atomically() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let mut records = Records::fixture();
+        records.task.status = TaskStatus::InProgress;
+        insert_claim_prerequisites(&mut store, &records);
+        let mutation = transition_mutation(&records, TaskTransition::Submit);
+
+        let error = store
+            .transition_task(&mutation)
+            .expect_err("missing ownership must be reported as corrupt state");
+        assert!(matches!(
+            error,
+            super::StoreError::CorruptTaskState { id, .. }
+                if id == records.task.id
+        ));
+
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .task(records.task.id)?
+                        .expect("the task should exist")
+                        .status,
+                    TaskStatus::InProgress
+                );
+                assert_eq!(
+                    repositories.operation(mutation.operation_id)?,
+                    None
+                );
+                Ok(())
+            })
+            .expect("the rollback should be inspectable");
+    }
+
+    #[test]
     fn reopening_a_store_does_not_reapply_migrations() {
         let database = TestDatabase::new();
         drop(Store::open(&database.0).expect("the first open should migrate"));
@@ -2312,6 +2847,24 @@ mod tests {
             agent_id: records.agent.id,
             assignment_id: records.assignment.id,
             claimed_at: records.claim.claimed_at,
+        }
+    }
+
+    fn transition_mutation(
+        records: &Records,
+        transition: TaskTransition,
+    ) -> TaskTransitionMutation {
+        TaskTransitionMutation {
+            operation_id: SECOND_OPERATION_ID
+                .parse()
+                .expect("the operation ID should parse"),
+            run_id: records.run.id,
+            actor_agent_id: Some(records.agent.id),
+            task_id: records.task.id,
+            transition,
+            result: Some(json!({"summary": "finished"})),
+            summary: Some("Finished the task.".to_owned()),
+            transitioned_at: records.claim.claimed_at + 1,
         }
     }
 

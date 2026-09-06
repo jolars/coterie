@@ -69,7 +69,7 @@ later milestones build on.
   operations, and events. Store provider transcripts outside the database.
 - [x] Enforce foreign keys, bounded busy timeouts, single-writer access, WAL
   where supported, compare-and-set claims, and idempotent mutations.
-- [ ] Implement task readiness and the `open`, `in_progress`, `submitted`,
+- [x] Implement task readiness and the `open`, `in_progress`, `submitted`,
   `closed`, and `canceled` lifecycle. Dependencies are satisfied only by
   closed tasks; blocking remains derived state.
 

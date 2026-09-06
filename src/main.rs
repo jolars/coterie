@@ -20,7 +20,7 @@ mod state;
 mod supervisor;
 #[allow(
     dead_code,
-    reason = "M1 defines task persistence before the following task-state deliverable"
+    reason = "M1 defines task contracts before later milestones expose task commands"
 )]
 mod tasks;
 #[allow(
