@@ -1,0 +1,34 @@
+[
+  {
+    "category": "success",
+    "code": 0
+  },
+  {
+    "category": "internal",
+    "code": 1
+  },
+  {
+    "category": "usage",
+    "code": 2
+  },
+  {
+    "category": "configuration",
+    "code": 3
+  },
+  {
+    "category": "not_found",
+    "code": 4
+  },
+  {
+    "category": "conflict",
+    "code": 5
+  },
+  {
+    "category": "permission",
+    "code": 6
+  },
+  {
+    "category": "unavailable",
+    "code": 7
+  }
+]

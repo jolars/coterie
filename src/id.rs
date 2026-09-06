@@ -3,6 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use ulid::Ulid;
@@ -65,6 +66,27 @@ macro_rules! define_id {
         impl fmt::Debug for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(formatter, concat!(stringify!($name), "({})"), self)
+            }
+        }
+
+        impl JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn schema_id() -> std::borrow::Cow<'static, str> {
+                concat!(module_path!(), "::", stringify!($name)).into()
+            }
+
+            fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+                json_schema!({
+                    "type": "string",
+                    "pattern": concat!(
+                        "^",
+                        $prefix,
+                        "-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+                    )
+                })
             }
         }
 

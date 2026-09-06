@@ -57,7 +57,7 @@ later milestones build on.
 - [x] Define stable, type-specific IDs using a short Coterie prefix and a ULID,
   including run, project, agent, session, task, assignment, message,
   operation, and event identities.
-- [ ] Define versioned JSON success envelopes, machine-readable error bodies,
+- [x] Define versioned JSON success envelopes, machine-readable error bodies,
   documented exit-code categories, and operation IDs for every mutating
   command. Standard output must never mix JSON and diagnostics.
 - [ ] Model the versioned `builtin:standard@1` archetype and its roles,

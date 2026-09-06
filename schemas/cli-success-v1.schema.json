@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI success response v1",
+  "type": "object",
+  "properties": {
+    "data": true,
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data"
+  ],
+  "$defs": {
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    }
+  }
+}

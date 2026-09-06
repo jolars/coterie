@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI mutation success response v1",
+  "type": "object",
+  "properties": {
+    "data": true,
+    "operation_id": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation_id",
+    "data"
+  ],
+  "$defs": {
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  }
+}

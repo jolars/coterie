@@ -595,7 +595,8 @@ The trust model is described below.
 All programmatic commands provide versioned JSON output and documented exit
 codes. Successful JSON contains a schema version and never mixes diagnostic
 output into standard output. Diagnostics go to standard error. Mutating commands
-return their operation ID.
+accept a caller-supplied operation ID for retries or allocate one before
+dispatch, and return that operation ID after allocation.
 
 Ordinary communication and lifecycle control are separate planes:
 

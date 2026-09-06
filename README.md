@@ -53,6 +53,8 @@ crates.io without a long-lived registry token.
 - [`TODO.md`](TODO.md) defines implementation order and milestone gates.
 - [`AGENTS.md`](AGENTS.md) records the operational rules for contributors and
   coding agents.
+- [`docs/cli-contract.md`](docs/cli-contract.md) defines versioned JSON output
+  and process exit codes for future commands.
 
 ## License
 

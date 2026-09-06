@@ -1,3 +1,7 @@
+#[allow(
+    dead_code,
+    reason = "M1 defines CLI contracts before later milestones dispatch commands"
+)]
 mod cli;
 mod config;
 #[allow(

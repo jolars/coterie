@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI error response v1",
+  "type": "object",
+  "properties": {
+    "error": {
+      "$ref": "#/$defs/ErrorBody"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "error"
+  ],
+  "$defs": {
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "ErrorBody": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message"
+      ]
+    },
+    "ErrorCode": {
+      "description": "A stable, machine-readable CLI error code.",
+      "oneOf": [
+        {
+          "description": "A command-line argument or request value is invalid.",
+          "type": "string",
+          "const": "invalid_argument"
+        },
+        {
+          "description": "Configuration is invalid or incompatible with the requested action.",
+          "type": "string",
+          "const": "invalid_configuration"
+        },
+        {
+          "description": "A requested resource does not exist.",
+          "type": "string",
+          "const": "not_found"
+        },
+        {
+          "description": "Current state does not satisfy the operation's preconditions.",
+          "type": "string",
+          "const": "conflict"
+        },
+        {
+          "description": "The caller did not present valid credentials.",
+          "type": "string",
+          "const": "unauthenticated"
+        },
+        {
+          "description": "The authenticated caller lacks the required capability.",
+          "type": "string",
+          "const": "permission_denied"
+        },
+        {
+          "description": "A required local service or provider cannot currently respond.",
+          "type": "string",
+          "const": "unavailable"
+        },
+        {
+          "description": "Durable state violates an invariant or cannot be decoded.",
+          "type": "string",
+          "const": "corrupt_state"
+        },
+        {
+          "description": "Coterie encountered an otherwise unclassified internal failure.",
+          "type": "string",
+          "const": "internal"
+        }
+      ]
+    }
+  }
+}
