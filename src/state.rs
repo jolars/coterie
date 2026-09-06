@@ -22,6 +22,7 @@ use crate::id::{
     SessionId, TaskId,
 };
 use crate::project::ProjectIdentity;
+use crate::providers::LifecycleState;
 use crate::tasks::{TaskReadiness, TaskStatus, TaskTransition};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -95,6 +96,25 @@ pub(crate) enum StoreError {
     /// A credential already marked inactive cannot be activated again.
     #[error("session `{session_id}` credential is already revoked")]
     CredentialAlreadyRevoked { session_id: SessionId },
+
+    /// A terminal session or inconsistent owning agent cannot move to the observation.
+    #[error(
+        "session `{session_id}` cannot transition from `{current}` to `{observed}`"
+    )]
+    InvalidSessionTransition {
+        session_id: SessionId,
+        current: LifecycleState,
+        observed: LifecycleState,
+    },
+
+    /// The owning agent and session disagree within one active generation.
+    #[error(
+        "session `{session_id}` and agent `{agent_id}` have inconsistent lifecycle state"
+    )]
+    InconsistentSessionLifecycle {
+        session_id: SessionId,
+        agent_id: AgentId,
+    },
 }
 
 /// The supervisor-owned connection to one run database.
@@ -144,7 +164,7 @@ pub(crate) struct AgentRecord {
     pub(crate) run_id: RunId,
     pub(crate) role: String,
     pub(crate) generation: i64,
-    pub(crate) state: String,
+    pub(crate) state: LifecycleState,
     pub(crate) created_at: i64,
 }
 
@@ -156,7 +176,7 @@ pub(crate) struct SessionRecord {
     pub(crate) agent_id: AgentId,
     pub(crate) generation: i64,
     pub(crate) provider: String,
-    pub(crate) state: String,
+    pub(crate) state: LifecycleState,
     pub(crate) transcript_path: PathBuf,
     pub(crate) created_at: i64,
     pub(crate) ended_at: Option<i64>,
@@ -172,6 +192,14 @@ pub(crate) struct SessionCredentialRecord {
     pub(crate) token_verifier: TokenVerifier,
     pub(crate) created_at: i64,
     pub(crate) revoked_at: Option<i64>,
+}
+
+/// The result of applying a generation-fenced provider observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionTransitionOutcome {
+    Applied,
+    Unchanged,
+    Stale,
 }
 
 /// A lightweight group of related tasks.
@@ -817,7 +845,7 @@ impl Repositories<'_, '_> {
                 agent.run_id,
                 agent.role,
                 agent.generation,
-                agent.state,
+                agent.state.as_str(),
                 agent.created_at,
             ],
         )?;
@@ -840,7 +868,7 @@ impl Repositories<'_, '_> {
                         run_id: row.get(1)?,
                         role: row.get(2)?,
                         generation: row.get(3)?,
-                        state: row.get(4)?,
+                        state: decode_lifecycle(row, 4)?,
                         created_at: row.get(5)?,
                     })
                 },
@@ -863,7 +891,7 @@ impl Repositories<'_, '_> {
                 session.agent_id,
                 session.generation,
                 session.provider,
-                session.state,
+                session.state.as_str(),
                 path_bytes(&session.transcript_path),
                 session.created_at,
                 session.ended_at,
@@ -890,7 +918,7 @@ impl Repositories<'_, '_> {
                         agent_id: row.get(2)?,
                         generation: row.get(3)?,
                         provider: row.get(4)?,
-                        state: row.get(5)?,
+                        state: decode_lifecycle(row, 5)?,
                         transcript_path: decode_path(row, 6)?,
                         created_at: row.get(7)?,
                         ended_at: row.get(8)?,
@@ -898,6 +926,80 @@ impl Repositories<'_, '_> {
                 },
             )
             .optional()?)
+    }
+
+    /// Applies an observation only to the session and agent generation it owns.
+    pub(crate) fn record_session_lifecycle(
+        &self,
+        scope: crate::auth::SessionScope,
+        observed: LifecycleState,
+        observed_at: i64,
+    ) -> Result<SessionTransitionOutcome, StoreError> {
+        let Some(session) = self.session(scope.session_id)? else {
+            return Ok(SessionTransitionOutcome::Stale);
+        };
+        if session.run_id != scope.run_id
+            || session.agent_id != scope.agent_id
+            || session.generation != scope.generation
+        {
+            return Ok(SessionTransitionOutcome::Stale);
+        }
+
+        let Some(agent) = self.agent(scope.agent_id)? else {
+            return Ok(SessionTransitionOutcome::Stale);
+        };
+        if agent.run_id != scope.run_id || agent.generation != scope.generation
+        {
+            return Ok(SessionTransitionOutcome::Stale);
+        }
+        if agent.state != session.state {
+            return Err(StoreError::InconsistentSessionLifecycle {
+                session_id: session.id,
+                agent_id: agent.id,
+            });
+        }
+        if session.state == observed {
+            return Ok(SessionTransitionOutcome::Unchanged);
+        }
+        if !session.state.allows(observed) {
+            return Err(StoreError::InvalidSessionTransition {
+                session_id: session.id,
+                current: session.state,
+                observed,
+            });
+        }
+
+        let ended_at = observed.is_terminal().then_some(observed_at);
+        self.transaction.execute(
+            "UPDATE sessions SET state = ?2, ended_at = ?3 \
+             WHERE id = ?1 AND run_id = ?4 AND agent_id = ?5 AND generation = ?6",
+            params![
+                session.id,
+                observed.as_str(),
+                ended_at,
+                scope.run_id,
+                scope.agent_id,
+                scope.generation,
+            ],
+        )?;
+        self.transaction.execute(
+            "UPDATE agents SET state = ?2 \
+             WHERE id = ?1 AND run_id = ?3 AND generation = ?4",
+            params![
+                agent.id,
+                observed.as_str(),
+                scope.run_id,
+                scope.generation,
+            ],
+        )?;
+        if observed.is_terminal() {
+            self.transaction.execute(
+                "UPDATE session_credentials SET revoked_at = ?2 \
+                 WHERE session_id = ?1 AND revoked_at IS NULL",
+                params![session.id, observed_at],
+            )?;
+        }
+        Ok(SessionTransitionOutcome::Applied)
     }
 
     /// Replaces an agent's active credential with the verifier for a new session.
@@ -1915,6 +2017,20 @@ fn decode_optional_json(
         .transpose()
 }
 
+fn decode_lifecycle(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<LifecycleState> {
+    let encoded = row.get::<_, String>(index)?;
+    encoded.parse().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -1932,8 +2048,9 @@ mod tests {
         ConfigurationSnapshotRecord, DependencyRecord, EventRecord, MIGRATIONS,
         MessageRecord, Mutation, MutationOutcome, OperationRecord,
         ProjectRecord, RunRecord, SessionCredentialRecord, SessionRecord,
-        Store, TaskGroupRecord, TaskRecord, TaskTransitionMutation,
-        TaskTransitionRejection, TaskTransitionResult, WorkspaceRecord,
+        SessionTransitionOutcome, Store, TaskGroupRecord, TaskRecord,
+        TaskTransitionMutation, TaskTransitionRejection, TaskTransitionResult,
+        WorkspaceRecord,
     };
     use crate::auth::{AgentToken, SessionScope};
     use crate::id::{
@@ -1941,6 +2058,7 @@ mod tests {
         RunId, SessionId, TaskId,
     };
     use crate::project::ProjectIdentity;
+    use crate::providers::LifecycleState;
     use crate::tasks::{TaskStatus, TaskTransition};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -3251,6 +3369,154 @@ mod tests {
     }
 
     #[test]
+    fn provider_lifecycle_observations_update_the_agent_and_session_atomically()
+    {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let mut records = Records::fixture();
+        records.agent.state = LifecycleState::Starting;
+        records.session.state = LifecycleState::Starting;
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_agent(&records.agent)?;
+                repositories.insert_session(&records.session)?;
+                repositories.activate_session_credential(&records.credential)
+            })
+            .expect("the starting session should commit");
+
+        let running = store
+            .transaction(|repositories| {
+                repositories.record_session_lifecycle(
+                    SessionScope {
+                        run_id: records.run.id,
+                        agent_id: records.agent.id,
+                        session_id: records.session.id,
+                        generation: records.session.generation,
+                    },
+                    LifecycleState::Running,
+                    20,
+                )
+            })
+            .expect("the running observation should commit");
+        assert_eq!(running, SessionTransitionOutcome::Applied);
+
+        let exited = store
+            .transaction(|repositories| {
+                repositories.record_session_lifecycle(
+                    SessionScope {
+                        run_id: records.run.id,
+                        agent_id: records.agent.id,
+                        session_id: records.session.id,
+                        generation: records.session.generation,
+                    },
+                    LifecycleState::Exited,
+                    21,
+                )
+            })
+            .expect("the exit observation should commit");
+        assert_eq!(exited, SessionTransitionOutcome::Applied);
+
+        let invalid = store
+            .transaction(|repositories| {
+                repositories.record_session_lifecycle(
+                    SessionScope {
+                        run_id: records.run.id,
+                        agent_id: records.agent.id,
+                        session_id: records.session.id,
+                        generation: records.session.generation,
+                    },
+                    LifecycleState::Running,
+                    22,
+                )
+            })
+            .expect_err("a terminal session must not become live again");
+        assert!(matches!(
+            invalid,
+            super::StoreError::InvalidSessionTransition {
+                session_id,
+                current: LifecycleState::Exited,
+                observed: LifecycleState::Running,
+            } if session_id == records.session.id
+        ));
+
+        store
+            .transaction(|repositories| {
+                let agent = repositories
+                    .agent(records.agent.id)?
+                    .expect("the agent should remain durable");
+                let session = repositories
+                    .session(records.session.id)?
+                    .expect("the session should remain durable");
+                let credential = repositories
+                    .session_credential(records.session.id)?
+                    .expect("the credential should remain auditable");
+                assert_eq!(agent.state, LifecycleState::Exited);
+                assert_eq!(session.state, LifecycleState::Exited);
+                assert_eq!(session.ended_at, Some(21));
+                assert_eq!(credential.revoked_at, Some(21));
+                Ok(())
+            })
+            .expect("the terminal lifecycle should be readable");
+    }
+
+    #[test]
+    fn session_lifecycle_updates_are_idempotent_and_generation_fenced() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_agent(&records.agent)?;
+                repositories.insert_session(&records.session)?;
+                repositories.activate_session_credential(&records.credential)
+            })
+            .expect("the current session should commit");
+        let scope = SessionScope {
+            run_id: records.run.id,
+            agent_id: records.agent.id,
+            session_id: records.session.id,
+            generation: records.session.generation,
+        };
+
+        let unchanged = store
+            .transaction(|repositories| {
+                repositories.record_session_lifecycle(
+                    scope,
+                    LifecycleState::Running,
+                    20,
+                )
+            })
+            .expect("repeating the current state should succeed");
+        let stale = store
+            .transaction(|repositories| {
+                repositories.record_session_lifecycle(
+                    SessionScope {
+                        generation: scope.generation - 1,
+                        ..scope
+                    },
+                    LifecycleState::Exited,
+                    21,
+                )
+            })
+            .expect("a stale observation should be ignored");
+
+        assert_eq!(unchanged, SessionTransitionOutcome::Unchanged);
+        assert_eq!(stale, SessionTransitionOutcome::Stale);
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .session(records.session.id)?
+                        .expect("the current session should exist")
+                        .state,
+                    LifecycleState::Running
+                );
+                Ok(())
+            })
+            .expect("the fenced state should remain readable");
+    }
+
+    #[test]
     fn project_reads_reject_a_malformed_typed_identity() {
         let mut store = Store::open_in_memory().expect("the store should open");
         let records = Records::fixture();
@@ -3465,7 +3731,7 @@ mod tests {
                     run_id,
                     role: "worker".to_owned(),
                     generation: 2,
-                    state: "running".to_owned(),
+                    state: LifecycleState::Running,
                     created_at: 13,
                 },
                 session: SessionRecord {
@@ -3474,7 +3740,7 @@ mod tests {
                     agent_id,
                     generation: 2,
                     provider: "codex".to_owned(),
-                    state: "running".to_owned(),
+                    state: LifecycleState::Running,
                     transcript_path: PathBuf::from("transcripts/session.jsonl"),
                     created_at: 14,
                     ended_at: None,

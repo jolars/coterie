@@ -253,15 +253,27 @@ impl TestEnvironment {
     fn only_index_entry(&self) -> PathBuf {
         let entries = fs::read_dir(self.state.join("coterie/projects"))
             .expect("the project index should exist")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("the index should be readable");
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().is_some_and(|value| value == "json")
+            })
+            .collect::<Vec<_>>();
         assert_eq!(entries.len(), 1, "exactly one project should be indexed");
-        entries[0].path()
+        entries[0].clone()
     }
 
     fn index_entry_count(&self) -> usize {
         fs::read_dir(self.state.join("coterie/projects"))
-            .map(|entries| entries.filter_map(Result::ok).count())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.extension().is_some_and(|value| value == "json")
+                    })
+                    .count()
+            })
             .unwrap_or(0)
     }
 

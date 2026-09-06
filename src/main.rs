@@ -20,6 +20,10 @@ mod id;
 )]
 mod project;
 mod protocol;
+#[allow(
+    dead_code,
+    reason = "M2 defines provider lifecycles before delegation commands launch them"
+)]
 mod providers;
 #[allow(
     dead_code,

@@ -91,7 +91,7 @@ later milestones build on.
   RPC.
 - [x] Authenticate agents with random, generation-scoped tokens whose stored
   representation is a verifier; keep the operator path distinct.
-- [ ] Implement a deterministic fake provider and use it to drive agent and
+- [x] Implement a deterministic fake provider and use it to drive agent and
   session lifecycles without model access.
 - [ ] Implement the minimum delegation commands: foreground launch, `status`,
   `whoami`, `prime`, `task create`, `task ready`, `task close`, `spawn`,

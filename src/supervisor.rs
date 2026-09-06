@@ -1,5 +1,11 @@
 //! Desired-state reconciliation and process ownership.
 
+#[allow(
+    dead_code,
+    reason = "M2 defines session supervision before delegation commands dispatch launches"
+)]
+mod session;
+
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
@@ -1169,6 +1175,7 @@ mod tests {
         RequestAuthentication, RpcFailureCode, RpcResponse, ServerMessage,
         VersionedRequest, read_frame, write_frame,
     };
+    use crate::providers::LifecycleState;
     use crate::state::{
         AgentRecord, RunRecord, SessionCredentialRecord, SessionRecord, Store,
         StoreError,
@@ -1412,7 +1419,7 @@ mod tests {
                     run_id: active.run_id,
                     role: "worker".to_owned(),
                     generation: scope.generation,
-                    state: "running".to_owned(),
+                    state: LifecycleState::Running,
                     created_at: 11,
                 })?;
                 repositories.insert_session(&SessionRecord {
@@ -1421,7 +1428,7 @@ mod tests {
                     agent_id,
                     generation: scope.generation,
                     provider: "fake".to_owned(),
-                    state: "running".to_owned(),
+                    state: LifecycleState::Running,
                     transcript_path: PathBuf::from("transcripts/session.jsonl"),
                     created_at: 12,
                     ended_at: None,
