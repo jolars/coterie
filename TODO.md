@@ -63,7 +63,7 @@ later milestones build on.
 - [x] Model the versioned `builtin:standard@1` archetype and its roles,
   capabilities, permission profiles, workspace policies, and limits as data.
   Defer external configuration layers without hardcoding role semantics.
-- [ ] Add append-only SQLite migrations and transactional repositories for runs,
+- [x] Add append-only SQLite migrations and transactional repositories for runs,
   configuration snapshots, projects, agents, sessions, tasks, dependencies,
   task groups, comments, claims, assignments, messages, workspaces,
   operations, and events. Store provider transcripts outside the database.

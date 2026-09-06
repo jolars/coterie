@@ -3,6 +3,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use rusqlite::types::{
+    FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef,
+};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -66,6 +69,21 @@ macro_rules! define_id {
         impl fmt::Debug for $name {
             fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 write!(formatter, concat!(stringify!($name), "({})"), self)
+            }
+        }
+
+        impl ToSql for $name {
+            fn to_sql(&self) -> rusqlite::Result<ToSqlOutput<'_>> {
+                Ok(ToSqlOutput::Owned(Value::Text(self.to_string())))
+            }
+        }
+
+        impl FromSql for $name {
+            fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
+                let encoded = value.as_str()?;
+                encoded
+                    .parse()
+                    .map_err(|error| FromSqlError::Other(Box::new(error)))
             }
         }
 
