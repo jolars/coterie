@@ -60,7 +60,7 @@ later milestones build on.
 - [x] Define versioned JSON success envelopes, machine-readable error bodies,
   documented exit-code categories, and operation IDs for every mutating
   command. Standard output must never mix JSON and diagnostics.
-- [ ] Model the versioned `builtin:standard@1` archetype and its roles,
+- [x] Model the versioned `builtin:standard@1` archetype and its roles,
   capabilities, permission profiles, workspace policies, and limits as data.
   Defer external configuration layers without hardcoding role semantics.
 - [ ] Add append-only SQLite migrations and transactional repositories for runs,

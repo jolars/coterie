@@ -205,20 +205,26 @@ for a run using the built-in tracker.
 Global configuration lives at `$XDG_CONFIG_HOME/coterie/config.toml`, falling
 back to `~/.config/coterie/config.toml`.
 
+When no global configuration exists, Coterie uses these compiled operator
+defaults:
+
+- select `builtin:standard@1`;
+- bind the `codex` provider name to the command `["codex"]`;
+- allow at most eight concurrent agents, 16 agents in one run, and eight spawns
+  per minute.
+
+Trusted global configuration may replace the provider binding and these
+run-wide ceilings or select another archetype. The provider command and
+run-wide ceilings are operator policy; they are not part of an archetype's
+versioned semantics.
+
+The semantic definition of `builtin:standard@1` is compiled into Coterie. The
+following TOML-like representation is normative data, not a global
+configuration file:
+
 ```toml
-schema = 1
-default_archetype = "global:standard@1"
-
-[policy]
-allowed_providers = ["codex"]
-allowed_project_roots = ["~/projects"]
-max_concurrent_agents = 8
-max_agents_per_run = 16
-max_spawn_rate_per_minute = 8
-
-[providers.codex]
-kind = "codex"
-command = ["codex"]
+reference = "builtin:standard@1"
+lead = "lead"
 
 [permission_profiles.interactive]
 filesystem = "project-write"
@@ -235,11 +241,7 @@ filesystem = "read-only"
 network = "deny"
 approvals = "never"
 
-[archetypes.standard]
-version = 1
-lead = "lead"
-
-[archetypes.standard.roles.lead]
+[roles.lead]
 provider = "codex"
 mode = "interactive"
 workspace = "project"
@@ -257,7 +259,7 @@ capabilities = [
   "workspace:integrate",
 ]
 
-[archetypes.standard.roles.worker]
+[roles.worker]
 provider = "codex"
 mode = "job"
 max_instances = 3
@@ -271,7 +273,7 @@ capabilities = [
   "task:comment",
 ]
 
-[archetypes.standard.roles.reviewer]
+[roles.reviewer]
 provider = "codex"
 mode = "job"
 max_instances = 1
@@ -280,10 +282,20 @@ permission_profile = "review"
 capabilities = ["send:lead", "task:read", "task:comment"]
 ```
 
-`max_instances` is a capacity limit, not a request to start idle agents. The
-lead creates agents explicitly, and the supervisor rejects spawns that exceed
-role or global limits. Automatic demand-based pool scaling is not part of the
-initial product target.
+The archetype version pins its designated lead, role names, provider identities
+and modes, instructions, capabilities, workspace policies, permission-profile
+values, and per-role capacities. The `lead` selector creates exactly one
+initial foreground agent; `max_instances` bounds explicitly spawned role
+instances and does not request an idle pool. The supervisor rejects spawns that
+exceed either the role capacity or the effective run-wide ceilings. Automatic
+demand-based pool scaling is not part of the initial product target.
+
+The profile names above are local references within the sealed built-in
+definition. Trusted global configuration cannot shadow the built-in archetype
+or mutate its profiles, roles, or other versioned fields. It may instead select
+a different, globally defined archetype. Project restrictions may replace a
+role's effective profile only with a trusted profile that is no more permissive;
+that restriction does not alter `builtin:standard@1` itself.
 
 An optional project configuration contains only selection and monotone-safe
 overrides. A project may disable roles, reduce capacities, choose a globally
@@ -291,7 +303,7 @@ defined permission profile that is no more permissive, and tighten resource
 limits. It cannot increase authority or resource ceilings.
 
 ```toml
-archetype = "global:standard@1"
+archetype = "builtin:standard@1"
 
 [roles.worker]
 max_instances = 2
@@ -305,8 +317,11 @@ Configuration is resolved in this order:
 4. Optional project restrictions.
 5. Explicit operator command-line overrides, bounded by global policy.
 
-Later values replace earlier scalar and array values. Tables merge recursively.
-Every effective value retains provenance identifying its source layer and file.
+Within the fields that a layer is authorized to set, later values replace
+earlier scalar and array values, and tables merge recursively. Selecting a
+built-in archetype resolves its sealed definition rather than merging global
+archetype or permission-profile tables into it. Every effective value retains
+provenance identifying its source layer and file.
 
 Coterie provides the following inspection commands:
 
