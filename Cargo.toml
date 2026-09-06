@@ -12,6 +12,12 @@ keywords = ["agents", "automation", "cli", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
+serde = "1.0.229"
+thiserror = "2.0.20"
+ulid = "3.0.0"
+
+[dev-dependencies]
+serde_json = "1.0.151"
 
 [lints.rust]
 unsafe_code = "forbid"

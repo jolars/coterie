@@ -1,5 +1,10 @@
 mod cli;
 mod config;
+#[allow(
+    dead_code,
+    reason = "M1 defines stable identifiers before later milestones consume them"
+)]
+mod id;
 mod project;
 mod protocol;
 mod providers;

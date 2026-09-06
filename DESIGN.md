@@ -437,9 +437,28 @@ dependency, and has no active claim.
 
 Claims are compare-and-set transitions performed in an immediate transaction.
 Claiming a task and creating its assignment are one database operation. Each
-initial job agent has at most one active assignment. Stable task IDs use a
-Coterie namespace and collision-resistant identifier rather than database row
-numbers.
+initial job agent has at most one active assignment.
+
+Durable identifiers use a lowercase Coterie type prefix, a hyphen, and a
+canonical uppercase ULID rather than database row numbers:
+
+| Identity   | Prefix |
+| ---------- | ------ |
+| Run        | `cr-`  |
+| Project    | `cp-`  |
+| Agent      | `cg-`  |
+| Session    | `cs-`  |
+| Task       | `ct-`  |
+| Assignment | `ca-`  |
+| Message    | `cm-`  |
+| Operation  | `co-`  |
+| Event      | `ce-`  |
+
+Parsers require the exact lowercase prefix and delimiter. The ULID suffix is
+case-insensitive on input and normalized to uppercase on output; malformed or
+noncanonical values are rejected. These identifiers remain distinct types in
+Rust and stable strings in CLI, protocol, transcript, and persistence
+boundaries.
 
 A completed assignment moves its task to `submitted`; it does not by itself
 satisfy dependent tasks. Closure records that the task's acceptance condition

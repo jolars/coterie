@@ -54,7 +54,7 @@ later milestones build on.
   `providers`, `tasks`, `workspace`, `state`, and `transcript` modules. Keep
   one deployable binary; extract a crate only after a concrete boundary
   requires it.
-- [ ] Define stable, type-specific IDs using a short Coterie prefix and a ULID,
+- [x] Define stable, type-specific IDs using a short Coterie prefix and a ULID,
   including run, project, agent, session, task, assignment, message,
   operation, and event identities.
 - [ ] Define versioned JSON success envelopes, machine-readable error bodies,
