@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Nonblocking project leases, a persistent active-run coordination index,
+  versioned local RPC, and race-safe singleton supervisor startup with stale-run
+  recovery.
+
 ## [0.1.0] - 2026-09-05
 
 ### Added

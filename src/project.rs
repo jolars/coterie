@@ -1,16 +1,21 @@
 //! Project discovery, identity, run-scoped attachment, and leases.
 
 use std::ffi::OsString;
-use std::fs;
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Seek, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use git2::{ErrorCode, Repository};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::id::RunId;
+use crate::id::{ProjectId, RunId};
+
+const ACTIVE_RUN_INDEX_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -25,6 +30,94 @@ pub(crate) enum ProjectIdentity {
         #[serde(with = "path_bytes")]
         canonical_directory: PathBuf,
     },
+}
+
+/// A stable, filesystem-safe digest of a resolved project identity.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ProjectKey(String);
+
+impl ProjectKey {
+    #[must_use]
+    pub(crate) fn for_identity(identity: &ProjectIdentity) -> Self {
+        let mut digest = Sha256::new();
+        match identity {
+            ProjectIdentity::Git {
+                common_directory,
+                git_directory,
+            } => {
+                digest.update(b"git\0");
+                hash_path(&mut digest, common_directory);
+                hash_path(&mut digest, git_directory);
+            }
+            ProjectIdentity::Directory {
+                canonical_directory,
+            } => {
+                digest.update(b"directory\0");
+                hash_path(&mut digest, canonical_directory);
+            }
+        }
+        let digest = digest.finalize();
+        let mut encoded = String::with_capacity(digest.len() * 2);
+        const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+        for byte in digest {
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
+        }
+        Self(encoded)
+    }
+
+    pub(crate) fn from_hex(
+        value: impl Into<String>,
+    ) -> Result<Self, ProjectError> {
+        let value = value.into();
+        if value.len() == 64
+            && value.bytes().all(|byte| {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            })
+        {
+            Ok(Self(value))
+        } else {
+            Err(ProjectError::InvalidProjectKey { value })
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ProjectKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl Serialize for ProjectKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ProjectKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::from_hex(String::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn hash_path(digest: &mut Sha256, path: &Path) {
+    let bytes = path.as_os_str().as_bytes();
+    let length = u64::try_from(bytes.len())
+        .expect("a filesystem path cannot exceed u64::MAX bytes");
+    digest.update(length.to_be_bytes());
+    digest.update(bytes);
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,6 +183,7 @@ impl DiscoveredProject {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CoterieDirectories {
     pub(crate) runtime: PathBuf,
+    pub(crate) leases: PathBuf,
     pub(crate) state: PathBuf,
     pub(crate) runs: PathBuf,
     pub(crate) projects: PathBuf,
@@ -142,6 +236,7 @@ impl CoterieDirectories {
         Ok(Self {
             runs: state.join("runs"),
             projects: state.join("projects"),
+            leases: runtime.join("projects"),
             runtime,
             state,
             runtime_base,
@@ -152,10 +247,7 @@ impl CoterieDirectories {
         &self,
         run_id: RunId,
     ) -> Result<RunDirectories, ProjectError> {
-        validate_runtime_base(&self.runtime_base)?;
-        for path in [&self.runtime, &self.state, &self.runs, &self.projects] {
-            create_private_directory(path)?;
-        }
+        self.prepare()?;
 
         let state = self.runs.join(run_id.to_string());
         create_private_directory(&state)?;
@@ -165,6 +257,26 @@ impl CoterieDirectories {
             projects: self.projects.clone(),
         })
     }
+
+    /// Prepares the private application directories shared by all local runs.
+    pub(crate) fn prepare(&self) -> Result<(), ProjectError> {
+        validate_runtime_base(&self.runtime_base)?;
+        for path in [
+            &self.runtime,
+            &self.leases,
+            &self.state,
+            &self.runs,
+            &self.projects,
+        ] {
+            create_private_directory(path)?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub(crate) fn socket_path(&self, run_id: RunId) -> PathBuf {
+        self.runtime.join(format!("{run_id}.sock"))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -172,6 +284,241 @@ pub(crate) struct RunDirectories {
     pub(crate) runtime: PathBuf,
     pub(crate) state: PathBuf,
     pub(crate) projects: PathBuf,
+}
+
+/// The result of attempting an exclusive project lease without waiting.
+pub(crate) enum LeaseAttempt {
+    Acquired(ProjectLease),
+    Held,
+}
+
+/// An exclusive lease retained for as long as its backing file remains open.
+pub(crate) struct ProjectLease {
+    _file: File,
+}
+
+impl ProjectLease {
+    pub(crate) fn try_acquire(
+        directories: &CoterieDirectories,
+        identity: &ProjectIdentity,
+        run_id: RunId,
+    ) -> Result<LeaseAttempt, ProjectError> {
+        let key = ProjectKey::for_identity(identity);
+        let path = directories.leases.join(format!("{key}.lock"));
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|source| ProjectError::LeaseIo {
+                action: "open",
+                path: path.clone(),
+                source,
+            })?;
+
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Ok(LeaseAttempt::Held);
+            }
+            Err(fs::TryLockError::Error(source)) => {
+                return Err(ProjectError::LeaseIo {
+                    action: "lock",
+                    path,
+                    source,
+                });
+            }
+        }
+
+        file.set_len(0)
+            .and_then(|()| file.rewind())
+            .and_then(|()| {
+                writeln!(file, "{run_id}")?;
+                file.sync_data()
+            })
+            .map_err(|source| ProjectError::LeaseIo {
+                action: "record owner in",
+                path: path.clone(),
+                source,
+            })?;
+
+        Ok(LeaseAttempt::Acquired(Self { _file: file }))
+    }
+}
+
+/// Disposable lookup metadata for the run that owns one project identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ActiveRunEntry {
+    pub(crate) schema_version: u16,
+    pub(crate) run_id: RunId,
+    pub(crate) project_id: ProjectId,
+    pub(crate) project_key: ProjectKey,
+    pub(crate) project_identity: ProjectIdentity,
+}
+
+impl ActiveRunEntry {
+    #[must_use]
+    pub(crate) fn new(
+        run_id: RunId,
+        project_id: ProjectId,
+        project_identity: ProjectIdentity,
+    ) -> Self {
+        let project_key = ProjectKey::for_identity(&project_identity);
+        Self {
+            schema_version: ACTIVE_RUN_INDEX_VERSION,
+            run_id,
+            project_id,
+            project_key,
+            project_identity,
+        }
+    }
+}
+
+/// Reads and atomically updates the disposable active-run project index.
+pub(crate) struct ActiveRunIndex {
+    directory: PathBuf,
+}
+
+impl ActiveRunIndex {
+    #[must_use]
+    pub(crate) fn new(directories: &CoterieDirectories) -> Self {
+        Self {
+            directory: directories.projects.clone(),
+        }
+    }
+
+    pub(crate) fn lookup(
+        &self,
+        identity: &ProjectIdentity,
+    ) -> Result<Option<ActiveRunEntry>, ProjectError> {
+        let key = ProjectKey::for_identity(identity);
+        let path = self.entry_path(&key);
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(source) => {
+                return Err(ProjectError::IndexIo {
+                    action: "open",
+                    path,
+                    source,
+                });
+            }
+        };
+        let mut encoded = Vec::new();
+        file.read_to_end(&mut encoded).map_err(|source| {
+            ProjectError::IndexIo {
+                action: "read",
+                path: path.clone(),
+                source,
+            }
+        })?;
+        let entry = serde_json::from_slice::<ActiveRunEntry>(&encoded)
+            .map_err(|source| ProjectError::IndexJson {
+                path: path.clone(),
+                source,
+            })?;
+        if entry.schema_version != ACTIVE_RUN_INDEX_VERSION {
+            return Err(ProjectError::UnsupportedIndexVersion {
+                path,
+                found: entry.schema_version,
+                supported: ACTIVE_RUN_INDEX_VERSION,
+            });
+        }
+        if entry.project_key != key || entry.project_identity != *identity {
+            return Err(ProjectError::IndexIdentityMismatch { path });
+        }
+        Ok(Some(entry))
+    }
+
+    pub(crate) fn publish(
+        &self,
+        entry: &ActiveRunEntry,
+    ) -> Result<(), ProjectError> {
+        let expected_key = ProjectKey::for_identity(&entry.project_identity);
+        if entry.schema_version != ACTIVE_RUN_INDEX_VERSION
+            || entry.project_key != expected_key
+        {
+            return Err(ProjectError::InvalidIndexEntry);
+        }
+
+        let path = self.entry_path(&entry.project_key);
+        let temporary = self.directory.join(format!(
+            ".{}.{}.{}.tmp",
+            entry.project_key,
+            entry.run_id,
+            RunId::generate()
+        ));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&temporary)
+                .map_err(|source| ProjectError::IndexIo {
+                    action: "create temporary",
+                    path: temporary.clone(),
+                    source,
+                })?;
+            serde_json::to_writer(&mut file, entry).map_err(|source| {
+                ProjectError::EncodeIndex {
+                    path: temporary.clone(),
+                    source,
+                }
+            })?;
+            file.write_all(b"\n")
+                .and_then(|()| file.sync_all())
+                .map_err(|source| ProjectError::IndexIo {
+                    action: "persist temporary",
+                    path: temporary.clone(),
+                    source,
+                })?;
+            fs::rename(&temporary, &path).map_err(|source| {
+                ProjectError::IndexIo {
+                    action: "publish",
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            sync_directory(&self.directory)
+        })();
+
+        if result.is_err() {
+            let _ignored = fs::remove_file(&temporary);
+        }
+        result
+    }
+
+    pub(crate) fn retire(
+        &self,
+        identity: &ProjectIdentity,
+        run_id: RunId,
+    ) -> Result<(), ProjectError> {
+        let Some(entry) = self.lookup(identity)? else {
+            return Ok(());
+        };
+        if entry.run_id != run_id {
+            return Ok(());
+        }
+        let path = self.entry_path(&entry.project_key);
+        match fs::remove_file(&path) {
+            Ok(()) => sync_directory(&self.directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(ProjectError::IndexIo {
+                action: "retire",
+                path,
+                source,
+            }),
+        }
+    }
+
+    fn entry_path(&self, key: &ProjectKey) -> PathBuf {
+        self.directory.join(format!("{key}.json"))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -225,6 +572,56 @@ pub(crate) enum ProjectError {
         #[source]
         source: io::Error,
     },
+    #[error("invalid project identity key `{value}`")]
+    InvalidProjectKey { value: String },
+    #[error("could not {action} project lease at {path:?}: {source}")]
+    LeaseIo {
+        action: &'static str,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not {action} active-run index at {path:?}: {source}")]
+    IndexIo {
+        action: &'static str,
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not encode active-run index at {path:?}: {source}")]
+    EncodeIndex {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("could not decode active-run index at {path:?}: {source}")]
+    IndexJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error(
+        "active-run index at {path:?} has version {found}, but version {supported} is supported"
+    )]
+    UnsupportedIndexVersion {
+        path: PathBuf,
+        found: u16,
+        supported: u16,
+    },
+    #[error("active-run index at {path:?} does not match its project identity")]
+    IndexIdentityMismatch { path: PathBuf },
+    #[error("active-run index entry is internally inconsistent")]
+    InvalidIndexEntry,
+}
+
+fn sync_directory(path: &Path) -> Result<(), ProjectError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| ProjectError::IndexIo {
+            action: "synchronize",
+            path: path.to_owned(),
+            source,
+        })
 }
 
 fn canonicalize(
@@ -364,9 +761,10 @@ mod tests {
     use git2::{Repository, Signature, WorktreeAddOptions};
 
     use super::{
-        CoterieDirectories, DiscoveredProject, ProjectError, ProjectIdentity,
+        ActiveRunEntry, ActiveRunIndex, CoterieDirectories, DiscoveredProject,
+        LeaseAttempt, ProjectError, ProjectIdentity, ProjectKey, ProjectLease,
     };
-    use crate::id::RunId;
+    use crate::id::{ProjectId, RunId};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
@@ -522,6 +920,18 @@ mod tests {
             .expect("the identity should deserialize losslessly");
 
         assert_eq!(decoded, project.identity);
+    }
+
+    #[test]
+    fn project_identity_keys_have_a_stable_filesystem_contract() {
+        let identity = ProjectIdentity::Directory {
+            canonical_directory: PathBuf::from("/tmp/project"),
+        };
+
+        assert_eq!(
+            ProjectKey::for_identity(&identity).as_str(),
+            "15da66ddfb38f372717bfd9f46426f598dcc6baac5f1e895211ccbef64d2c58e"
+        );
     }
 
     #[test]
@@ -684,6 +1094,160 @@ mod tests {
                 .is_none(),
             "nothing should be placed through the symlink"
         );
+    }
+
+    #[test]
+    fn project_leases_are_nonblocking_and_identity_scoped() {
+        let fixture = TestDirectory::new();
+        let runtime_base = fixture.join("runtime");
+        create_directory(&runtime_base, 0o700);
+        let directories = CoterieDirectories::from_base_directories(
+            &runtime_base,
+            fixture.join("state"),
+        )
+        .expect("the paths should resolve");
+        directories
+            .prepare()
+            .expect("the private directories should be prepared");
+        let first = ProjectIdentity::Directory {
+            canonical_directory: fixture.join("first"),
+        };
+        let second = ProjectIdentity::Directory {
+            canonical_directory: fixture.join("second"),
+        };
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+
+        let first_lease =
+            match ProjectLease::try_acquire(&directories, &first, run_id)
+                .expect("the first lease attempt should complete")
+            {
+                LeaseAttempt::Acquired(lease) => lease,
+                LeaseAttempt::Held => {
+                    panic!("the first lease should be available")
+                }
+            };
+        assert!(matches!(
+            ProjectLease::try_acquire(&directories, &first, RunId::generate())
+                .expect("contention should be reported without blocking"),
+            LeaseAttempt::Held
+        ));
+        let lease_path = directories
+            .leases
+            .join(format!("{}.lock", ProjectKey::for_identity(&first)));
+        assert_eq!(
+            fs::read_to_string(lease_path)
+                .expect("the owner record should remain readable"),
+            format!("{run_id}\n"),
+            "a losing contender must not truncate the current owner record"
+        );
+        assert!(matches!(
+            ProjectLease::try_acquire(&directories, &second, run_id)
+                .expect("a different identity should not contend"),
+            LeaseAttempt::Acquired(_)
+        ));
+
+        drop(first_lease);
+        assert!(matches!(
+            ProjectLease::try_acquire(&directories, &first, run_id)
+                .expect("a released lease should be acquirable"),
+            LeaseAttempt::Acquired(_)
+        ));
+    }
+
+    #[test]
+    fn active_run_index_is_identity_checked_and_retired_only_by_its_owner() {
+        let fixture = TestDirectory::new();
+        let runtime_base = fixture.join("runtime");
+        create_directory(&runtime_base, 0o700);
+        let directories = CoterieDirectories::from_base_directories(
+            &runtime_base,
+            fixture.join("state"),
+        )
+        .expect("the paths should resolve");
+        directories
+            .prepare()
+            .expect("the private directories should be prepared");
+        let identity = ProjectIdentity::Directory {
+            canonical_directory: fixture.join("project"),
+        };
+        let entry = ActiveRunEntry {
+            schema_version: 1,
+            run_id: RUN_ID.parse().expect("valid run ID"),
+            project_id: "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW"
+                .parse::<ProjectId>()
+                .expect("valid project ID"),
+            project_key: ProjectKey::for_identity(&identity),
+            project_identity: identity.clone(),
+        };
+        let index = ActiveRunIndex::new(&directories);
+
+        index
+            .publish(&entry)
+            .expect("the entry should be published");
+        assert_eq!(
+            index
+                .lookup(&identity)
+                .expect("the entry should be readable"),
+            Some(entry.clone())
+        );
+
+        index
+            .retire(&identity, RunId::generate())
+            .expect("a non-owner retirement should be harmless");
+        assert_eq!(
+            index.lookup(&identity).expect("the entry should remain"),
+            Some(entry.clone())
+        );
+
+        index
+            .retire(&identity, entry.run_id)
+            .expect("the owner should retire its entry");
+        assert_eq!(
+            index.lookup(&identity).expect("the lookup should succeed"),
+            None
+        );
+    }
+
+    #[test]
+    fn active_run_index_rejects_content_for_another_identity() {
+        let fixture = TestDirectory::new();
+        let runtime_base = fixture.join("runtime");
+        create_directory(&runtime_base, 0o700);
+        let directories = CoterieDirectories::from_base_directories(
+            &runtime_base,
+            fixture.join("state"),
+        )
+        .expect("the paths should resolve");
+        directories
+            .prepare()
+            .expect("the private directories should be prepared");
+        let expected = ProjectIdentity::Directory {
+            canonical_directory: fixture.join("expected"),
+        };
+        let key = ProjectKey::for_identity(&expected);
+        let inconsistent = ActiveRunEntry {
+            schema_version: 1,
+            run_id: RUN_ID.parse().expect("valid run ID"),
+            project_id: "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW"
+                .parse()
+                .expect("valid project ID"),
+            project_key: key.clone(),
+            project_identity: ProjectIdentity::Directory {
+                canonical_directory: fixture.join("different"),
+            },
+        };
+        let path = directories.projects.join(format!("{key}.json"));
+        fs::write(
+            &path,
+            serde_json::to_vec(&inconsistent)
+                .expect("the inconsistent fixture should encode"),
+        )
+        .expect("the fixture index should be written");
+
+        assert!(matches!(
+            ActiveRunIndex::new(&directories).lookup(&expected),
+            Err(ProjectError::IndexIdentityMismatch { .. })
+        ));
     }
 
     fn initialize_repository(path: &Path) -> Repository {

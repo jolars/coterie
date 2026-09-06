@@ -86,7 +86,7 @@ later milestones build on.
 - [x] Discover the canonical Git project or non-Git directory, derive its
   identity, and place private runtime and durable data beneath the
   appropriate XDG directories.
-- [ ] Implement a nonblocking exclusive project lease, active-run index, Unix
+- [x] Implement a nonblocking exclusive project lease, active-run index, Unix
   socket handshake, automatic singleton supervisor startup, and typed local
   RPC.
 - [ ] Authenticate agents with random, generation-scoped tokens whose stored

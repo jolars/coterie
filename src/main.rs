@@ -38,4 +38,13 @@ mod tasks;
 mod transcript;
 mod workspace;
 
-fn main() {}
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::process::ExitCode {
+    match supervisor::run_from_environment().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("coterie: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}

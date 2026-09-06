@@ -80,6 +80,10 @@ pub(crate) enum StoreError {
     /// Related task, claim, and assignment records violate a lifecycle invariant.
     #[error("task `{id}` has corrupt lifecycle state: {reason}")]
     CorruptTaskState { id: TaskId, reason: String },
+
+    /// Orderly shutdown did not find the expected active run.
+    #[error("run `{id}` is not active during orderly shutdown")]
+    RunNotActive { id: RunId },
 }
 
 /// The supervisor-owned connection to one run database.
@@ -657,6 +661,24 @@ impl Repositories<'_, '_> {
                 },
             )
             .optional()?)
+    }
+
+    /// Marks an active run stopped during orderly supervisor shutdown.
+    pub(crate) fn stop_run(
+        &self,
+        id: RunId,
+        stopped_at: i64,
+    ) -> Result<(), StoreError> {
+        let changed = self.transaction.execute(
+            "UPDATE runs SET status = 'stopped', stopped_at = ?2 \
+             WHERE id = ?1 AND status = 'active' AND stopped_at IS NULL",
+            params![id, stopped_at],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::RunNotActive { id })
+        }
     }
 
     pub(crate) fn insert_configuration_snapshot(
@@ -1884,6 +1906,36 @@ mod tests {
                 _
             )) if failure.code == ErrorCode::ConstraintViolation
         ));
+    }
+
+    #[test]
+    fn orderly_shutdown_stops_an_active_run_exactly_once() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let run = Records::fixture().run;
+        store
+            .transaction(|repositories| repositories.insert_run(&run))
+            .expect("the active run should be inserted");
+
+        store
+            .transaction(|repositories| repositories.stop_run(run.id, 20))
+            .expect("the active run should stop");
+        store
+            .transaction(|repositories| {
+                let stopped = repositories
+                    .run(run.id)?
+                    .expect("the stopped run should remain durable");
+                assert_eq!(stopped.status, "stopped");
+                assert_eq!(stopped.stopped_at, Some(20));
+                Ok(())
+            })
+            .expect("the stopped run should be readable");
+
+        let error = store
+            .transaction(|repositories| repositories.stop_run(run.id, 21))
+            .expect_err("a stopped run must not be stopped again");
+        assert!(
+            matches!(error, super::StoreError::RunNotActive { id } if id == run.id)
+        );
     }
 
     #[test]
