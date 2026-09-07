@@ -6,7 +6,8 @@
 
 > [!WARNING]
 > Coterie is under active development. The M2 command loop currently uses a
-> deterministic fake provider; Codex and Git worktree integration arrive in M3.
+> deterministic fake provider. M3 now probes Codex compatibility, but Codex
+> process launch and Git worktree integration remain under development.
 
 Coterie is a project-native Rust CLI for coordinating coding agents. It will
 keep orchestration mechanics, durable state, workspaces, and policy enforcement

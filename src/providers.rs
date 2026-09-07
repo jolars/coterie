@@ -1,10 +1,14 @@
 //! Out-of-process agent harness adapters.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fmt;
+use std::io;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 
+use semver::Version;
 use thiserror::Error;
 
 use crate::auth::SessionScope;
@@ -39,8 +43,16 @@ impl fmt::Display for ProviderCapability {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderProbe {
     pub(crate) name: String,
-    pub(crate) version: String,
+    pub(crate) version: Version,
     pub(crate) capabilities: BTreeSet<ProviderCapability>,
+    pub(crate) compatibility: ProviderCompatibility,
+}
+
+/// Whether an installed provider version belongs to a validated release range.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderCompatibility {
+    Compatible,
+    Incompatible { reason: String, remedy: String },
 }
 
 /// Whether Coterie owns an interactive foreground or background job session.
@@ -270,7 +282,7 @@ pub(crate) enum ProviderRecovery {
 
 /// The process boundary used by the session supervisor.
 pub(crate) trait Provider {
-    fn probe(&self) -> ProviderProbe;
+    fn probe(&self) -> Result<ProviderProbe, ProviderError>;
 
     fn launch_interactive(
         &mut self,
@@ -310,23 +322,347 @@ pub(crate) trait Provider {
 }
 
 /// A provider adapter could not perform a requested session operation.
-#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[derive(Debug, Error)]
 pub(crate) enum ProviderError {
     #[error("the fake provider has no launch script remaining")]
     NoLaunchScript,
     #[error("provider session `{provider_id}` does not exist")]
     UnknownSession { provider_id: String },
+    #[error(
+        "the Codex provider command is empty; configure a provider executable"
+    )]
+    EmptyCodexCommand,
+    #[error(
+        "could not execute a Codex probe with `{executable}`: {source}; install Codex CLI 0.151.0 or later and ensure `{executable}` is on PATH"
+    )]
+    ProbeExecution {
+        executable: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "the Codex {probe} probe exited with {status}: {diagnostic}; run `codex update` or install Codex CLI 0.151.0 or later"
+    )]
+    ProbeFailed {
+        probe: &'static str,
+        status: String,
+        diagnostic: String,
+    },
+    #[error(
+        "could not parse {output:?}; expected `codex-cli <semantic-version>` from `codex --version`; run `codex update` or install Codex CLI 0.151.0 or later"
+    )]
+    InvalidVersionOutput { output: String },
+    #[error("the Codex adapter does not implement {operation} yet")]
+    UnsupportedCodexOperation { operation: &'static str },
+}
+
+const MINIMUM_CODEX_VERSION: &str = "0.151.0";
+const CODEX_VERSION_REQUIREMENT: &str = ">=0.151.0 and <1.0.0";
+
+/// The installed Codex CLI, invoked only through its documented process boundary.
+pub(crate) struct CodexProvider {
+    command: Vec<OsString>,
+    probe_runner: Box<dyn ProbeCommandRunner>,
+}
+
+impl CodexProvider {
+    pub(crate) fn new(
+        command: impl IntoIterator<Item = impl Into<OsString>>,
+    ) -> Self {
+        Self {
+            command: command.into_iter().map(Into::into).collect(),
+            probe_runner: Box::new(ProcessProbeRunner),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_runner(
+        command: impl IntoIterator<Item = impl Into<OsString>>,
+        runner: impl ProbeCommandRunner + 'static,
+    ) -> Self {
+        Self {
+            command: command.into_iter().map(Into::into).collect(),
+            probe_runner: Box::new(runner),
+        }
+    }
+
+    fn command_output(
+        &self,
+        arguments: &[&str],
+        probe: &'static str,
+    ) -> Result<ProbeOutput, ProviderError> {
+        let executable = self
+            .command
+            .first()
+            .ok_or(ProviderError::EmptyCodexCommand)?
+            .to_string_lossy()
+            .into_owned();
+        let output = self.probe_runner.run(&self.command, arguments).map_err(
+            |source| ProviderError::ProbeExecution { executable, source },
+        )?;
+        if !output.success {
+            let status = output.code.map_or_else(
+                || "termination by signal".to_owned(),
+                |code| format!("status {code}"),
+            );
+            return Err(ProviderError::ProbeFailed {
+                probe,
+                status,
+                diagnostic: diagnostic_output(&output.stderr, &output.stdout),
+            });
+        }
+        Ok(output)
+    }
+
+    fn probe_codex(&self) -> Result<ProviderProbe, ProviderError> {
+        let version_output = self.command_output(&["--version"], "version")?;
+        let version_text =
+            String::from_utf8(version_output.stdout).map_err(|error| {
+                ProviderError::InvalidVersionOutput {
+                    output: format!("non-UTF-8 output: {error}"),
+                }
+            })?;
+        let version = parse_codex_version(&version_text)?;
+        let compatibility = codex_compatibility(&version);
+        if !matches!(compatibility, ProviderCompatibility::Compatible) {
+            return Ok(ProviderProbe {
+                name: "codex".to_owned(),
+                version,
+                capabilities: BTreeSet::new(),
+                compatibility,
+            });
+        }
+
+        let interactive_help = String::from_utf8_lossy(
+            &self
+                .command_output(&["--help"], "interactive capability")?
+                .stdout,
+        )
+        .into_owned();
+        let job_help = String::from_utf8_lossy(
+            &self
+                .command_output(&["exec", "--help"], "job capability")?
+                .stdout,
+        )
+        .into_owned();
+        let capabilities = codex_capabilities(&interactive_help, &job_help);
+
+        Ok(ProviderProbe {
+            name: "codex".to_owned(),
+            version,
+            capabilities,
+            compatibility,
+        })
+    }
+}
+
+impl Provider for CodexProvider {
+    fn probe(&self) -> Result<ProviderProbe, ProviderError> {
+        self.probe_codex()
+    }
+
+    fn launch_interactive(
+        &mut self,
+        _specification: &LaunchSpecification,
+    ) -> Result<ProviderSessionHandle, ProviderError> {
+        Err(ProviderError::UnsupportedCodexOperation {
+            operation: "interactive launch",
+        })
+    }
+
+    fn launch_job(
+        &mut self,
+        _specification: &LaunchSpecification,
+    ) -> Result<ProviderSessionHandle, ProviderError> {
+        Err(ProviderError::UnsupportedCodexOperation {
+            operation: "job launch",
+        })
+    }
+
+    fn recover(
+        &self,
+        _provider_session_id: &str,
+        _scope: SessionScope,
+    ) -> Result<ProviderRecovery, ProviderError> {
+        Err(ProviderError::UnsupportedCodexOperation {
+            operation: "session recovery",
+        })
+    }
+
+    fn observe(
+        &self,
+        _session: &ProviderSessionHandle,
+    ) -> Result<SessionObservation, ProviderError> {
+        Err(ProviderError::UnsupportedCodexOperation {
+            operation: "session observation",
+        })
+    }
+
+    fn next_event(
+        &mut self,
+        _session: &ProviderSessionHandle,
+    ) -> Result<Option<ProviderEvent>, ProviderError> {
+        Err(ProviderError::UnsupportedCodexOperation {
+            operation: "event streaming",
+        })
+    }
+
+    fn interrupt(
+        &mut self,
+        _session: &ProviderSessionHandle,
+    ) -> Result<SessionObservation, ProviderError> {
+        Err(ProviderError::UnsupportedCodexOperation {
+            operation: "interrupt",
+        })
+    }
+
+    fn terminate(
+        &mut self,
+        _session: &ProviderSessionHandle,
+    ) -> Result<SessionObservation, ProviderError> {
+        Err(ProviderError::UnsupportedCodexOperation {
+            operation: "termination",
+        })
+    }
+}
+
+struct ProbeOutput {
+    success: bool,
+    code: Option<i32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+trait ProbeCommandRunner {
+    fn run(
+        &self,
+        command: &[OsString],
+        arguments: &[&str],
+    ) -> Result<ProbeOutput, io::Error>;
+}
+
+struct ProcessProbeRunner;
+
+impl ProbeCommandRunner for ProcessProbeRunner {
+    fn run(
+        &self,
+        command: &[OsString],
+        arguments: &[&str],
+    ) -> Result<ProbeOutput, io::Error> {
+        let (program, configured_arguments) =
+            command.split_first().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "empty provider command",
+                )
+            })?;
+        let output = Command::new(program)
+            .args(configured_arguments)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()?;
+        Ok(ProbeOutput {
+            success: output.status.success(),
+            code: output.status.code(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+}
+
+fn parse_codex_version(output: &str) -> Result<Version, ProviderError> {
+    let fields = output.split_whitespace().collect::<Vec<_>>();
+    if fields.len() != 2 || fields[0] != "codex-cli" {
+        return Err(ProviderError::InvalidVersionOutput {
+            output: output.trim().to_owned(),
+        });
+    }
+    Version::parse(fields[1]).map_err(|_| ProviderError::InvalidVersionOutput {
+        output: output.trim().to_owned(),
+    })
+}
+
+fn codex_compatibility(version: &Version) -> ProviderCompatibility {
+    let minimum = Version::parse(MINIMUM_CODEX_VERSION)
+        .expect("the compiled Codex minimum version is valid");
+    let reason = if version < &minimum {
+        Some(format!(
+            "Codex CLI {version} is older than the minimum supported version {minimum}"
+        ))
+    } else if version.major != 0 {
+        Some(format!(
+            "Codex CLI {version} has an unvalidated major version"
+        ))
+    } else {
+        None
+    };
+    reason.map_or(ProviderCompatibility::Compatible, |reason| {
+        ProviderCompatibility::Incompatible {
+            reason,
+            remedy: format!(
+                "run `codex update` or install Codex CLI {CODEX_VERSION_REQUIREMENT}; upgrade Coterie before using a newer Codex major release"
+            ),
+        }
+    })
+}
+
+fn codex_capabilities(
+    interactive_help: &str,
+    job_help: &str,
+) -> BTreeSet<ProviderCapability> {
+    let interactive = interactive_help.contains("Usage: codex ")
+        && interactive_help.contains("--cd")
+        && interactive_help.contains("--config");
+    let job = job_help.contains("Usage: codex exec ")
+        && job_help.contains("--cd")
+        && job_help.contains("--config");
+    let structured_job = job && job_help.contains("--json");
+    let mut capabilities = BTreeSet::new();
+    if interactive {
+        capabilities.insert(ProviderCapability::ForegroundInteractive);
+    }
+    if job {
+        capabilities.insert(ProviderCapability::BackgroundJobs);
+    }
+    if interactive && job {
+        capabilities.insert(ProviderCapability::StartupInstructions);
+    }
+    if structured_job {
+        capabilities.insert(ProviderCapability::StructuredLifecycleEvents);
+        capabilities.insert(ProviderCapability::TranscriptStreaming);
+    }
+    capabilities
+}
+
+fn diagnostic_output(primary: &[u8], fallback: &[u8]) -> String {
+    let bytes = if primary.is_empty() {
+        fallback
+    } else {
+        primary
+    };
+    let output = String::from_utf8_lossy(bytes);
+    let output = output.trim();
+    if output.is_empty() {
+        "no diagnostic output".to_owned()
+    } else {
+        output.chars().take(512).collect()
+    }
 }
 
 pub(crate) mod fake {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+    use semver::Version;
+
     use crate::auth::SessionScope;
 
     use super::{
         LaunchMode, LaunchSpecification, Provider, ProviderCapability,
-        ProviderError, ProviderEvent, ProviderEventKind, ProviderProbe,
-        ProviderRecovery, ProviderSessionHandle, SessionObservation,
+        ProviderCompatibility, ProviderError, ProviderEvent, ProviderEventKind,
+        ProviderProbe, ProviderRecovery, ProviderSessionHandle,
+        SessionObservation,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -374,6 +710,8 @@ pub(crate) mod fake {
         sessions: BTreeMap<String, FakeSession>,
         launches: Vec<FakeLaunch>,
         next_session: u64,
+        capabilities: BTreeSet<ProviderCapability>,
+        compatibility: ProviderCompatibility,
     }
 
     impl FakeProvider {
@@ -385,7 +723,35 @@ pub(crate) mod fake {
                 sessions: BTreeMap::new(),
                 launches: Vec::new(),
                 next_session: 1,
+                capabilities: BTreeSet::from([
+                    ProviderCapability::StartupInstructions,
+                    ProviderCapability::ForegroundInteractive,
+                    ProviderCapability::BackgroundJobs,
+                    ProviderCapability::StructuredLifecycleEvents,
+                    ProviderCapability::Interrupt,
+                    ProviderCapability::Termination,
+                    ProviderCapability::TranscriptStreaming,
+                ]),
+                compatibility: ProviderCompatibility::Compatible,
             }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn with_compatibility(
+            mut self,
+            compatibility: ProviderCompatibility,
+        ) -> Self {
+            self.compatibility = compatibility;
+            self
+        }
+
+        #[cfg(test)]
+        pub(crate) fn without_capability(
+            mut self,
+            capability: ProviderCapability,
+        ) -> Self {
+            self.capabilities.remove(&capability);
+            self
         }
 
         pub(crate) fn launches(&self) -> &[FakeLaunch] {
@@ -456,20 +822,13 @@ pub(crate) mod fake {
     }
 
     impl Provider for FakeProvider {
-        fn probe(&self) -> ProviderProbe {
-            ProviderProbe {
+        fn probe(&self) -> Result<ProviderProbe, ProviderError> {
+            Ok(ProviderProbe {
                 name: "fake".to_owned(),
-                version: "1".to_owned(),
-                capabilities: BTreeSet::from([
-                    ProviderCapability::StartupInstructions,
-                    ProviderCapability::ForegroundInteractive,
-                    ProviderCapability::BackgroundJobs,
-                    ProviderCapability::StructuredLifecycleEvents,
-                    ProviderCapability::Interrupt,
-                    ProviderCapability::Termination,
-                    ProviderCapability::TranscriptStreaming,
-                ]),
-            }
+                version: Version::new(1, 0, 0),
+                capabilities: self.capabilities.clone(),
+                compatibility: self.compatibility.clone(),
+            })
         }
 
         fn launch_interactive(
@@ -547,12 +906,19 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::{BTreeSet, VecDeque};
+    use std::ffi::OsString;
+    use std::io;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     use super::fake::{FakeEvent, FakeProvider, FakeScript};
     use super::{
-        ActivityState, LaunchMode, LaunchSpecification, LifecycleState,
-        Provider, ProviderEventKind, SessionObservation,
+        ActivityState, CodexProvider, LaunchMode, LaunchSpecification,
+        LifecycleState, ProbeCommandRunner, ProbeOutput, Provider,
+        ProviderCapability, ProviderCompatibility, ProviderError,
+        ProviderEventKind, SessionObservation,
     };
     use crate::auth::SessionScope;
     use crate::id::{AgentId, RunId, SessionId};
@@ -560,6 +926,218 @@ mod tests {
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const AGENT_ID: &str = "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX";
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+
+    #[test]
+    fn codex_probe_discovers_the_supported_command_surface() {
+        let runner = ScriptedProbeRunner::new([
+            Ok(success("codex-cli 0.151.0\n")),
+            Ok(success(
+                "Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n",
+            )),
+            Ok(success(
+                "Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --json\n",
+            )),
+        ]);
+        let observations = runner.observations();
+        let provider = CodexProvider::with_runner(
+            ["codex-wrapper", "--provider", "codex"],
+            runner,
+        );
+
+        let probe = provider.probe().expect("the probe should complete");
+
+        assert_eq!(probe.name, "codex");
+        assert_eq!(probe.version, semver::Version::new(0, 151, 0));
+        assert_eq!(probe.compatibility, ProviderCompatibility::Compatible);
+        assert_eq!(
+            probe.capabilities,
+            BTreeSet::from([
+                ProviderCapability::StartupInstructions,
+                ProviderCapability::ForegroundInteractive,
+                ProviderCapability::BackgroundJobs,
+                ProviderCapability::StructuredLifecycleEvents,
+                ProviderCapability::TranscriptStreaming,
+            ])
+        );
+        assert_eq!(
+            observations.borrow().as_slice(),
+            [
+                vec![
+                    OsString::from("codex-wrapper"),
+                    OsString::from("--provider"),
+                    OsString::from("codex"),
+                    OsString::from("--version"),
+                ],
+                vec![
+                    OsString::from("codex-wrapper"),
+                    OsString::from("--provider"),
+                    OsString::from("codex"),
+                    OsString::from("--help"),
+                ],
+                vec![
+                    OsString::from("codex-wrapper"),
+                    OsString::from("--provider"),
+                    OsString::from("codex"),
+                    OsString::from("exec"),
+                    OsString::from("--help"),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn codex_probe_marks_unvalidated_versions_incompatible() {
+        for (version, expected_reason) in [
+            (
+                "0.150.0",
+                "is older than the minimum supported version 0.151.0",
+            ),
+            ("1.0.0", "has an unvalidated major version"),
+        ] {
+            let provider = CodexProvider::with_runner(
+                ["codex"],
+                ScriptedProbeRunner::new([Ok(success(&format!(
+                    "codex-cli {version}\n"
+                )))]),
+            );
+
+            let probe = provider.probe().expect("the version should be read");
+
+            assert_eq!(probe.version, version.parse().expect("valid version"));
+            assert!(probe.capabilities.is_empty());
+            assert!(matches!(
+                probe.compatibility,
+                ProviderCompatibility::Incompatible { ref reason, ref remedy }
+                    if reason.contains(expected_reason)
+                        && remedy.contains("codex update")
+                        && remedy.contains("0.151.0")
+            ));
+        }
+    }
+
+    #[test]
+    fn codex_probe_does_not_claim_missing_job_capabilities() {
+        let provider = CodexProvider::with_runner(
+            ["codex"],
+            ScriptedProbeRunner::new([
+                Ok(success("codex-cli 0.151.0\n")),
+                Ok(success(
+                    "Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n",
+                )),
+                Ok(success(
+                    "Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n",
+                )),
+            ]),
+        );
+
+        let probe = provider.probe().expect("the probe should complete");
+
+        assert!(
+            probe
+                .capabilities
+                .contains(&ProviderCapability::BackgroundJobs)
+        );
+        assert!(
+            !probe
+                .capabilities
+                .contains(&ProviderCapability::StructuredLifecycleEvents)
+        );
+        assert!(
+            !probe
+                .capabilities
+                .contains(&ProviderCapability::TranscriptStreaming)
+        );
+    }
+
+    #[test]
+    fn codex_probe_rejects_malformed_version_output() {
+        for output in [
+            "0.151.0\n",
+            "codex-cli newest\n",
+            "codex-cli 0.151.0 unexpected\n",
+        ] {
+            let provider = CodexProvider::with_runner(
+                ["codex"],
+                ScriptedProbeRunner::new([Ok(success(output))]),
+            );
+
+            let error = provider
+                .probe()
+                .expect_err("ambiguous versions must fail closed");
+
+            assert!(matches!(
+                error,
+                ProviderError::InvalidVersionOutput { .. }
+            ));
+            assert!(error.to_string().contains("`codex --version`"));
+        }
+    }
+
+    #[test]
+    fn codex_probe_failure_suggests_how_to_install_or_update_codex() {
+        let provider = CodexProvider::with_runner(
+            ["missing-codex"],
+            ScriptedProbeRunner::new([Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "fixture executable is absent",
+            ))]),
+        );
+
+        let error = provider
+            .probe()
+            .expect_err("an absent provider must fail the probe");
+        let message = error.to_string();
+
+        assert!(matches!(error, ProviderError::ProbeExecution { .. }));
+        assert!(message.contains("missing-codex"));
+        assert!(message.contains("install Codex CLI"));
+        assert!(message.contains("PATH"));
+    }
+
+    #[test]
+    fn codex_capability_probe_failure_is_actionable() {
+        let provider = CodexProvider::with_runner(
+            ["codex"],
+            ScriptedProbeRunner::new([
+                Ok(success("codex-cli 0.151.0\n")),
+                Ok(failure(2, "unknown option `--help`\n")),
+            ]),
+        );
+
+        let error = provider
+            .probe()
+            .expect_err("a failed capability probe must fail closed");
+        let message = error.to_string();
+
+        assert!(matches!(error, ProviderError::ProbeFailed { .. }));
+        assert!(message.contains("interactive capability"));
+        assert!(message.contains("status 2"));
+        assert!(message.contains("unknown option `--help`"));
+        assert!(message.contains("codex update"));
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly installed Codex CLI"]
+    fn installed_codex_satisfies_the_probe_contract() {
+        let probe = CodexProvider::new(["codex"])
+            .probe()
+            .expect("the installed Codex CLI should be probeable");
+
+        assert_eq!(probe.compatibility, ProviderCompatibility::Compatible);
+        for capability in [
+            ProviderCapability::StartupInstructions,
+            ProviderCapability::ForegroundInteractive,
+            ProviderCapability::BackgroundJobs,
+            ProviderCapability::StructuredLifecycleEvents,
+            ProviderCapability::TranscriptStreaming,
+        ] {
+            assert!(
+                probe.capabilities.contains(&capability),
+                "installed Codex {} does not advertise {capability}",
+                probe.version
+            );
+        }
+    }
 
     #[test]
     fn fake_provider_replays_a_session_script_deterministically() {
@@ -672,6 +1250,65 @@ mod tests {
             },
             working_directory: PathBuf::from("/tmp/project"),
             bootstrap_instruction: "Run `coterie prime`.".to_owned(),
+        }
+    }
+
+    #[derive(Clone)]
+    struct ScriptedProbeRunner {
+        outputs: Rc<RefCell<VecDeque<Result<ProbeOutput, io::Error>>>>,
+        observations: Rc<RefCell<Vec<Vec<OsString>>>>,
+    }
+
+    impl ScriptedProbeRunner {
+        fn new(
+            outputs: impl IntoIterator<Item = Result<ProbeOutput, io::Error>>,
+        ) -> Self {
+            Self {
+                outputs: Rc::new(RefCell::new(outputs.into_iter().collect())),
+                observations: Rc::new(RefCell::new(Vec::new())),
+            }
+        }
+
+        fn observations(&self) -> Rc<RefCell<Vec<Vec<OsString>>>> {
+            Rc::clone(&self.observations)
+        }
+    }
+
+    impl ProbeCommandRunner for ScriptedProbeRunner {
+        fn run(
+            &self,
+            command: &[OsString],
+            arguments: &[&str],
+        ) -> Result<ProbeOutput, io::Error> {
+            self.observations.borrow_mut().push(
+                command
+                    .iter()
+                    .cloned()
+                    .chain(arguments.iter().map(OsString::from))
+                    .collect(),
+            );
+            self.outputs
+                .borrow_mut()
+                .pop_front()
+                .expect("the probe made an unexpected command call")
+        }
+    }
+
+    fn success(stdout: &str) -> ProbeOutput {
+        ProbeOutput {
+            success: true,
+            code: Some(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn failure(code: i32, stderr: &str) -> ProbeOutput {
+        ProbeOutput {
+            success: false,
+            code: Some(code),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
         }
     }
 }

@@ -113,7 +113,7 @@ later milestones build on.
 
 ## M3: Codex and Git vertical slice---v0.1.0 MVP
 
-- [ ] Probe the installed Codex version and required capabilities before launch;
+- [x] Probe the installed Codex version and required capabilities before launch;
   reject incompatible versions with an actionable diagnostic.
 - [ ] Launch the foreground Codex TUI with inherited terminal streams, working
   directory, resize behavior, and signal forwarding. Inject only Coterie's

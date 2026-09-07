@@ -97,10 +97,11 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 .launch_session(store, launch, true, assignment_id)
                 .map(Some);
         };
+        let probe = self.provider.probe()?;
         if session.run_id != launch.scope.run_id
             || session.agent_id != launch.scope.agent_id
             || session.generation != launch.scope.generation
-            || session.provider != self.provider.probe().name
+            || session.provider != probe.name
         {
             return Err(AgentSessionError::IntentMismatch {
                 session_id: launch.scope.session_id,
@@ -109,6 +110,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         match session.reconciliation_state {
             ExternalResourceState::Observed => Ok(None),
             ExternalResourceState::Desired => {
+                validate_provider_probe(&probe, launch)?;
                 if self.sessions.contains_key(&launch.scope.session_id) {
                     self.record_launch_observation(
                         store,
@@ -197,15 +199,8 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         agent_exists: bool,
         assignment_id: Option<AssignmentId>,
     ) -> Result<AgentToken, AgentSessionError> {
-        let probe = self.provider.probe();
-        for capability in required_capabilities(launch) {
-            if !probe.capabilities.contains(&capability) {
-                return Err(AgentSessionError::MissingCapability {
-                    provider: probe.name,
-                    capability,
-                });
-            }
-        }
+        let probe = self.provider.probe()?;
+        validate_provider_probe(&probe, launch)?;
 
         let token = AgentToken::generate()?;
         let transcript_path =
@@ -832,6 +827,34 @@ fn required_capabilities(
     .flatten()
 }
 
+fn validate_provider_probe(
+    probe: &crate::providers::ProviderProbe,
+    launch: &AgentLaunch,
+) -> Result<(), AgentSessionError> {
+    if let crate::providers::ProviderCompatibility::Incompatible {
+        reason,
+        remedy,
+    } = &probe.compatibility
+    {
+        return Err(AgentSessionError::IncompatibleProvider {
+            provider: probe.name.clone(),
+            version: probe.version.clone(),
+            reason: reason.clone(),
+            remedy: remedy.clone(),
+        });
+    }
+    for capability in required_capabilities(launch) {
+        if !probe.capabilities.contains(&capability) {
+            return Err(AgentSessionError::MissingCapability {
+                provider: probe.name.clone(),
+                version: probe.version.clone(),
+                capability,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// A provider event could not be applied to its durable session generation.
 #[derive(Debug, Error)]
 pub(crate) enum AgentSessionError {
@@ -843,9 +866,21 @@ pub(crate) enum AgentSessionError {
     Transcript(#[from] TranscriptError),
     #[error(transparent)]
     Token(#[from] TokenGenerationError),
-    #[error("provider `{provider}` does not support {capability}")]
+    #[error(
+        "provider `{provider}` version {version} is incompatible: {reason}; {remedy}"
+    )]
+    IncompatibleProvider {
+        provider: String,
+        version: semver::Version,
+        reason: String,
+        remedy: String,
+    },
+    #[error(
+        "provider `{provider}` version {version} does not support {capability}; update the provider or select a compatible provider binding"
+    )]
     MissingCapability {
         provider: String,
+        version: semver::Version,
         capability: ProviderCapability,
     },
     #[error("provider session scope is {observed:?}, expected {expected:?}")]
@@ -874,7 +909,8 @@ mod tests {
     use crate::id::{AgentId, RunId, SessionId};
     use crate::providers::fake::{FakeEvent, FakeProvider, FakeScript};
     use crate::providers::{
-        ActivityState, LaunchMode, LifecycleState, SessionObservation,
+        ActivityState, LaunchMode, LifecycleState, ProviderCapability,
+        ProviderCompatibility, SessionObservation,
     };
     use crate::state::{ExternalResourceState, RunRecord, Store};
 
@@ -908,6 +944,70 @@ mod tests {
                 Ok(())
             })
             .expect("the launch intent should be readable");
+    }
+
+    #[test]
+    fn incompatible_provider_is_rejected_before_launch_intent() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let provider = FakeProvider::new([FakeScript::new([])])
+            .with_compatibility(ProviderCompatibility::Incompatible {
+                reason: "fixture version is unsupported".to_owned(),
+                remedy: "install fixture provider 2.0 or later".to_owned(),
+            });
+        let mut supervisor =
+            AgentSessionSupervisor::new(provider, &directory.0);
+
+        let error = match supervisor.launch(&mut store, &launch(run_id)) {
+            Err(error) => error,
+            Ok(_) => panic!("an incompatible provider must not launch"),
+        };
+
+        assert!(error.to_string().contains("fixture version is unsupported"));
+        assert!(error.to_string().contains("install fixture provider"));
+        assert!(supervisor.provider.launches().is_empty());
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories.session(launch(run_id).scope.session_id)?,
+                    None
+                );
+                Ok(())
+            })
+            .expect("failed preflight must not create durable launch intent");
+    }
+
+    #[test]
+    fn missing_required_capability_is_rejected_before_launch_intent() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let provider = FakeProvider::new([FakeScript::new([])])
+            .without_capability(ProviderCapability::BackgroundJobs);
+        let mut supervisor =
+            AgentSessionSupervisor::new(provider, &directory.0);
+
+        let error = match supervisor.launch(&mut store, &launch(run_id)) {
+            Err(error) => error,
+            Ok(_) => panic!("a provider missing job support must not launch"),
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("fake"));
+        assert!(message.contains("1.0.0"));
+        assert!(message.contains("background job execution"));
+        assert!(message.contains("update the provider"));
+        assert!(supervisor.provider.launches().is_empty());
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories.session(launch(run_id).scope.session_id)?,
+                    None
+                );
+                Ok(())
+            })
+            .expect("failed preflight must not create durable launch intent");
     }
 
     #[test]

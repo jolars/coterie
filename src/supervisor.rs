@@ -2323,7 +2323,8 @@ fn rpc_timestamp() -> Result<i64, RpcFailure> {
 
 fn rpc_session_failure(error: AgentSessionError) -> RpcFailure {
     match error {
-        AgentSessionError::MissingCapability { .. }
+        AgentSessionError::IncompatibleProvider { .. }
+        | AgentSessionError::MissingCapability { .. }
         | AgentSessionError::Provider(_) => {
             RpcFailure::new(RpcFailureCode::Unavailable, error.to_string())
         }
