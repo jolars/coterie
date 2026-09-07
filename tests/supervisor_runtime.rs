@@ -1,13 +1,13 @@
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use git2::{Repository, Signature};
+use git2::{Repository, Signature, StatusOptions};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde_json::Value;
@@ -313,6 +313,45 @@ fn human_success_and_diagnostics_use_separate_streams() {
     assert_eq!(invalid.status.code(), Some(2));
     assert!(invalid.stdout.is_empty());
     assert!(!invalid.stderr.is_empty());
+
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn clean_git_launch_starts_and_reconnects_to_silent_foreground_leads() {
+    let fixture = TestEnvironment::new();
+    assert_repository_clean(&fixture.project);
+
+    fixture.launch(&[]);
+    let initial_status = fixture.run_json(&["status", "--json"]);
+    let run_id = initial_status["data"]["run_id"]
+        .as_str()
+        .expect("status should identify the started run")
+        .to_owned();
+    let socket = fixture
+        .runtime
+        .join("coterie")
+        .join(format!("{run_id}.sock"));
+    let socket_inode = fs::metadata(&socket)
+        .expect("the started supervisor should publish its socket")
+        .ino();
+
+    assert_eq!(initial_status["data"]["agents"][0]["name"], "lead");
+    assert_eq!(initial_status["data"]["agents"][0]["state"], "exited");
+
+    fixture.launch(&[]);
+    let reconnected_status = fixture.run_json(&["status", "--json"]);
+
+    assert_eq!(reconnected_status["data"]["run_id"], run_id);
+    assert_eq!(
+        fs::metadata(&socket)
+            .expect("the reconnected supervisor socket should remain live")
+            .ino(),
+        socket_inode
+    );
+    assert_eq!(reconnected_status["data"]["agents"][0]["name"], "lead");
+    assert_eq!(reconnected_status["data"]["agents"][0]["state"], "exited");
+    assert_repository_clean(&fixture.project);
 
     fixture.run_json(&["stop", "--json"]);
 }
@@ -1587,6 +1626,21 @@ fn commit_file(
         )
         .expect("the worker result commit should be created")
         .to_string()
+}
+
+fn assert_repository_clean(project: &Path) {
+    let repository =
+        Repository::open(project).expect("the fixture repository should open");
+    let mut options = StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    let statuses = repository
+        .statuses(Some(&mut options))
+        .expect("the fixture repository status should be readable");
+    assert!(
+        statuses.is_empty(),
+        "the fixture repository should be clean, but had {} status entries",
+        statuses.len()
+    );
 }
 
 struct TestEnvironment {

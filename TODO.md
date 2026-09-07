@@ -144,7 +144,7 @@ later milestones build on.
 
 ### v0.1.0 MVP gate
 
-- [ ] From a clean Git repository, `coterie` starts or reconnects to its
+- [x] From a clean Git repository, `coterie` starts or reconnects to its
   supervisor and opens the foreground Codex lead without unsolicited wrapper
   output corrupting the TUI.
 - [ ] The lead can create one task, spawn one Codex worker in an isolated
