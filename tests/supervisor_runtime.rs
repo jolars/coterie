@@ -1607,15 +1607,21 @@ impl TestEnvironment {
     }
 
     fn new_with_repository(initialize_repository: bool) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "ct-{}-{}",
-            std::process::id(),
-            ulid::Ulid::generate()
-        ));
-        let runtime = root.join("runtime");
+        let fixture_id =
+            format!("{}-{}", std::process::id(), ulid::Ulid::generate());
+        let root = std::env::temp_dir().join(format!("ct-{fixture_id}"));
+        // The kernel bounds Unix socket paths, so keep this fixture independent
+        // of an arbitrarily long `TMPDIR` used for its other files.
+        let runtime =
+            Path::new("/tmp").join(format!("ct-runtime-{fixture_id}"));
         let state = root.join("state");
         let project = root.join("project");
         let bin = root.join("bin");
+        let socket = runtime.join("coterie").join(format!("{RUN_ID}.sock"));
+        assert!(
+            socket.as_os_str().as_bytes().len() <= 107,
+            "the test runtime must support Coterie's Unix socket path: {socket:?}"
+        );
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -1756,7 +1762,7 @@ impl TestEnvironment {
     }
 
     fn files(&self) -> Vec<PathBuf> {
-        let mut pending = vec![self.root.clone()];
+        let mut pending = vec![self.root.clone(), self.runtime.clone()];
         let mut files = Vec::new();
         while let Some(path) = pending.pop() {
             files.push(path.clone());
@@ -1773,9 +1779,11 @@ impl TestEnvironment {
 
 impl Drop for TestEnvironment {
     fn drop(&mut self) {
-        if self.root.exists() {
-            fs::remove_dir_all(&self.root)
-                .expect("the test environment should be removable");
+        for path in [&self.root, &self.runtime] {
+            if path.exists() {
+                fs::remove_dir_all(path)
+                    .expect("the test environment should be removable");
+            }
         }
     }
 }
