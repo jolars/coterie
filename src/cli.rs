@@ -675,7 +675,7 @@ fn write_json_line(
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use serde_json::json;
 
     use super::{
@@ -685,6 +685,72 @@ mod tests {
     };
 
     const OPERATION_ID: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn user_documentation_covers_the_mvp_contract() {
+        let readme = include_str!("../README.md");
+        for heading in [
+            "## Installation",
+            "## Codex prerequisites",
+            "## sidekick.nvim",
+        ] {
+            assert!(readme.contains(heading), "README is missing `{heading}`");
+        }
+
+        let contract = include_str!("../docs/cli-contract.md");
+        for heading in ["## Recovery", "## Trust model", "## Exit codes"] {
+            assert!(
+                contract.contains(heading),
+                "CLI contract is missing `{heading}`"
+            );
+        }
+
+        let mut public_commands = Vec::new();
+        collect_public_commands(
+            &Arguments::command(),
+            "coterie".to_owned(),
+            &mut public_commands,
+        );
+        let documented_commands = contract
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("### `coterie")
+                    .and_then(|line| line.strip_suffix('`'))
+                    .map(|line| format!("coterie{line}"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(documented_commands, public_commands);
+        for category in ExitCategory::ALL {
+            let row =
+                format!("| {} | `{}` |", category.code(), category.name());
+            assert!(
+                contract.contains(&row),
+                "CLI contract is missing exit category `{}`",
+                category.name()
+            );
+        }
+    }
+
+    fn collect_public_commands(
+        command: &clap::Command,
+        path: String,
+        commands: &mut Vec<String>,
+    ) {
+        if path == "coterie" || !command.is_subcommand_required_set() {
+            commands.push(path.clone());
+        }
+        for subcommand in command
+            .get_subcommands()
+            .filter(|subcommand| !subcommand.is_hide_set())
+        {
+            collect_public_commands(
+                subcommand,
+                format!("{path} {}", subcommand.get_name()),
+                commands,
+            );
+        }
+    }
 
     #[test]
     fn inbox_acknowledgement_is_an_explicit_idempotent_command() {

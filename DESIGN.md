@@ -132,9 +132,13 @@ also work without either one.
 For sidekick.nvim, Coterie should require only a normal custom CLI entry:
 
 ```lua
-tools = {
-  coterie = {
-    cmd = { "coterie" },
+opts = {
+  cli = {
+    tools = {
+      coterie = {
+        cmd = { "coterie" },
+      },
+    },
   },
 }
 ```

@@ -135,7 +135,7 @@ later milestones build on.
 - [x] Complete the operator loop for task creation, worker spawn, logs and
   messages, assignment submission, integration, validation, task closure,
   and safe stop.
-- [ ] Document installation, Codex prerequisites, the Sidekick custom-command
+- [x] Document installation, Codex prerequisites, the Sidekick custom-command
   entry, the trust model, recovery behavior, and every MVP command and exit
   code.
 - [ ] Enable crates.io publication with trusted publishing and attach a
