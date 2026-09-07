@@ -91,6 +91,7 @@ pub(crate) enum LifecycleState {
     Running,
     Exited,
     Lost,
+    Unknown,
     Quarantined,
 }
 
@@ -102,6 +103,7 @@ impl LifecycleState {
             Self::Running => "running",
             Self::Exited => "exited",
             Self::Lost => "lost",
+            Self::Unknown => "unknown",
             Self::Quarantined => "quarantined",
         }
     }
@@ -114,12 +116,13 @@ impl LifecycleState {
     #[must_use]
     pub(crate) fn allows(self, next: Self) -> bool {
         self == next
-            || matches!(self, Self::Starting | Self::Running)
+            || matches!(self, Self::Starting | Self::Running | Self::Unknown)
                 && matches!(
                     next,
                     Self::Running
                         | Self::Exited
                         | Self::Lost
+                        | Self::Unknown
                         | Self::Quarantined
                 )
     }
@@ -140,6 +143,7 @@ impl FromStr for LifecycleState {
             "running" => Ok(Self::Running),
             "exited" => Ok(Self::Exited),
             "lost" => Ok(Self::Lost),
+            "unknown" => Ok(Self::Unknown),
             "quarantined" => Ok(Self::Quarantined),
             _ => Err(InvalidLifecycleState(value.to_owned())),
         }
@@ -253,6 +257,17 @@ pub(crate) enum ProviderEventKind {
     Output(Vec<u8>),
 }
 
+/// What an adapter can prove about a durable provider execution identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderRecovery {
+    Observed {
+        handle: ProviderSessionHandle,
+        observation: SessionObservation,
+    },
+    Lost,
+    Unknown,
+}
+
 /// The process boundary used by the session supervisor.
 pub(crate) trait Provider {
     fn probe(&self) -> ProviderProbe;
@@ -266,6 +281,12 @@ pub(crate) trait Provider {
         &mut self,
         specification: &LaunchSpecification,
     ) -> Result<ProviderSessionHandle, ProviderError>;
+
+    fn recover(
+        &self,
+        provider_session_id: &str,
+        scope: SessionScope,
+    ) -> Result<ProviderRecovery, ProviderError>;
 
     fn observe(
         &self,
@@ -300,10 +321,12 @@ pub(crate) enum ProviderError {
 pub(crate) mod fake {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+    use crate::auth::SessionScope;
+
     use super::{
         LaunchMode, LaunchSpecification, Provider, ProviderCapability,
         ProviderError, ProviderEvent, ProviderEventKind, ProviderProbe,
-        ProviderSessionHandle, SessionObservation,
+        ProviderRecovery, ProviderSessionHandle, SessionObservation,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq)]
@@ -339,6 +362,7 @@ pub(crate) mod fake {
     }
 
     struct FakeSession {
+        scope: SessionScope,
         observation: SessionObservation,
         next_sequence: u64,
         events: VecDeque<FakeEvent>,
@@ -386,6 +410,7 @@ pub(crate) mod fake {
             self.sessions.insert(
                 provider_id.clone(),
                 FakeSession {
+                    scope: specification.scope,
                     observation: SessionObservation::starting(),
                     next_sequence: 1,
                     events: script.events,
@@ -459,6 +484,23 @@ pub(crate) mod fake {
             specification: &LaunchSpecification,
         ) -> Result<ProviderSessionHandle, ProviderError> {
             self.launch(LaunchMode::Job, specification)
+        }
+
+        fn recover(
+            &self,
+            provider_session_id: &str,
+            scope: SessionScope,
+        ) -> Result<ProviderRecovery, ProviderError> {
+            let Some(session) = self.sessions.get(provider_session_id) else {
+                return Ok(ProviderRecovery::Lost);
+            };
+            if session.scope != scope {
+                return Ok(ProviderRecovery::Unknown);
+            }
+            Ok(ProviderRecovery::Observed {
+                handle: ProviderSessionHandle::new(provider_session_id, scope),
+                observation: session.observation,
+            })
         }
 
         fn observe(
@@ -604,6 +646,7 @@ mod tests {
             ("running", LifecycleState::Running),
             ("exited", LifecycleState::Exited),
             ("lost", LifecycleState::Lost),
+            ("unknown", LifecycleState::Unknown),
             ("quarantined", LifecycleState::Quarantined),
         ];
 

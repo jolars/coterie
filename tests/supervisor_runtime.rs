@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -291,6 +292,50 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
     assert_eq!(spawn["data"]["agent"]["state"], "running");
     assert_eq!(spawn["data"]["task_id"], task_id);
     assert!(spawn["data"]["assignment_id"].as_str().is_some());
+    let session_id = spawn["data"]["session_id"]
+        .as_str()
+        .expect("spawn should return a session ID");
+    let assignment_id = spawn["data"]["assignment_id"]
+        .as_str()
+        .expect("spawn should return an assignment ID");
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(&run_id)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database)
+        .expect("the active run database should be readable");
+    let (provider_session_id, session_reconciliation): (
+        Option<String>,
+        String,
+    ) = connection
+        .query_row(
+            "SELECT provider_session_id, reconciliation_state \
+                 FROM sessions WHERE id = ?1",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the session observation should be durable");
+    assert_eq!(provider_session_id.as_deref(), Some("fake-session-2"));
+    assert_eq!(session_reconciliation, "observed");
+    let (workspace_kind, workspace_path, workspace_reconciliation): (
+        String,
+        Vec<u8>,
+        String,
+    ) = connection
+        .query_row(
+            "SELECT kind, path, state FROM workspaces WHERE assignment_id = ?1",
+            [assignment_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("the workspace observation should be durable");
+    assert_eq!(workspace_kind, "worktree");
+    assert_eq!(workspace_reconciliation, "observed");
+    assert!(
+        Path::new(std::ffi::OsStr::from_bytes(&workspace_path))
+            .starts_with(fixture.state.join("coterie/runs").join(&run_id)),
+        "the assignment workspace should be rooted in private run state"
+    );
     let retried_spawn = fixture.run_json(&[
         "spawn",
         "worker",
@@ -367,10 +412,13 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
         "project.attached",
         "agent.created",
         "session.started",
+        "session.reconciliation_changed",
         "session.lifecycle_changed",
         "task.created",
         "task.claimed",
         "assignment.created",
+        "workspace.desired",
+        "workspace.reconciliation_changed",
         "message.sent",
     ] {
         assert!(
@@ -555,6 +603,91 @@ fn stale_index_and_socket_restart_the_same_durable_run() {
     shutdown.arg("__supervisor-shutdown");
     assert!(run(shutdown).status.success());
     wait_until("restarted supervisor retirement", || !stale_index.exists());
+}
+
+#[test]
+fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
+    let fixture = TestEnvironment::new();
+    let log_path = fixture.root.join("reconciliation-supervisor.log");
+    let log = fs::File::create(&log_path).expect("the log should be created");
+    let mut command = fixture.command();
+    command
+        .arg("__supervisor")
+        .arg(RUN_ID)
+        .arg(PROJECT_ID)
+        .arg(&fixture.project)
+        .stdout(std::process::Stdio::null())
+        .stderr(log);
+    let mut crashed = command.spawn().expect("the supervisor should start");
+    wait_until("supervisor publication", || {
+        fixture.index_entry_count() == 1
+    });
+
+    let launch = fixture.run_json(&[
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB8",
+        "--json",
+    ]);
+    let session_id = launch["data"]["session_id"]
+        .as_str()
+        .expect("launch should return a session ID")
+        .to_owned();
+
+    crashed
+        .kill()
+        .expect("the owned fixture process should stop");
+    crashed.wait().expect("the killed process should be reaped");
+    let restart = run(fixture.connect_command());
+    assert!(restart.status.success(), "restart failed: {restart:?}");
+
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(RUN_ID)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(database)
+        .expect("the restarted run database should open");
+    let (lifecycle, reconciliation): (String, String) = connection
+        .query_row(
+            "SELECT state, reconciliation_state FROM sessions WHERE id = ?1",
+            [&session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the reconciled session should remain durable");
+    assert_eq!(lifecycle, "lost");
+    assert_eq!(reconciliation, "lost");
+    let lost_events: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM events \
+             WHERE event_type = 'session.reconciliation_changed' \
+               AND json_extract(payload_json, '$.data.state') = 'lost'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the reconciliation event should be queryable");
+    assert_eq!(lost_events, 1);
+    drop(connection);
+
+    let mut replay = fixture.command();
+    replay.args(["--operation-id", "co-01ARZ3NDEKTSV4RRFFQ69G5FB8", "--json"]);
+    let replay = run(replay);
+    assert_eq!(replay.status.code(), Some(5));
+    assert!(replay.stdout.is_empty());
+    let failure: Value = serde_json::from_slice(&replay.stderr)
+        .expect("the uncertain retry should return a JSON diagnostic");
+    assert_eq!(failure["error"]["code"], "conflict");
+    assert!(
+        failure["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("launch state is `lost`"))
+    );
+
+    let mut shutdown = fixture.command();
+    shutdown.arg("__supervisor-shutdown");
+    assert!(run(shutdown).status.success());
+    wait_until("restarted supervisor retirement", || {
+        fixture.index_entry_count() == 0
+    });
 }
 
 fn run(mut command: Command) -> std::process::Output {

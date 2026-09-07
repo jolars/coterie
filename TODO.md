@@ -99,7 +99,7 @@ later milestones build on.
 - [x] Persist messages before delivery, use monotonic inbox cursors and explicit
   acknowledgements, and normalize every state transition into the event
   stream.
-- [ ] Record durable intent before launching a process or changing a workspace;
+- [x] Record durable intent before launching a process or changing a workspace;
   reconciliation must distinguish desired, observed, lost, and unknown
   state.
 

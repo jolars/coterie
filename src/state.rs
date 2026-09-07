@@ -48,6 +48,13 @@ const MIGRATIONS: &[Migration] = &[
         name: "durable_messages",
         sql: include_str!("state/migrations/0004_durable_messages.sql"),
     },
+    Migration {
+        version: 5,
+        name: "external_resource_reconciliation",
+        sql: include_str!(
+            "state/migrations/0005_external_resource_reconciliation.sql"
+        ),
+    },
 ];
 
 #[derive(Debug)]
@@ -185,11 +192,60 @@ pub(crate) struct SessionRecord {
     pub(crate) agent_id: AgentId,
     pub(crate) generation: i64,
     pub(crate) provider: String,
+    pub(crate) provider_session_id: Option<String>,
+    pub(crate) reconciliation_state: ExternalResourceState,
     pub(crate) state: LifecycleState,
     pub(crate) transcript_path: PathBuf,
     pub(crate) created_at: i64,
     pub(crate) ended_at: Option<i64>,
+    pub(crate) reconciled_at: Option<i64>,
 }
+
+/// Durable knowledge about an external side effect owned by Coterie.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExternalResourceState {
+    Desired,
+    Observed,
+    Lost,
+    Unknown,
+}
+
+impl ExternalResourceState {
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Desired => "desired",
+            Self::Observed => "observed",
+            Self::Lost => "lost",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for ExternalResourceState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ExternalResourceState {
+    type Err = InvalidExternalResourceState;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "desired" => Ok(Self::Desired),
+            "observed" => Ok(Self::Observed),
+            "lost" => Ok(Self::Lost),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(InvalidExternalResourceState(value.to_owned())),
+        }
+    }
+}
+
+/// A reconciliation state read from durable storage is not recognized.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("unknown external-resource state `{0}`")]
+pub(crate) struct InvalidExternalResourceState(String);
 
 /// The durable, non-secret verifier for one provider session credential.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -206,6 +262,14 @@ pub(crate) struct SessionCredentialRecord {
 /// The result of applying a generation-fenced provider observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SessionTransitionOutcome {
+    Applied,
+    Unchanged,
+    Stale,
+}
+
+/// The result of changing durable reconciliation knowledge for one resource.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResourceTransitionOutcome {
     Applied,
     Unchanged,
     Stale,
@@ -439,11 +503,12 @@ pub(crate) struct WorkspaceRecord {
     pub(crate) project_id: ProjectId,
     pub(crate) kind: String,
     pub(crate) path: PathBuf,
-    pub(crate) state: String,
+    pub(crate) state: ExternalResourceState,
     pub(crate) base_commit: Option<String>,
     pub(crate) result_commit: Option<String>,
     pub(crate) target_commit: Option<String>,
     pub(crate) created_at: i64,
+    pub(crate) reconciled_at: Option<i64>,
 }
 
 /// One immutable entry in a run's typed event stream.
@@ -476,6 +541,7 @@ pub(crate) enum EventKind {
     AgentLifecycleChanged,
     SessionStarted,
     SessionLifecycleChanged,
+    SessionReconciliationChanged,
     TaskCreated,
     TaskClaimed,
     TaskLifecycleChanged,
@@ -485,6 +551,8 @@ pub(crate) enum EventKind {
     ClaimReleased,
     MessageSent,
     MessageAcknowledged,
+    WorkspaceDesired,
+    WorkspaceReconciliationChanged,
 }
 
 impl EventKind {
@@ -498,6 +566,9 @@ impl EventKind {
             Self::AgentLifecycleChanged => "agent.lifecycle_changed",
             Self::SessionStarted => "session.started",
             Self::SessionLifecycleChanged => "session.lifecycle_changed",
+            Self::SessionReconciliationChanged => {
+                "session.reconciliation_changed"
+            }
             Self::TaskCreated => "task.created",
             Self::TaskClaimed => "task.claimed",
             Self::TaskLifecycleChanged => "task.lifecycle_changed",
@@ -509,6 +580,10 @@ impl EventKind {
             Self::ClaimReleased => "claim.released",
             Self::MessageSent => "message.sent",
             Self::MessageAcknowledged => "message.acknowledged",
+            Self::WorkspaceDesired => "workspace.desired",
+            Self::WorkspaceReconciliationChanged => {
+                "workspace.reconciliation_changed"
+            }
         }
     }
 }
@@ -543,7 +618,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn open_in_memory() -> Result<Self, StoreError> {
+    pub(crate) fn open_in_memory() -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
         Self::from_connection(connection)
     }
@@ -1209,19 +1284,23 @@ impl Repositories<'_, '_> {
     ) -> Result<(), StoreError> {
         self.transaction.execute(
             "INSERT INTO sessions (\
-                 id, run_id, agent_id, generation, provider, state, transcript_path, \
-                 created_at, ended_at\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 id, run_id, agent_id, generation, provider, provider_session_id, \
+                 reconciliation_state, state, transcript_path, created_at, ended_at, \
+                 reconciled_at\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 session.id,
                 session.run_id,
                 session.agent_id,
                 session.generation,
                 session.provider,
+                session.provider_session_id,
+                session.reconciliation_state.as_str(),
                 session.state.as_str(),
                 path_bytes(&session.transcript_path),
                 session.created_at,
                 session.ended_at,
+                session.reconciled_at,
             ],
         )?;
         Ok(())
@@ -1234,8 +1313,9 @@ impl Repositories<'_, '_> {
         Ok(self
             .transaction
             .query_row(
-                "SELECT id, run_id, agent_id, generation, provider, state, transcript_path, \
-                        created_at, ended_at \
+                "SELECT id, run_id, agent_id, generation, provider, provider_session_id, \
+                        reconciliation_state, state, transcript_path, created_at, ended_at, \
+                        reconciled_at \
                  FROM sessions WHERE id = ?1",
                 [id],
                 |row| {
@@ -1245,10 +1325,15 @@ impl Repositories<'_, '_> {
                         agent_id: row.get(2)?,
                         generation: row.get(3)?,
                         provider: row.get(4)?,
-                        state: decode_lifecycle(row, 5)?,
-                        transcript_path: decode_path(row, 6)?,
-                        created_at: row.get(7)?,
-                        ended_at: row.get(8)?,
+                        provider_session_id: row.get(5)?,
+                        reconciliation_state: decode_external_resource_state(
+                            row, 6,
+                        )?,
+                        state: decode_lifecycle(row, 7)?,
+                        transcript_path: decode_path(row, 8)?,
+                        created_at: row.get(9)?,
+                        ended_at: row.get(10)?,
+                        reconciled_at: row.get(11)?,
                     })
                 },
             )
@@ -1263,8 +1348,9 @@ impl Repositories<'_, '_> {
         Ok(self
             .transaction
             .query_row(
-                "SELECT id, run_id, agent_id, generation, provider, state, transcript_path, \
-                        created_at, ended_at \
+                "SELECT id, run_id, agent_id, generation, provider, provider_session_id, \
+                        reconciliation_state, state, transcript_path, created_at, ended_at, \
+                        reconciled_at \
                  FROM sessions WHERE run_id = ?1 AND agent_id = ?2 \
                  ORDER BY generation DESC LIMIT 1",
                 params![run_id, agent_id],
@@ -1275,14 +1361,121 @@ impl Repositories<'_, '_> {
                         agent_id: row.get(2)?,
                         generation: row.get(3)?,
                         provider: row.get(4)?,
-                        state: decode_lifecycle(row, 5)?,
-                        transcript_path: decode_path(row, 6)?,
-                        created_at: row.get(7)?,
-                        ended_at: row.get(8)?,
+                        provider_session_id: row.get(5)?,
+                        reconciliation_state: decode_external_resource_state(
+                            row, 6,
+                        )?,
+                        state: decode_lifecycle(row, 7)?,
+                        transcript_path: decode_path(row, 8)?,
+                        created_at: row.get(9)?,
+                        ended_at: row.get(10)?,
+                        reconciled_at: row.get(11)?,
                     })
                 },
             )
             .optional()?)
+    }
+
+    pub(crate) fn sessions(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<SessionRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT id, run_id, agent_id, generation, provider, provider_session_id, \
+                    reconciliation_state, state, transcript_path, created_at, ended_at, \
+                    reconciled_at \
+             FROM sessions WHERE run_id = ?1 ORDER BY created_at, rowid",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok(SessionRecord {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                generation: row.get(3)?,
+                provider: row.get(4)?,
+                provider_session_id: row.get(5)?,
+                reconciliation_state: decode_external_resource_state(row, 6)?,
+                state: decode_lifecycle(row, 7)?,
+                transcript_path: decode_path(row, 8)?,
+                created_at: row.get(9)?,
+                ended_at: row.get(10)?,
+                reconciled_at: row.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Records the provider identity observed after a launch side effect.
+    pub(crate) fn record_session_launch_observation(
+        &self,
+        scope: crate::auth::SessionScope,
+        provider_session_id: &str,
+        observed_at: i64,
+    ) -> Result<SessionTransitionOutcome, StoreError> {
+        let Some(session) = self.session(scope.session_id)? else {
+            return Ok(SessionTransitionOutcome::Stale);
+        };
+        if session.run_id != scope.run_id
+            || session.agent_id != scope.agent_id
+            || session.generation != scope.generation
+        {
+            return Ok(SessionTransitionOutcome::Stale);
+        }
+        if session.reconciliation_state == ExternalResourceState::Observed
+            && session.provider_session_id.as_deref()
+                == Some(provider_session_id)
+        {
+            return Ok(SessionTransitionOutcome::Unchanged);
+        }
+        self.transaction.execute(
+            "UPDATE sessions \
+             SET provider_session_id = ?2, reconciliation_state = 'observed', \
+                 reconciled_at = ?3 \
+             WHERE id = ?1 AND run_id = ?4 AND agent_id = ?5 AND generation = ?6",
+            params![
+                scope.session_id,
+                provider_session_id,
+                observed_at,
+                scope.run_id,
+                scope.agent_id,
+                scope.generation,
+            ],
+        )?;
+        Ok(SessionTransitionOutcome::Applied)
+    }
+
+    /// Records conservative knowledge about a durable session intent.
+    pub(crate) fn record_session_reconciliation_state(
+        &self,
+        scope: crate::auth::SessionScope,
+        state: ExternalResourceState,
+        reconciled_at: i64,
+    ) -> Result<SessionTransitionOutcome, StoreError> {
+        let Some(session) = self.session(scope.session_id)? else {
+            return Ok(SessionTransitionOutcome::Stale);
+        };
+        if session.run_id != scope.run_id
+            || session.agent_id != scope.agent_id
+            || session.generation != scope.generation
+        {
+            return Ok(SessionTransitionOutcome::Stale);
+        }
+        if session.reconciliation_state == state {
+            return Ok(SessionTransitionOutcome::Unchanged);
+        }
+        self.transaction.execute(
+            "UPDATE sessions SET reconciliation_state = ?2, reconciled_at = ?3 \
+             WHERE id = ?1 AND run_id = ?4 AND agent_id = ?5 AND generation = ?6",
+            params![
+                scope.session_id,
+                state.as_str(),
+                reconciled_at,
+                scope.run_id,
+                scope.agent_id,
+                scope.generation,
+            ],
+        )?;
+        Ok(SessionTransitionOutcome::Applied)
     }
 
     /// Applies an observation only to the session and agent generation it owns.
@@ -1391,6 +1584,44 @@ impl Repositories<'_, '_> {
                 credential.created_at,
             ],
         )?;
+        Ok(())
+    }
+
+    /// Rotates a verifier only while its launch remains a known desired intent.
+    pub(crate) fn replace_desired_session_credential(
+        &self,
+        credential: &SessionCredentialRecord,
+    ) -> Result<(), StoreError> {
+        if credential.revoked_at.is_some() {
+            return Err(StoreError::CredentialAlreadyRevoked {
+                session_id: credential.session_id,
+            });
+        }
+        let updated = self.transaction.execute(
+            "UPDATE session_credentials \
+             SET token_verifier = ?5, created_at = ?6 \
+             WHERE session_id = ?1 AND run_id = ?2 AND agent_id = ?3 \
+               AND generation = ?4 AND revoked_at IS NULL \
+               AND EXISTS (\
+                   SELECT 1 FROM sessions \
+                   WHERE sessions.id = session_credentials.session_id \
+                     AND sessions.reconciliation_state = 'desired'\
+               )",
+            params![
+                credential.session_id,
+                credential.run_id,
+                credential.agent_id,
+                credential.generation,
+                credential.token_verifier.as_bytes().as_slice(),
+                credential.created_at,
+            ],
+        )?;
+        if updated != 1 {
+            return Err(StoreError::InconsistentSessionLifecycle {
+                session_id: credential.session_id,
+                agent_id: credential.agent_id,
+            });
+        }
         Ok(())
     }
 
@@ -2560,19 +2791,20 @@ impl Repositories<'_, '_> {
         self.transaction.execute(
             "INSERT INTO workspaces (\
                  assignment_id, run_id, project_id, kind, path, state, base_commit, \
-                 result_commit, target_commit, created_at\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 result_commit, target_commit, created_at, reconciled_at\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 workspace.assignment_id,
                 workspace.run_id,
                 workspace.project_id,
                 workspace.kind,
                 path_bytes(&workspace.path),
-                workspace.state,
+                workspace.state.as_str(),
                 workspace.base_commit,
                 workspace.result_commit,
                 workspace.target_commit,
                 workspace.created_at,
+                workspace.reconciled_at,
             ],
         )?;
         Ok(())
@@ -2586,7 +2818,7 @@ impl Repositories<'_, '_> {
             .transaction
             .query_row(
                 "SELECT assignment_id, run_id, project_id, kind, path, state, base_commit, \
-                        result_commit, target_commit, created_at \
+                        result_commit, target_commit, created_at, reconciled_at \
                  FROM workspaces WHERE assignment_id = ?1",
                 [assignment_id],
                 |row| {
@@ -2596,15 +2828,63 @@ impl Repositories<'_, '_> {
                         project_id: row.get(2)?,
                         kind: row.get(3)?,
                         path: decode_path(row, 4)?,
-                        state: row.get(5)?,
+                        state: decode_external_resource_state(row, 5)?,
                         base_commit: row.get(6)?,
                         result_commit: row.get(7)?,
                         target_commit: row.get(8)?,
                         created_at: row.get(9)?,
+                        reconciled_at: row.get(10)?,
                     })
                 },
             )
             .optional()?)
+    }
+
+    pub(crate) fn workspaces(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<WorkspaceRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT assignment_id, run_id, project_id, kind, path, state, base_commit, \
+                    result_commit, target_commit, created_at, reconciled_at \
+             FROM workspaces WHERE run_id = ?1 ORDER BY created_at, rowid",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok(WorkspaceRecord {
+                assignment_id: row.get(0)?,
+                run_id: row.get(1)?,
+                project_id: row.get(2)?,
+                kind: row.get(3)?,
+                path: decode_path(row, 4)?,
+                state: decode_external_resource_state(row, 5)?,
+                base_commit: row.get(6)?,
+                result_commit: row.get(7)?,
+                target_commit: row.get(8)?,
+                created_at: row.get(9)?,
+                reconciled_at: row.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn record_workspace_reconciliation_state(
+        &self,
+        assignment_id: AssignmentId,
+        state: ExternalResourceState,
+        reconciled_at: i64,
+    ) -> Result<ResourceTransitionOutcome, StoreError> {
+        let Some(workspace) = self.workspace(assignment_id)? else {
+            return Ok(ResourceTransitionOutcome::Stale);
+        };
+        if workspace.state == state {
+            return Ok(ResourceTransitionOutcome::Unchanged);
+        }
+        self.transaction.execute(
+            "UPDATE workspaces SET state = ?2, reconciled_at = ?3 \
+             WHERE assignment_id = ?1",
+            params![assignment_id, state.as_str(), reconciled_at],
+        )?;
+        Ok(ResourceTransitionOutcome::Applied)
     }
 
     pub(crate) fn insert_event(
@@ -2837,6 +3117,20 @@ fn decode_lifecycle(
     })
 }
 
+fn decode_external_resource_state(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<ExternalResourceState> {
+    let encoded = row.get::<_, String>(index)?;
+    encoded.parse().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -2852,12 +3146,12 @@ mod tests {
         AcknowledgeMessagesMutation, AcknowledgeMessagesResult, AgentRecord,
         AssignmentRecord, BUSY_TIMEOUT, ClaimRecord, ClaimRejection,
         ClaimTaskMutation, ClaimTaskResult, CommentRecord,
-        ConfigurationSnapshotRecord, DependencyRecord, EventRecord, MIGRATIONS,
-        MessageRecord, Mutation, MutationOutcome, OperationRecord,
-        ProjectRecord, RunRecord, SessionCredentialRecord, SessionRecord,
-        SessionTransitionOutcome, Store, TaskGroupRecord, TaskRecord,
-        TaskTransitionMutation, TaskTransitionRejection, TaskTransitionResult,
-        WorkspaceRecord,
+        ConfigurationSnapshotRecord, DependencyRecord, EventRecord,
+        ExternalResourceState, MIGRATIONS, MessageRecord, Mutation,
+        MutationOutcome, OperationRecord, ProjectRecord, RunRecord,
+        SessionCredentialRecord, SessionRecord, SessionTransitionOutcome,
+        Store, TaskGroupRecord, TaskRecord, TaskTransitionMutation,
+        TaskTransitionRejection, TaskTransitionResult, WorkspaceRecord,
     };
     use crate::auth::{AgentToken, SessionScope};
     use crate::id::{
@@ -4037,11 +4331,12 @@ mod tests {
 
         let connection =
             Connection::open(&database.0).expect("the database should open");
+        let future = MIGRATIONS.len() as i64 + 1;
         connection
             .execute(
                 "INSERT INTO schema_migrations (version, name, source) \
-                 VALUES (5, 'future', '-- future migration')",
-                [],
+                 VALUES (?1, 'future', '-- future migration')",
+                [future],
             )
             .expect("the test should simulate a newer Coterie version");
         drop(connection);
@@ -4053,9 +4348,10 @@ mod tests {
         assert!(matches!(
             error,
             super::StoreError::UnsupportedSchema {
-                found: 5,
-                supported: 4,
+                found,
+                supported,
             }
+            if found == future && supported == future - 1
         ));
     }
 
@@ -4794,10 +5090,13 @@ mod tests {
                     agent_id,
                     generation: 2,
                     provider: "codex".to_owned(),
+                    provider_session_id: Some("codex-session".to_owned()),
+                    reconciliation_state: ExternalResourceState::Observed,
                     state: LifecycleState::Running,
                     transcript_path: PathBuf::from("transcripts/session.jsonl"),
                     created_at: 14,
                     ended_at: None,
+                    reconciled_at: Some(14),
                 },
                 credential: SessionCredentialRecord {
                     run_id,
@@ -4905,13 +5204,14 @@ mod tests {
                     project_id,
                     kind: "worktree".to_owned(),
                     path: PathBuf::from("workspaces/assignment"),
-                    state: "desired".to_owned(),
+                    state: ExternalResourceState::Desired,
                     base_commit: Some(
                         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
                     ),
                     result_commit: None,
                     target_commit: None,
                     created_at: 25,
+                    reconciled_at: None,
                 },
                 event: EventRecord {
                     id: EVENT_ID.parse::<EventId>().expect("valid event ID"),

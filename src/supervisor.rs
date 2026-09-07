@@ -28,8 +28,8 @@ use crate::cli::{
     InboxCommand, TaskCommand,
 };
 use crate::config::{
-    AuthorizationDecision, Capability, RoleMode, builtin_standard,
-    compiled_defaults,
+    AuthorizationDecision, Capability, RoleMode, WorkspacePolicy,
+    builtin_standard, compiled_defaults,
 };
 use crate::id::{
     AgentId, AssignmentId, MessageId, OperationId, ProjectId, RunId, SessionId,
@@ -54,11 +54,14 @@ use crate::providers::{
 use crate::state::{
     AcknowledgeMessagesMutation, AcknowledgeMessagesResult, AgentRecord,
     ClaimTaskMutation, ClaimTaskResult, DependencyRecord, EventKind,
-    EventRecord, MessageRecord, Mutation, MutationOutcome, NewEvent,
-    ProjectRecord, RunRecord, Store, StoreError, TaskRecord,
-    TaskTransitionMutation, TaskTransitionRejection, TaskTransitionResult,
+    EventRecord, ExternalResourceState, MessageRecord, Mutation,
+    MutationOutcome, NewEvent, ProjectRecord, RunRecord, Store, StoreError,
+    TaskRecord, TaskTransitionMutation, TaskTransitionRejection,
+    TaskTransitionResult, WorkspaceRecord,
 };
 use crate::tasks::{TaskStatus, TaskTransition};
+use crate::workspace::fake::FakeWorkspace;
+use crate::workspace::{WorkspaceError, WorkspaceSupervisor};
 
 use self::session::{AgentLaunch, AgentSessionError, AgentSessionSupervisor};
 
@@ -626,12 +629,25 @@ async fn serve(
     let index = ActiveRunIndex::new(&directories);
     index.publish(&active)?;
     let mut sessions = runtime_sessions(&run_directories.state);
+    let mut workspaces = runtime_workspaces();
+    let reconciled_at = unix_timestamp()?;
+    workspaces.reconcile_after_restart(
+        &mut store,
+        active.run_id,
+        reconciled_at,
+    )?;
+    sessions.reconcile_after_restart(
+        &mut store,
+        active.run_id,
+        reconciled_at,
+    )?;
     let serve_result = serve_listener(
         listener,
         active.clone(),
         &run_directories.state,
         &mut store,
         &mut sessions,
+        &mut workspaces,
     )
     .await;
     let index_result = if serve_result.is_ok() {
@@ -654,6 +670,7 @@ async fn serve_listener(
     run_state_directory: &Path,
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
 ) -> Result<(), SupervisorError> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(16);
@@ -685,6 +702,7 @@ async fn serve_listener(
                 handle_command(
                     store,
                     sessions,
+                    workspaces,
                     run_state_directory,
                     active.run_id,
                     command,
@@ -720,6 +738,10 @@ fn runtime_sessions(
     AgentSessionSupervisor::new(FakeProvider::new(scripts), run_state_directory)
 }
 
+fn runtime_workspaces() -> WorkspaceSupervisor<FakeWorkspace> {
+    WorkspaceSupervisor::new(FakeWorkspace::new())
+}
+
 enum SupervisorCommand {
     AuthenticateAgent {
         agent_id: AgentId,
@@ -741,6 +763,7 @@ enum SupervisorCommand {
 fn handle_command(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
     run_state_directory: &Path,
     run_id: RunId,
     command: SupervisorCommand,
@@ -781,6 +804,7 @@ fn handle_command(
             let result = execute_request(
                 store,
                 sessions,
+                workspaces,
                 run_state_directory,
                 run_id,
                 &caller,
@@ -811,9 +835,18 @@ struct MessageIntent {
     sequence: i64,
 }
 
+struct SpawnRuntime<'a> {
+    store: &'a mut Store,
+    sessions: &'a mut AgentSessionSupervisor<FakeProvider>,
+    workspaces: &'a mut WorkspaceSupervisor<FakeWorkspace>,
+    run_state_directory: &'a Path,
+    run_id: RunId,
+}
+
 fn execute_request(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
     run_state_directory: &Path,
     run_id: RunId,
     caller: &AuthenticatedCaller,
@@ -856,9 +889,13 @@ fn execute_request(
             role,
             task_id,
         } => spawn_agent(
-            store,
-            sessions,
-            run_id,
+            SpawnRuntime {
+                store,
+                sessions,
+                workspaces,
+                run_state_directory,
+                run_id,
+            },
             caller,
             operation_id,
             role,
@@ -984,32 +1021,28 @@ fn launch_foreground(
         })
         .map_err(rpc_state_failure)?;
     let intent = mutation_value(outcome);
-    let session_exists = store
-        .transaction(|repositories| repositories.session(intent.session_id))
-        .map_err(rpc_state_failure)?
-        .is_some();
-    if !session_exists {
-        let project = primary_project(store, run_id)?;
-        let launch = AgentLaunch {
-            scope: SessionScope {
-                run_id,
-                agent_id: intent.agent_id,
-                session_id: intent.session_id,
-                generation: 0,
-            },
-            role: role.clone(),
-            mode: role_launch_mode(role_definition.mode),
-            working_directory: project.canonical_path,
-            bootstrap_instruction: bootstrap_instruction(run_id, &role),
-            created_at: now,
-        };
-        let launched = sessions
-            .launch_existing(store, &launch)
-            .map_err(rpc_session_failure)?;
+    let project = primary_project(store, run_id)?;
+    let launch = AgentLaunch {
+        scope: SessionScope {
+            run_id,
+            agent_id: intent.agent_id,
+            session_id: intent.session_id,
+            generation: 0,
+        },
+        role: role.clone(),
+        mode: role_launch_mode(role_definition.mode),
+        working_directory: project.canonical_path,
+        bootstrap_instruction: bootstrap_instruction(run_id, &role),
+        created_at: now,
+    };
+    if let Some(launched) = sessions
+        .ensure_existing_launch(store, &launch, None)
+        .map_err(rpc_session_failure)?
+    {
         debug_assert_eq!(launched.scope, launch.scope);
         let _provider_token = launched.token;
-        drain_fake_events(sessions, store, intent.session_id, now)?;
     }
+    drain_fake_events(sessions, store, intent.session_id, now)?;
     Ok(RpcResponse::ForegroundLaunched {
         run_id,
         agent: summary_for_agent(store, run_id, intent.agent_id)?,
@@ -1305,14 +1338,19 @@ fn close_task(
 }
 
 fn spawn_agent(
-    store: &mut Store,
-    sessions: &mut AgentSessionSupervisor<FakeProvider>,
-    run_id: RunId,
+    runtime: SpawnRuntime<'_>,
     caller: &AuthenticatedCaller,
     operation_id: OperationId,
     role: String,
     task_id: TaskId,
 ) -> Result<RpcResponse, RpcFailure> {
+    let SpawnRuntime {
+        store,
+        sessions,
+        workspaces,
+        run_state_directory,
+        run_id,
+    } = runtime;
     require_capability(store, run_id, caller, "spawn", &role)?;
     let archetype = builtin_standard();
     let role_definition = archetype
@@ -1420,6 +1458,59 @@ fn spawn_agent(
             repositories.append_task_claim_events(&claim, &claim_result)?;
             match claim_result {
                 ClaimTaskResult::Claimed { assignment_id, .. } => {
+                    let task = repositories.task(task_id)?.ok_or_else(|| {
+                        StoreError::CorruptTaskState {
+                            id: task_id,
+                            reason: "the claimed task disappeared".to_owned(),
+                        }
+                    })?;
+                    let project = repositories
+                        .project(task.project_id)?
+                        .ok_or_else(|| StoreError::CorruptTaskState {
+                            id: task_id,
+                            reason: "the target project disappeared".to_owned(),
+                        })?;
+                    let workspace = WorkspaceRecord {
+                        assignment_id,
+                        run_id,
+                        project_id: task.project_id,
+                        kind: workspace_policy_name(role_definition.workspace)
+                            .to_owned(),
+                        path: assignment_workspace_path(
+                            run_state_directory,
+                            role_definition.workspace,
+                            &project,
+                            assignment_id,
+                        ),
+                        state: ExternalResourceState::Desired,
+                        base_commit: None,
+                        result_commit: None,
+                        target_commit: None,
+                        created_at: now,
+                        reconciled_at: None,
+                    };
+                    repositories.insert_workspace(&workspace)?;
+                    repositories.append_event(&NewEvent {
+                        run_id,
+                        kind: EventKind::WorkspaceDesired,
+                        actor: event_actor(caller),
+                        subject: assignment_id.to_string(),
+                        project_id: Some(task.project_id),
+                        agent_id: Some(agent_id),
+                        task_id: Some(task_id),
+                        operation_id: Some(operation_id),
+                        correlation_id: None,
+                        causation_id: None,
+                        data: json!({
+                            "kind": workspace.kind,
+                            "path": workspace.path,
+                            "state": workspace.state.as_str(),
+                        }),
+                        summary: format!(
+                            "Recorded desired workspace for assignment {assignment_id}."
+                        ),
+                        created_at: now,
+                    })?;
                     Ok(SpawnIntent {
                         agent_id,
                         session_id,
@@ -1439,45 +1530,47 @@ fn spawn_agent(
         })
         .map_err(rpc_state_failure)?;
     let intent = mutation_value(outcome);
-    let project = store
+    let workspace = store
         .transaction(|repositories| {
-            let task = repositories.task(intent.task_id)?;
-            task.map(|task| repositories.project(task.project_id))
-                .transpose()
-                .map(Option::flatten)
+            repositories.workspace(intent.assignment_id)
         })
         .map_err(rpc_state_failure)?
         .ok_or_else(|| {
             RpcFailure::new(
                 RpcFailureCode::Internal,
-                "the task target project is missing",
+                "the assignment workspace intent is missing",
             )
         })?;
-    let session_exists = store
-        .transaction(|repositories| repositories.session(intent.session_id))
-        .map_err(rpc_state_failure)?
-        .is_some();
-    if !session_exists {
-        let launch = AgentLaunch {
-            scope: SessionScope {
-                run_id,
-                agent_id: intent.agent_id,
-                session_id: intent.session_id,
-                generation: 0,
-            },
-            role: role.clone(),
-            mode: LaunchMode::Job,
-            working_directory: project.canonical_path,
-            bootstrap_instruction: bootstrap_instruction(run_id, &role),
-            created_at: now,
-        };
-        let launched = sessions
-            .launch_claimed(store, &launch, intent.assignment_id)
-            .map_err(rpc_session_failure)?;
+    let workspace_state = workspaces
+        .materialize(store, intent.assignment_id, now)
+        .map_err(rpc_workspace_failure)?;
+    if workspace_state != ExternalResourceState::Observed {
+        return Err(conflict(format!(
+            "workspace `{}` reconciliation state is `{workspace_state}`",
+            intent.assignment_id
+        )));
+    }
+    let launch = AgentLaunch {
+        scope: SessionScope {
+            run_id,
+            agent_id: intent.agent_id,
+            session_id: intent.session_id,
+            generation: 0,
+        },
+        role: role.clone(),
+        mode: LaunchMode::Job,
+        working_directory: workspace.path,
+        bootstrap_instruction: bootstrap_instruction(run_id, &role),
+        created_at: now,
+    };
+    if let Some(launched) = sessions
+        .ensure_existing_launch(store, &launch, Some(intent.assignment_id))
+        .map_err(rpc_session_failure)?
+    {
         debug_assert_eq!(launched.scope, launch.scope);
         let _provider_token = launched.token;
-        drain_fake_events(sessions, store, intent.session_id, now)?;
     }
+    drain_fake_events(sessions, store, intent.session_id, now)?;
     Ok(RpcResponse::Spawned {
         operation_id,
         agent: summary_for_agent(store, run_id, intent.agent_id)?,
@@ -2183,6 +2276,31 @@ fn role_launch_mode(mode: RoleMode) -> LaunchMode {
     }
 }
 
+fn workspace_policy_name(policy: WorkspacePolicy) -> &'static str {
+    match policy {
+        WorkspacePolicy::Project => "project",
+        WorkspacePolicy::Worktree => "worktree",
+        WorkspacePolicy::ReadOnly => "read_only",
+    }
+}
+
+fn assignment_workspace_path(
+    run_state_directory: &Path,
+    policy: WorkspacePolicy,
+    project: &ProjectRecord,
+    assignment_id: AssignmentId,
+) -> PathBuf {
+    match policy {
+        WorkspacePolicy::Project | WorkspacePolicy::ReadOnly => {
+            project.canonical_path.clone()
+        }
+        WorkspacePolicy::Worktree => run_state_directory
+            .join("workspaces")
+            .join(project.id.to_string())
+            .join(assignment_id.to_string()),
+    }
+}
+
 fn bootstrap_instruction(run_id: RunId, role: &str) -> String {
     format!(
         "You are a {role} agent for Coterie run {run_id}. Run `coterie prime` now for current orchestration context. Follow the repository's AGENTS.md instructions."
@@ -2210,10 +2328,26 @@ fn rpc_session_failure(error: AgentSessionError) -> RpcFailure {
             RpcFailure::new(RpcFailureCode::Unavailable, error.to_string())
         }
         AgentSessionError::State(error) => rpc_state_failure(error),
+        AgentSessionError::UnresolvedIntent { .. } => {
+            RpcFailure::new(RpcFailureCode::Conflict, error.to_string())
+        }
         AgentSessionError::Transcript(_)
         | AgentSessionError::Token(_)
         | AgentSessionError::ScopeMismatch { .. }
-        | AgentSessionError::UnknownSession { .. } => {
+        | AgentSessionError::UnknownSession { .. }
+        | AgentSessionError::IntentMismatch { .. } => {
+            RpcFailure::new(RpcFailureCode::Internal, error.to_string())
+        }
+    }
+}
+
+fn rpc_workspace_failure(error: WorkspaceError) -> RpcFailure {
+    match error {
+        WorkspaceError::Backend(_) => {
+            RpcFailure::new(RpcFailureCode::Unavailable, error.to_string())
+        }
+        WorkspaceError::State(state) => rpc_state_failure(state),
+        WorkspaceError::MissingIntent { .. } => {
             RpcFailure::new(RpcFailureCode::Internal, error.to_string())
         }
     }
@@ -2923,6 +3057,10 @@ pub(crate) enum SupervisorError {
     Project(#[from] ProjectError),
     #[error(transparent)]
     State(#[from] StoreError),
+    #[error(transparent)]
+    Session(#[from] AgentSessionError),
+    #[error(transparent)]
+    Workspace(#[from] WorkspaceError),
     #[error("could not {action} supervisor socket at {path:?}: {source}")]
     SocketIo {
         action: &'static str,
@@ -3113,6 +3251,8 @@ impl SupervisorError {
                 crate::cli::ErrorCode::Unavailable
             }
             Self::Project(_)
+            | Self::Session(_)
+            | Self::Workspace(_)
             | Self::Render(_)
             | Self::StructuredOutput(_)
             | Self::InvalidProof
@@ -3162,8 +3302,8 @@ mod tests {
     use super::{
         AgentLaunch, SupervisorClient, SupervisorCommand, SupervisorError,
         drain_fake_events, persist_shutdown, runtime_sessions,
-        serve_connection, serve_listener, validate_handshake,
-        validate_socket_path,
+        runtime_workspaces, serve_connection, serve_listener,
+        validate_handshake, validate_socket_path,
     };
     use crate::auth::{AgentToken, SessionScope};
     use crate::id::{
@@ -3450,10 +3590,14 @@ mod tests {
                     agent_id,
                     generation: scope.generation,
                     provider: "fake".to_owned(),
+                    provider_session_id: Some("fake-session".to_owned()),
+                    reconciliation_state:
+                        crate::state::ExternalResourceState::Observed,
                     state: LifecycleState::Running,
                     transcript_path: PathBuf::from("transcripts/session.jsonl"),
                     created_at: 12,
                     ended_at: None,
+                    reconciled_at: Some(12),
                 })?;
                 repositories.activate_session_credential(
                     &SessionCredentialRecord {
@@ -3471,6 +3615,7 @@ mod tests {
         let served_entry = active.clone();
         let run_state_directory = fixture.join("run");
         let mut sessions = runtime_sessions(&run_state_directory);
+        let mut workspaces = runtime_workspaces();
         let server = tokio::spawn(async move {
             serve_listener(
                 listener,
@@ -3478,6 +3623,7 @@ mod tests {
                 &run_state_directory,
                 &mut store,
                 &mut sessions,
+                &mut workspaces,
             )
             .await
         });
@@ -3679,6 +3825,7 @@ mod tests {
             .expect("the assignment should own the session");
 
         let served_entry = active.clone();
+        let mut workspaces = runtime_workspaces();
         let server = tokio::spawn(async move {
             serve_listener(
                 listener,
@@ -3686,6 +3833,7 @@ mod tests {
                 &run_state_directory,
                 &mut store,
                 &mut sessions,
+                &mut workspaces,
             )
             .await
         });

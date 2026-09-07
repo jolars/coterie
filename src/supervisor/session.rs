@@ -11,11 +11,12 @@ use crate::id::{AssignmentId, SessionId};
 use crate::providers::{
     LaunchMode, LaunchSpecification, LifecycleState, Provider,
     ProviderCapability, ProviderError, ProviderEvent, ProviderEventKind,
-    ProviderSessionHandle, SessionObservation,
+    ProviderRecovery, ProviderSessionHandle, SessionObservation,
 };
 use crate::state::{
-    AgentRecord, EventKind, NewEvent, SessionCredentialRecord, SessionRecord,
-    SessionTransitionOutcome, Store, StoreError,
+    AgentRecord, EventKind, ExternalResourceState, NewEvent,
+    SessionCredentialRecord, SessionRecord, SessionTransitionOutcome, Store,
+    StoreError,
 };
 use crate::transcript::{TranscriptError, TranscriptStore};
 
@@ -68,23 +69,65 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         self.launch_session(store, launch, false, None)
     }
 
-    /// Launches the first session for a separately persisted agent intent.
-    pub(crate) fn launch_existing(
+    /// Completes or reuses one durable launch intent without duplicating it.
+    pub(crate) fn ensure_existing_launch(
         &mut self,
         store: &mut Store,
         launch: &AgentLaunch,
-    ) -> Result<LaunchedAgent, AgentSessionError> {
-        self.launch_session(store, launch, true, None)
-    }
-
-    /// Launches a session for an agent already claimed into an assignment.
-    pub(crate) fn launch_claimed(
-        &mut self,
-        store: &mut Store,
-        launch: &AgentLaunch,
-        assignment_id: AssignmentId,
-    ) -> Result<LaunchedAgent, AgentSessionError> {
-        self.launch_session(store, launch, true, Some(assignment_id))
+        assignment_id: Option<AssignmentId>,
+    ) -> Result<Option<LaunchedAgent>, AgentSessionError> {
+        let session = store.transaction(|repositories| {
+            repositories.session(launch.scope.session_id)
+        })?;
+        let Some(session) = session else {
+            return self
+                .launch_session(store, launch, true, assignment_id)
+                .map(Some);
+        };
+        if session.run_id != launch.scope.run_id
+            || session.agent_id != launch.scope.agent_id
+            || session.generation != launch.scope.generation
+            || session.provider != self.provider.probe().name
+        {
+            return Err(AgentSessionError::IntentMismatch {
+                session_id: launch.scope.session_id,
+            });
+        }
+        match session.reconciliation_state {
+            ExternalResourceState::Observed => Ok(None),
+            ExternalResourceState::Desired => {
+                if self.sessions.contains_key(&launch.scope.session_id) {
+                    self.record_launch_observation(
+                        store,
+                        launch.scope.session_id,
+                        launch.created_at,
+                    )?;
+                    return Ok(None);
+                }
+                let token = AgentToken::generate()?;
+                store.transaction(|repositories| {
+                    repositories.replace_desired_session_credential(
+                        &SessionCredentialRecord {
+                            session_id: launch.scope.session_id,
+                            run_id: launch.scope.run_id,
+                            agent_id: launch.scope.agent_id,
+                            generation: launch.scope.generation,
+                            token_verifier: token.verifier(launch.scope),
+                            created_at: launch.created_at,
+                            revoked_at: None,
+                        },
+                    )
+                })?;
+                self.start_and_record(store, launch, token).map(Some)
+            }
+            state @ (ExternalResourceState::Lost
+            | ExternalResourceState::Unknown) => {
+                Err(AgentSessionError::UnresolvedIntent {
+                    session_id: launch.scope.session_id,
+                    state,
+                })
+            }
+        }
     }
 
     fn launch_session(
@@ -94,6 +137,53 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         agent_exists: bool,
         assignment_id: Option<AssignmentId>,
     ) -> Result<LaunchedAgent, AgentSessionError> {
+        let token = self.persist_launch_intent(
+            store,
+            launch,
+            agent_exists,
+            assignment_id,
+        )?;
+        self.start_and_record(store, launch, token)
+    }
+
+    fn start_and_record(
+        &mut self,
+        store: &mut Store,
+        launch: &AgentLaunch,
+        token: AgentToken,
+    ) -> Result<LaunchedAgent, AgentSessionError> {
+        let launched = match self.start_provider(launch, token) {
+            Ok(launched) => launched,
+            Err(AgentSessionError::ScopeMismatch { expected, observed }) => {
+                self.record_reconciliation(
+                    store,
+                    launch.scope,
+                    ExternalResourceState::Unknown,
+                    LifecycleState::Unknown,
+                    launch.created_at,
+                )?;
+                return Err(AgentSessionError::ScopeMismatch {
+                    expected,
+                    observed,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        self.record_launch_observation(
+            store,
+            launch.scope.session_id,
+            launch.created_at,
+        )?;
+        Ok(launched)
+    }
+
+    fn persist_launch_intent(
+        &mut self,
+        store: &mut Store,
+        launch: &AgentLaunch,
+        agent_exists: bool,
+        assignment_id: Option<AssignmentId>,
+    ) -> Result<AgentToken, AgentSessionError> {
         let probe = self.provider.probe();
         for capability in required_capabilities(launch) {
             if !probe.capabilities.contains(&capability) {
@@ -173,10 +263,13 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 agent_id: launch.scope.agent_id,
                 generation: launch.scope.generation,
                 provider: probe.name.clone(),
+                provider_session_id: None,
+                reconciliation_state: ExternalResourceState::Desired,
                 state: LifecycleState::Starting,
                 transcript_path,
                 created_at: launch.created_at,
                 ended_at: None,
+                reconciled_at: None,
             })?;
             repositories.activate_session_credential(
                 &SessionCredentialRecord {
@@ -251,6 +344,14 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             Ok(())
         })?;
 
+        Ok(token)
+    }
+
+    fn start_provider(
+        &mut self,
+        launch: &AgentLaunch,
+        token: AgentToken,
+    ) -> Result<LaunchedAgent, AgentSessionError> {
         let specification = LaunchSpecification {
             scope: launch.scope,
             working_directory: launch.working_directory.clone(),
@@ -273,6 +374,227 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             scope: launch.scope,
             token,
         })
+    }
+
+    fn record_launch_observation(
+        &self,
+        store: &mut Store,
+        session_id: SessionId,
+        observed_at: i64,
+    ) -> Result<(), AgentSessionError> {
+        let handle = self.handle(session_id)?;
+        store.transaction(|repositories| {
+            let Some(session) = repositories.session(session_id)? else {
+                return Ok(());
+            };
+            let outcome = repositories.record_session_launch_observation(
+                handle.scope,
+                handle.provider_id(),
+                observed_at,
+            )?;
+            if outcome == SessionTransitionOutcome::Applied {
+                repositories.append_event(&NewEvent {
+                    run_id: handle.scope.run_id,
+                    kind: EventKind::SessionReconciliationChanged,
+                    actor: "reconciler".to_owned(),
+                    subject: session_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(handle.scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "previous_state": session.reconciliation_state.as_str(),
+                        "provider_session_id": handle.provider_id(),
+                        "state": ExternalResourceState::Observed.as_str(),
+                    }),
+                    summary: format!("Observed provider session {session_id}."),
+                    created_at: observed_at,
+                })?;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Conservatively classifies sessions that outlived a supervisor process.
+    pub(crate) fn reconcile_after_restart(
+        &mut self,
+        store: &mut Store,
+        run_id: crate::id::RunId,
+        reconciled_at: i64,
+    ) -> Result<(), AgentSessionError> {
+        let sessions =
+            store.transaction(|repositories| repositories.sessions(run_id))?;
+        for session in sessions {
+            if session.state.is_terminal() {
+                continue;
+            }
+            let scope = SessionScope {
+                run_id: session.run_id,
+                agent_id: session.agent_id,
+                session_id: session.id,
+                generation: session.generation,
+            };
+            let Some(provider_session_id) = session.provider_session_id else {
+                self.record_reconciliation(
+                    store,
+                    scope,
+                    ExternalResourceState::Unknown,
+                    LifecycleState::Unknown,
+                    reconciled_at,
+                )?;
+                continue;
+            };
+            match self.provider.recover(&provider_session_id, scope) {
+                Ok(ProviderRecovery::Observed {
+                    handle,
+                    observation,
+                }) => {
+                    if handle.scope != scope {
+                        self.record_reconciliation(
+                            store,
+                            scope,
+                            ExternalResourceState::Unknown,
+                            LifecycleState::Unknown,
+                            reconciled_at,
+                        )?;
+                        continue;
+                    }
+                    self.sessions.insert(session.id, handle);
+                    self.record_launch_observation(
+                        store,
+                        session.id,
+                        reconciled_at,
+                    )?;
+                    let handle = self.handle(session.id)?.clone();
+                    self.record_observation(
+                        store,
+                        &handle,
+                        observation,
+                        reconciled_at,
+                    )?;
+                }
+                Ok(ProviderRecovery::Lost) => self.record_reconciliation(
+                    store,
+                    scope,
+                    ExternalResourceState::Lost,
+                    LifecycleState::Lost,
+                    reconciled_at,
+                )?,
+                Ok(ProviderRecovery::Unknown) | Err(_) => {
+                    self.record_reconciliation(
+                        store,
+                        scope,
+                        ExternalResourceState::Unknown,
+                        LifecycleState::Unknown,
+                        reconciled_at,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn record_reconciliation(
+        &self,
+        store: &mut Store,
+        scope: SessionScope,
+        reconciliation_state: ExternalResourceState,
+        lifecycle: LifecycleState,
+        reconciled_at: i64,
+    ) -> Result<(), AgentSessionError> {
+        store.transaction(|repositories| {
+            let Some(session) = repositories.session(scope.session_id)? else {
+                return Ok(());
+            };
+            let reconciliation = repositories
+                .record_session_reconciliation_state(
+                    scope,
+                    reconciliation_state,
+                    reconciled_at,
+                )?;
+            if reconciliation == SessionTransitionOutcome::Applied {
+                repositories.append_event(&NewEvent {
+                    run_id: scope.run_id,
+                    kind: EventKind::SessionReconciliationChanged,
+                    actor: "reconciler".to_owned(),
+                    subject: scope.session_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "previous_state": session.reconciliation_state.as_str(),
+                        "state": reconciliation_state.as_str(),
+                    }),
+                    summary: format!(
+                        "Session {} reconciliation changed from {} to {}.",
+                        scope.session_id,
+                        session.reconciliation_state,
+                        reconciliation_state
+                    ),
+                    created_at: reconciled_at,
+                })?;
+            }
+            let lifecycle_outcome = repositories.record_session_lifecycle(
+                scope,
+                lifecycle,
+                reconciled_at,
+            )?;
+            if lifecycle_outcome == SessionTransitionOutcome::Applied {
+                let session_event = repositories.append_event(&NewEvent {
+                    run_id: scope.run_id,
+                    kind: EventKind::SessionLifecycleChanged,
+                    actor: "reconciler".to_owned(),
+                    subject: scope.session_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "generation": scope.generation,
+                        "previous_state": session.state.as_str(),
+                        "provider": session.provider,
+                        "state": lifecycle.as_str(),
+                    }),
+                    summary: format!(
+                        "Session {} changed from {} to {}.",
+                        scope.session_id, session.state, lifecycle
+                    ),
+                    created_at: reconciled_at,
+                })?;
+                repositories.append_event(&NewEvent {
+                    run_id: scope.run_id,
+                    kind: EventKind::AgentLifecycleChanged,
+                    actor: "reconciler".to_owned(),
+                    subject: scope.agent_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: Some(session_event.id),
+                    causation_id: Some(session_event.id),
+                    data: json!({
+                        "generation": scope.generation,
+                        "previous_state": session.state.as_str(),
+                        "state": lifecycle.as_str(),
+                    }),
+                    summary: format!(
+                        "Agent {} changed from {} to {}.",
+                        scope.agent_id, session.state, lifecycle
+                    ),
+                    created_at: reconciled_at,
+                })?;
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 
     /// Applies exactly one provider event, preserving its deterministic order.
@@ -358,6 +680,47 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             else {
                 return Ok(());
             };
+            let reconciliation_state = match observation.lifecycle {
+                LifecycleState::Lost => ExternalResourceState::Lost,
+                LifecycleState::Unknown => ExternalResourceState::Unknown,
+                LifecycleState::Starting
+                | LifecycleState::Running
+                | LifecycleState::Exited
+                | LifecycleState::Quarantined => {
+                    ExternalResourceState::Observed
+                }
+            };
+            let reconciliation = repositories
+                .record_session_reconciliation_state(
+                    handle.scope,
+                    reconciliation_state,
+                    observed_at,
+                )?;
+            if reconciliation == SessionTransitionOutcome::Applied {
+                repositories.append_event(&NewEvent {
+                    run_id: handle.scope.run_id,
+                    kind: EventKind::SessionReconciliationChanged,
+                    actor: "provider".to_owned(),
+                    subject: handle.scope.session_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(handle.scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "previous_state": session.reconciliation_state.as_str(),
+                        "state": reconciliation_state.as_str(),
+                    }),
+                    summary: format!(
+                        "Session {} reconciliation changed from {} to {}.",
+                        handle.scope.session_id,
+                        session.reconciliation_state,
+                        reconciliation_state
+                    ),
+                    created_at: observed_at,
+                })?;
+            }
             let outcome = repositories.record_session_lifecycle(
                 handle.scope,
                 observation.lifecycle,
@@ -471,6 +834,13 @@ pub(crate) enum AgentSessionError {
     },
     #[error("session `{session_id}` is not managed by this supervisor")]
     UnknownSession { session_id: SessionId },
+    #[error("session `{session_id}` does not match its durable launch intent")]
+    IntentMismatch { session_id: SessionId },
+    #[error("session `{session_id}` launch state is `{state}`")]
+    UnresolvedIntent {
+        session_id: SessionId,
+        state: ExternalResourceState,
+    },
 }
 
 #[cfg(test)]
@@ -485,11 +855,160 @@ mod tests {
     use crate::providers::{
         ActivityState, LaunchMode, LifecycleState, SessionObservation,
     };
-    use crate::state::{RunRecord, Store};
+    use crate::state::{ExternalResourceState, RunRecord, Store};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const AGENT_ID: &str = "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX";
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+
+    #[test]
+    fn failed_launch_retains_durable_desired_state() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let mut supervisor =
+            AgentSessionSupervisor::new(FakeProvider::new([]), &directory.0);
+
+        assert!(
+            supervisor.launch(&mut store, &launch(run_id)).is_err(),
+            "the scripted launch should fail"
+        );
+
+        store
+            .transaction(|repositories| {
+                let session = repositories
+                    .session(launch(run_id).scope.session_id)?
+                    .expect("launch intent should survive provider failure");
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Desired
+                );
+                assert_eq!(session.provider_session_id, None);
+                Ok(())
+            })
+            .expect("the launch intent should be readable");
+    }
+
+    #[test]
+    fn successful_launch_records_observed_provider_identity() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let mut supervisor = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([])]),
+            &directory.0,
+        );
+
+        supervisor
+            .launch(&mut store, &launch(run_id))
+            .expect("the fake session should launch");
+
+        store
+            .transaction(|repositories| {
+                let session = repositories
+                    .session(launch(run_id).scope.session_id)?
+                    .expect("the launch observation should be durable");
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Observed
+                );
+                assert_eq!(
+                    session.provider_session_id.as_deref(),
+                    Some("fake-session-1")
+                );
+                assert_eq!(session.reconciled_at, Some(10));
+                Ok(())
+            })
+            .expect("the launch observation should be readable");
+    }
+
+    #[test]
+    fn restart_reconciliation_preserves_launch_uncertainty() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let launch = launch(run_id);
+        let mut crashed = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([])]),
+            &directory.0,
+        );
+
+        let token = crashed
+            .persist_launch_intent(&mut store, &launch, false, None)
+            .expect("intent should commit before launch");
+        crashed
+            .start_provider(&launch, token)
+            .expect("the side effect should happen");
+        drop(crashed);
+
+        let mut restarted =
+            AgentSessionSupervisor::new(FakeProvider::new([]), &directory.0);
+        restarted
+            .reconcile_after_restart(&mut store, run_id, 11)
+            .expect("restart reconciliation should succeed");
+
+        store
+            .transaction(|repositories| {
+                let session = repositories
+                    .session(launch.scope.session_id)?
+                    .expect("the uncertain session should remain durable");
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Unknown
+                );
+                assert_eq!(session.state, LifecycleState::Unknown);
+                Ok(())
+            })
+            .expect("the uncertain session should be readable");
+    }
+
+    #[test]
+    fn restart_reconciliation_marks_vanished_fake_process_lost_once() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let launch = launch(run_id);
+        let mut first = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([])]),
+            &directory.0,
+        );
+        first
+            .launch(&mut store, &launch)
+            .expect("the fake session should launch");
+        drop(first);
+
+        let mut restarted =
+            AgentSessionSupervisor::new(FakeProvider::new([]), &directory.0);
+        restarted
+            .reconcile_after_restart(&mut store, run_id, 11)
+            .expect("restart reconciliation should succeed");
+        restarted
+            .reconcile_after_restart(&mut store, run_id, 12)
+            .expect("repeated reconciliation should be idempotent");
+
+        store
+            .transaction(|repositories| {
+                let session = repositories
+                    .session(launch.scope.session_id)?
+                    .expect("the lost session should remain durable");
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Lost
+                );
+                assert_eq!(session.state, LifecycleState::Lost);
+                let reconciled_events = repositories
+                    .events_after(run_id, 0, 100)?
+                    .into_iter()
+                    .filter(|event| {
+                        event.event_type == "session.reconciliation_changed"
+                            && event.payload["data"]["state"] == "lost"
+                    })
+                    .count();
+                assert_eq!(reconciled_events, 1);
+                Ok(())
+            })
+            .expect("the lost session should be readable");
+    }
 
     #[test]
     fn fake_provider_drives_durable_agent_and_session_lifecycles() {
@@ -610,6 +1129,7 @@ mod tests {
                     [
                         "agent.created",
                         "session.started",
+                        "session.reconciliation_changed",
                         "session.lifecycle_changed",
                         "agent.lifecycle_changed",
                         "session.lifecycle_changed",
@@ -714,12 +1234,17 @@ mod tests {
                             .state,
                         terminal
                     );
+                    let session = repositories
+                        .session(launch.scope.session_id)?
+                        .expect("the session should remain durable");
+                    assert_eq!(session.state, terminal);
                     assert_eq!(
-                        repositories
-                            .session(launch.scope.session_id)?
-                            .expect("the session should remain durable")
-                            .state,
-                        terminal
+                        session.reconciliation_state,
+                        if terminal == LifecycleState::Lost {
+                            ExternalResourceState::Lost
+                        } else {
+                            ExternalResourceState::Observed
+                        }
                     );
                     assert_eq!(
                         repositories.active_session_credential(
@@ -751,6 +1276,23 @@ mod tests {
             bootstrap_instruction: "Run `coterie prime`.".to_owned(),
             created_at: 10,
         }
+    }
+
+    fn store_with_run(directory: &TestDirectory) -> Store {
+        let mut store = Store::open(&directory.0.join("state.sqlite3"))
+            .expect("the store should open");
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })
+            })
+            .expect("the run should commit");
+        store
     }
 
     struct TestDirectory(PathBuf);
