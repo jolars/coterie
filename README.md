@@ -27,12 +27,33 @@ contract](docs/cli-contract.md) for programmatic output and retry rules.
 
 ## Installation
 
-Coterie currently supports Linux. Until the next release, install the current
-source with Rust 1.98.0 and Cargo:
+Coterie currently supports Linux. Install the latest prebuilt release with the
+shell installer:
+
+```console
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jolars/coterie/releases/latest/download/coterie-installer.sh | sh
+```
+
+Releases provide glibc and static musl archives for x86-64 and ARM64 Linux.
+Each archive has a matching SHA-256 checksum and a GitHub build-provenance
+attestation. To verify a downloaded archive:
+
+```console
+sha256sum --check coterie-x86_64-unknown-linux-gnu.tar.xz.sha256
+gh attestation verify coterie-x86_64-unknown-linux-gnu.tar.xz --repo jolars/coterie
+```
+
+To install from crates.io with Rust 1.98.0 and Cargo instead:
+
+```console
+cargo install coterie --locked
+coterie --version
+```
+
+To install the current source directly from GitHub:
 
 ```console
 cargo install --git https://github.com/jolars/coterie.git --locked
-coterie --version
 ```
 
 To install a local checkout instead:
@@ -43,9 +64,8 @@ cargo install --path coterie --locked
 ```
 
 The crates.io `0.1.0` package is the earlier development-foundation release; it
-does not contain the operator loop documented below. Prebuilt release binaries
-are not available yet. macOS and Windows are also outside the current platform
-contract.
+does not contain the operator loop documented below. macOS and Windows remain
+outside the current platform contract.
 
 At runtime, `XDG_RUNTIME_DIR` must name an absolute, existing directory owned by
 the current user with mode 0700. Coterie stores durable data beneath
@@ -134,9 +154,10 @@ pre-commit hooks.
 ## Releases
 
 Version `0.1.0` was published to crates.io and released on GitHub manually.
-Versionary prepares and publishes later GitHub releases. Version tags trigger a
-separate trusted-publishing workflow that publishes the matching crate to
-crates.io without a long-lived registry token.
+Versionary prepares and publishes later GitHub releases. Version tags trigger
+separate workflows that publish the matching crate to crates.io through trusted
+publishing and use cargo-dist to attach checksummed, provenance-attested Linux
+binaries and a shell installer to the GitHub release.
 
 ## Project documentation
 

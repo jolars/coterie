@@ -7,6 +7,7 @@
     actionlint
     cargo-audit
     cargo-deny
+    cargo-dist
     cargo-llvm-cov
     cargo-nextest
     git

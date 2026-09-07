@@ -138,9 +138,9 @@ later milestones build on.
 - [x] Document installation, Codex prerequisites, the Sidekick custom-command
   entry, the trust model, recovery behavior, and every MVP command and exit
   code.
-- [ ] Enable crates.io publication with trusted publishing and attach a
-  checksummed `x86_64-unknown-linux-gnu` binary to the Versionary-created
-  GitHub release.
+- [x] Enable crates.io publication with trusted publishing and attach
+  checksummed, provenance-attested `x86_64` and `aarch64` binaries for glibc
+  and musl Linux to the Versionary-created GitHub release.
 
 ### v0.1.0 MVP gate
 

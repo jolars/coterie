@@ -75,6 +75,8 @@ tasks:
     internal: true
     cmds:
       - npx --yes versionary@{{.VERSIONARY_VERSION}} verify
+      - dist generate --mode ci --check
+      - dist plan --output-format=json >/dev/null
 
   nix:eval:
     internal: true

@@ -44,3 +44,8 @@ ulid = "3.0.0"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
