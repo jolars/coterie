@@ -147,7 +147,7 @@ later milestones build on.
 - [x] From a clean Git repository, `coterie` starts or reconnects to its
   supervisor and opens the foreground Codex lead without unsolicited wrapper
   output corrupting the TUI.
-- [ ] The lead can create one task, spawn one Codex worker in an isolated
+- [x] The lead can create one task, spawn one Codex worker in an isolated
   worktree, receive its durable result, inspect its transcript, integrate it
   explicitly, validate it, and close the task.
 - [ ] Closing the foreground leaves the run and active worker intact. A later

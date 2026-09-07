@@ -950,37 +950,58 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
 }
 
 #[test]
-fn operator_completes_the_codex_worker_loop_through_validation() {
+fn foreground_lead_completes_the_codex_worker_loop_through_validation() {
     let fixture = TestEnvironment::new();
-    fixture.launch(&[]);
-    let status = fixture.run_json(&["status", "--json"]);
-    let run_id = status["data"]["run_id"]
+    let capture = fixture.root.join("lead-environment");
+    let mut command = fixture.command();
+    command
+        .env("COTERIE_FAKE_MODE", "contract")
+        .env("COTERIE_FAKE_CAPTURE", &capture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut foreground = command.spawn().expect("Coterie should start");
+    wait_until("the foreground lead environment", || capture.exists());
+    let lead_environment = captured_environment(&capture);
+    let identity =
+        fixture.run_agent_json(&["whoami", "--json"], &lead_environment);
+    let run_id = identity["data"]["run_id"]
         .as_str()
-        .expect("status should identify the run")
+        .expect("the lead identity should identify the run")
         .to_owned();
-    let task = fixture.run_json(&[
-        "task",
-        "create",
-        "Implement the worker result",
-        "--json",
-    ]);
+    let lead_id = identity["data"]["agent"]["id"]
+        .as_str()
+        .expect("the lead identity should include its agent ID")
+        .to_owned();
+    assert_eq!(identity["data"]["channel"], "agent");
+    assert_eq!(identity["data"]["agent"]["role"], "lead");
+
+    let task = fixture.run_agent_json(
+        &["task", "create", "Implement the worker result", "--json"],
+        &lead_environment,
+    );
     let task_id = task["data"]["task"]["id"]
         .as_str()
         .expect("task creation should return an ID")
         .to_owned();
-    let spawn =
-        fixture.run_json(&["spawn", "worker", "--task", &task_id, "--json"]);
+    let spawn = fixture.run_agent_json(
+        &["spawn", "worker", "--task", &task_id, "--json"],
+        &lead_environment,
+    );
     let assignment_id = spawn["data"]["assignment_id"]
         .as_str()
         .expect("spawn should return an assignment ID")
         .to_owned();
 
-    fixture.run_json(&[
-        "send",
-        "worker-1",
-        "Include the requested result and tests.",
-        "--json",
-    ]);
+    fixture.run_agent_json(
+        &[
+            "send",
+            "worker-1",
+            "Include the requested result and tests.",
+            "--json",
+        ],
+        &lead_environment,
+    );
     let database = fixture
         .state
         .join("coterie/runs")
@@ -997,6 +1018,17 @@ fn operator_completes_the_codex_worker_loop_through_validation() {
         .expect("the assignment workspace should be durable");
     drop(connection);
     let workspace = Path::new(std::ffi::OsStr::from_bytes(&workspace_bytes));
+    assert!(
+        workspace.starts_with(fixture.state.join("coterie/runs").join(&run_id)),
+        "the worker must run in private state, not the target worktree"
+    );
+    assert_ne!(workspace, fixture.project);
+    assert!(
+        Repository::open(workspace)
+            .expect("the worker repository should open")
+            .is_worktree(),
+        "the worker workspace should be an isolated Git worktree"
+    );
     let result_commit = commit_file(
         workspace,
         Path::new("result.txt"),
@@ -1010,11 +1042,44 @@ fn operator_completes_the_codex_worker_loop_through_validation() {
     fs::write(socket.with_extension("sock.release"), b"finish")
         .expect("the scripted worker should be released");
 
+    let mut submitted = None;
     wait_until("the submitted assignment", || {
-        fixture.run_json(&["status", "--json"])["data"]["tasks"]["submitted"]
-            == 1
+        let prime =
+            fixture.run_agent_json(&["prime", "--json"], &lead_environment);
+        submitted = prime["data"]["tasks"]
+            .as_array()
+            .expect("prime should return durable tasks")
+            .iter()
+            .find(|task| task["id"] == task_id && task["status"] == "submitted")
+            .cloned();
+        submitted.is_some()
     });
-    let mut premature_close = fixture.command();
+    let submitted = submitted.expect("prime should return the submitted task");
+    assert_eq!(submitted["status"], "submitted");
+    assert_eq!(submitted["result"]["status"], "completed");
+    assert_eq!(submitted["result"]["summary"], "Implemented and tested.");
+    assert_eq!(submitted["result"]["result_commit"], result_commit);
+
+    let mut logs = None;
+    wait_until("the complete worker transcript", || {
+        let observed = fixture
+            .run_agent_json(&["logs", "worker-1", "--json"], &lead_environment);
+        let complete = observed["data"]["transcript"]
+            .as_str()
+            .is_some_and(|transcript| transcript.contains("turn.completed"));
+        if complete {
+            logs = Some(observed);
+        }
+        complete
+    });
+    let logs = logs.expect("the complete worker transcript should be observed");
+    let transcript = logs["data"]["transcript"]
+        .as_str()
+        .expect("the worker transcript should be returned");
+    assert!(transcript.contains("thread.started"));
+    assert!(transcript.contains("turn.completed"));
+
+    let mut premature_close = fixture.agent_command(&lead_environment);
     premature_close.args([
         "task",
         "close",
@@ -1034,13 +1099,16 @@ fn operator_completes_the_codex_worker_loop_through_validation() {
             .is_some_and(|message| message.contains("not been integrated"))
     );
 
-    let integrated = fixture.run_json(&[
-        "workspace",
-        "integrate",
-        "--assignment",
-        &assignment_id,
-        "--json",
-    ]);
+    let integrated = fixture.run_agent_json(
+        &[
+            "workspace",
+            "integrate",
+            "--assignment",
+            &assignment_id,
+            "--json",
+        ],
+        &lead_environment,
+    );
     assert_eq!(
         integrated["data"]["integration"]["result_commit"],
         result_commit
@@ -1054,15 +1122,30 @@ fn operator_completes_the_codex_worker_loop_through_validation() {
             .expect("the integrated result should be readable"),
         "worker result\n"
     );
+    let target_repository = Repository::open(&fixture.project)
+        .expect("the target repository should open for validation");
+    assert_eq!(
+        target_repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("the validated target commit should resolve")
+            .id()
+            .to_string(),
+        target_commit
+    );
+    assert_repository_clean(&fixture.project);
 
-    let closed = fixture.run_json(&[
-        "task",
-        "close",
-        &task_id,
-        "--summary",
-        "Integrated result and validated its tests.",
-        "--json",
-    ]);
+    let closed = fixture.run_agent_json(
+        &[
+            "task",
+            "close",
+            &task_id,
+            "--summary",
+            "Integrated result and validated its tests.",
+            "--json",
+        ],
+        &lead_environment,
+    );
     assert_eq!(closed["data"]["task"]["status"], "closed");
     assert_eq!(
         closed["data"]["task"]["result"]["integration"]["target_commit"],
@@ -1073,23 +1156,6 @@ fn operator_completes_the_codex_worker_loop_through_validation() {
         "Integrated result and validated its tests."
     );
 
-    let mut logs = None;
-    wait_until("the complete worker transcript", || {
-        let observed = fixture.run_json(&["logs", "worker-1", "--json"]);
-        let complete = observed["data"]["transcript"]
-            .as_str()
-            .is_some_and(|transcript| transcript.contains("turn.completed"));
-        if complete {
-            logs = Some(observed);
-        }
-        complete
-    });
-    let logs = logs.expect("the complete worker transcript should be observed");
-    let transcript = logs["data"]["transcript"]
-        .as_str()
-        .expect("the worker transcript should be returned");
-    assert!(transcript.contains("thread.started"));
-    assert!(transcript.contains("turn.completed"));
     let events = fixture.run_json(&["events", "--json"]);
     let events = events["data"]["events"]
         .as_array()
@@ -1105,6 +1171,37 @@ fn operator_completes_the_codex_worker_loop_through_validation() {
             "the completed loop should contain `{event_type}`"
         );
     }
+    for event_type in [
+        "task.created",
+        "task.claimed",
+        "workspace.integration_desired",
+        "workspace.integrated",
+    ] {
+        assert!(
+            events.iter().any(|event| {
+                event["event_type"] == event_type && event["actor"] == lead_id
+            }),
+            "the lead should author `{event_type}`"
+        );
+    }
+    assert!(events.iter().any(|event| {
+        event["event_type"] == "task.lifecycle_changed"
+            && event["actor"] == lead_id
+            && event["payload"]["data"]["status"] == "closed"
+    }));
+
+    foreground
+        .stdin
+        .take()
+        .expect("the live lead stdin should be piped")
+        .write_all(b"exit\n")
+        .expect("the live lead should accept terminal input");
+    let foreground = foreground
+        .wait_with_output()
+        .expect("the foreground lead should finish");
+    assert!(foreground.status.success());
+    assert_eq!(foreground.stdout, b"stdout:exit\n");
+    assert_eq!(foreground.stderr, b"stderr:exit\n");
     fixture.run_json(&["stop", "--json"]);
 }
 
@@ -1643,6 +1740,23 @@ fn assert_repository_clean(project: &Path) {
     );
 }
 
+fn captured_environment(path: &Path) -> Vec<(String, String)> {
+    fs::read(path)
+        .expect("the foreground environment should be captured")
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| record.strip_prefix(b"env:"))
+        .map(|record| {
+            let record = std::str::from_utf8(record)
+                .expect("the captured environment should be UTF-8");
+            let (name, value) = record
+                .split_once('=')
+                .expect("the captured environment should contain assignments");
+            (name.to_owned(), value.to_owned())
+        })
+        .collect()
+}
+
 struct TestEnvironment {
     root: PathBuf,
     runtime: PathBuf,
@@ -1751,6 +1865,12 @@ impl TestEnvironment {
         command
     }
 
+    fn agent_command(&self, environment: &[(String, String)]) -> Command {
+        let mut command = self.command();
+        command.envs(environment.iter().map(|(name, value)| (name, value)));
+        command
+    }
+
     fn launch(&self, arguments: &[&str]) -> std::process::Output {
         let mut command = self.command();
         command.args(arguments);
@@ -1786,6 +1906,26 @@ impl TestEnvironment {
         );
         serde_json::from_slice(&output.stdout)
             .expect("the command should return one JSON response")
+    }
+
+    fn run_agent_json(
+        &self,
+        arguments: &[&str],
+        environment: &[(String, String)],
+    ) -> Value {
+        let mut command = self.agent_command(environment);
+        command.args(arguments);
+        let output = run(command);
+        assert!(
+            output.status.success(),
+            "agent command {arguments:?} failed: {output:?}"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "successful agent JSON should not write diagnostics: {output:?}"
+        );
+        serde_json::from_slice(&output.stdout)
+            .expect("the agent command should return one JSON response")
     }
 
     fn only_index_entry(&self) -> PathBuf {
