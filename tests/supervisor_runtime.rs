@@ -357,6 +357,170 @@ fn clean_git_launch_starts_and_reconnects_to_silent_foreground_leads() {
 }
 
 #[test]
+fn foreground_exit_preserves_an_active_worker_for_a_fresh_lead_session() {
+    let fixture = TestEnvironment::new();
+    let first_capture = fixture.root.join("first-lead-environment");
+    let mut first_command = fixture.command();
+    first_command
+        .env("COTERIE_FAKE_MODE", "contract")
+        .env("COTERIE_FAKE_CAPTURE", &first_capture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut first_foreground =
+        first_command.spawn().expect("the first lead should start");
+    wait_until("the first lead environment", || first_capture.exists());
+    let first_environment = captured_environment(&first_capture);
+    let first_identity =
+        fixture.run_agent_json(&["whoami", "--json"], &first_environment);
+    let run_id = first_identity["data"]["run_id"]
+        .as_str()
+        .expect("the first lead should identify the run")
+        .to_owned();
+    let lead_id = first_identity["data"]["agent"]["id"]
+        .as_str()
+        .expect("the first lead should identify itself")
+        .to_owned();
+    let first_session_id =
+        environment_value(&first_environment, "COTERIE_SESSION_ID");
+    let socket = fixture
+        .runtime
+        .join("coterie")
+        .join(format!("{run_id}.sock"));
+    let socket_inode = fs::metadata(&socket)
+        .expect("the active supervisor should publish its socket")
+        .ino();
+
+    let task = fixture.run_agent_json(
+        &["task", "create", "Keep working", "--json"],
+        &first_environment,
+    );
+    let task_id = task["data"]["task"]["id"]
+        .as_str()
+        .expect("task creation should return an ID")
+        .to_owned();
+    let spawn = fixture.run_agent_json(
+        &["spawn", "worker", "--task", &task_id, "--json"],
+        &first_environment,
+    );
+    let worker_session_id = spawn["data"]["session_id"]
+        .as_str()
+        .expect("spawn should return the worker session ID")
+        .to_owned();
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(&run_id)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database)
+        .expect("the active run database should open");
+    let worker_process_id: u32 = connection
+        .query_row(
+            "SELECT provider_session_id FROM sessions WHERE id = ?1",
+            [&worker_session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("the worker process identity should be durable")
+        .strip_prefix("process:")
+        .and_then(|process_id| process_id.parse().ok())
+        .expect("the worker should have a process identity");
+    drop(connection);
+    wait_until("the active worker", || {
+        fixture.run_json(&["status", "--json"])["data"]["agents"]
+            .as_array()
+            .is_some_and(|agents| {
+                agents.iter().any(|agent| {
+                    agent["name"] == "worker-1" && agent["state"] == "running"
+                })
+            })
+    });
+
+    first_foreground
+        .stdin
+        .take()
+        .expect("the first lead stdin should be available")
+        .write_all(b"exit\n")
+        .expect("the first lead should accept terminal input");
+    let first_output = first_foreground
+        .wait_with_output()
+        .expect("the first lead should finish");
+    assert!(first_output.status.success());
+    assert_eq!(first_output.stdout, b"stdout:exit\n");
+    assert_eq!(first_output.stderr, b"stderr:exit\n");
+
+    let status = fixture.run_json(&["status", "--json"]);
+    assert_eq!(status["data"]["run_id"], run_id);
+    assert_eq!(status["data"]["status"], "active");
+    assert!(status["data"]["agents"].as_array().is_some_and(|agents| {
+        agents
+            .iter()
+            .any(|agent| agent["id"] == lead_id && agent["state"] == "exited")
+            && agents.iter().any(|agent| {
+                agent["name"] == "worker-1" && agent["state"] == "running"
+            })
+    }));
+    assert_eq!(
+        fs::metadata(&socket)
+            .expect("the supervisor should remain reachable")
+            .ino(),
+        socket_inode
+    );
+    assert!(
+        Path::new("/proc")
+            .join(worker_process_id.to_string())
+            .exists(),
+        "the worker process should outlive the foreground"
+    );
+
+    let second_capture = fixture.root.join("second-lead-environment");
+    let mut second_command = fixture.command();
+    second_command
+        .env("COTERIE_FAKE_MODE", "contract")
+        .env("COTERIE_FAKE_CAPTURE", &second_capture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut second_foreground =
+        second_command.spawn().expect("the fresh lead should start");
+    wait_until("the fresh lead environment", || second_capture.exists());
+    let second_environment = captured_environment(&second_capture);
+    let second_session_id =
+        environment_value(&second_environment, "COTERIE_SESSION_ID");
+    assert_ne!(second_session_id, first_session_id);
+
+    let prime =
+        fixture.run_agent_json(&["prime", "--json"], &second_environment);
+    assert_eq!(prime["data"]["identity"]["run_id"], run_id);
+    assert_eq!(prime["data"]["identity"]["channel"], "agent");
+    assert_eq!(prime["data"]["identity"]["agent"]["id"], lead_id);
+    assert!(prime["data"]["peers"].as_array().is_some_and(|peers| {
+        peers.iter().any(|peer| {
+            peer["name"] == "worker-1" && peer["state"] == "running"
+        })
+    }));
+    assert!(prime["data"]["tasks"].as_array().is_some_and(|tasks| {
+        tasks.iter().any(|task| {
+            task["id"] == task_id && task["status"] == "in_progress"
+        })
+    }));
+
+    second_foreground
+        .stdin
+        .take()
+        .expect("the fresh lead stdin should be available")
+        .write_all(b"exit\n")
+        .expect("the fresh lead should accept terminal input");
+    assert!(
+        second_foreground
+            .wait_with_output()
+            .expect("the fresh lead should finish")
+            .status
+            .success()
+    );
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
 fn foreground_codex_inherits_streams_directory_identity_and_agents_discovery() {
     let fixture = TestEnvironment::new();
     let capture = fixture.root.join("codex-contract");
@@ -548,6 +712,26 @@ fn foreground_exit_is_recorded_after_the_supervisor_restarts() {
         .stderr(Stdio::piped());
     let foreground = command.spawn().expect("Coterie should start");
     wait_until("the fake Codex process", || ready.exists());
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(RUN_ID)
+        .join("state.sqlite3");
+    wait_until("the durable foreground launch observation", || {
+        rusqlite::Connection::open(&database).is_ok_and(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions \
+                     WHERE process_owner = 'foreground' \
+                       AND provider_session_id LIKE 'process:%' \
+                       AND state = 'running' \
+                       AND reconciliation_state = 'observed'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .is_ok_and(|count| count == 1)
+        })
+    });
 
     crashed.kill().expect("the supervisor should crash");
     crashed
@@ -555,11 +739,6 @@ fn foreground_exit_is_recorded_after_the_supervisor_restarts() {
         .expect("the crashed supervisor should be reaped");
     let restarted = run(fixture.connect_command());
     assert!(restarted.status.success(), "restart failed: {restarted:?}");
-    let database = fixture
-        .state
-        .join("coterie/runs")
-        .join(RUN_ID)
-        .join("state.sqlite3");
     let connection = rusqlite::Connection::open(&database)
         .expect("the restarted run database should open");
     let (state, reconciliation, owner, active_credentials):
@@ -1755,6 +1934,17 @@ fn captured_environment(path: &Path) -> Vec<(String, String)> {
             (name.to_owned(), value.to_owned())
         })
         .collect()
+}
+
+fn environment_value(environment: &[(String, String)], name: &str) -> String {
+    environment
+        .iter()
+        .find_map(|(candidate, value)| {
+            (candidate == name).then(|| value.clone())
+        })
+        .unwrap_or_else(|| {
+            panic!("the captured environment should contain {name}")
+        })
 }
 
 struct TestEnvironment {

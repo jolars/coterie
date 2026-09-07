@@ -150,7 +150,7 @@ later milestones build on.
 - [x] The lead can create one task, spawn one Codex worker in an isolated
   worktree, receive its durable result, inspect its transcript, integrate it
   explicitly, validate it, and close the task.
-- [ ] Closing the foreground leaves the run and active worker intact. A later
+- [x] Closing the foreground leaves the run and active worker intact. A later
   invocation reconstructs orchestration context even when transparent Codex
   session reattachment is unavailable.
 - [ ] Interrupting the foreground reaches Codex but does not stop the run;
