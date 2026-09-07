@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use serde_json::json;
 use thiserror::Error;
 
 use crate::auth::{AgentToken, SessionScope, TokenGenerationError};
@@ -13,7 +14,8 @@ use crate::providers::{
     ProviderSessionHandle, SessionObservation,
 };
 use crate::state::{
-    AgentRecord, SessionCredentialRecord, SessionRecord, Store, StoreError,
+    AgentRecord, EventKind, NewEvent, SessionCredentialRecord, SessionRecord,
+    SessionTransitionOutcome, Store, StoreError,
 };
 use crate::transcript::{TranscriptError, TranscriptStore};
 
@@ -142,6 +144,28 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                     state: LifecycleState::Starting,
                     created_at: launch.created_at,
                 })?;
+                repositories.append_event(&NewEvent {
+                    run_id: launch.scope.run_id,
+                    kind: EventKind::AgentCreated,
+                    actor: "supervisor".to_owned(),
+                    subject: launch.scope.agent_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(launch.scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "generation": launch.scope.generation,
+                        "role": launch.role,
+                        "state": LifecycleState::Starting.as_str(),
+                    }),
+                    summary: format!(
+                        "Created agent {}.",
+                        launch.scope.agent_id
+                    ),
+                    created_at: launch.created_at,
+                })?;
             }
             repositories.insert_session(&SessionRecord {
                 id: launch.scope.session_id,
@@ -165,11 +189,64 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                     revoked_at: None,
                 },
             )?;
+            let session_event = repositories.append_event(&NewEvent {
+                run_id: launch.scope.run_id,
+                kind: EventKind::SessionStarted,
+                actor: "supervisor".to_owned(),
+                subject: launch.scope.session_id.to_string(),
+                project_id: None,
+                agent_id: Some(launch.scope.agent_id),
+                task_id: None,
+                operation_id: None,
+                correlation_id: None,
+                causation_id: None,
+                data: json!({
+                    "generation": launch.scope.generation,
+                    "provider": probe.name,
+                    "state": LifecycleState::Starting.as_str(),
+                }),
+                summary: format!(
+                    "Started session {} for agent {}.",
+                    launch.scope.session_id, launch.scope.agent_id
+                ),
+                created_at: launch.created_at,
+            })?;
             if let Some(assignment_id) = assignment_id {
                 repositories.associate_assignment_session(
                     assignment_id,
                     launch.scope.session_id,
                 )?;
+                let assignment = repositories
+                    .assignment(assignment_id)?
+                    .ok_or_else(|| StoreError::CorruptAssignmentState {
+                        id: assignment_id,
+                        reason: "the assignment disappeared after session association"
+                            .to_owned(),
+                    })?;
+                let task = repositories.task(assignment.task_id)?.ok_or_else(
+                    || StoreError::CorruptAssignmentState {
+                        id: assignment_id,
+                        reason: "the assignment task does not exist".to_owned(),
+                    },
+                )?;
+                repositories.append_event(&NewEvent {
+                    run_id: launch.scope.run_id,
+                    kind: EventKind::AssignmentSessionAssociated,
+                    actor: "supervisor".to_owned(),
+                    subject: assignment_id.to_string(),
+                    project_id: Some(task.project_id),
+                    agent_id: Some(launch.scope.agent_id),
+                    task_id: Some(assignment.task_id),
+                    operation_id: None,
+                    correlation_id: Some(session_event.id),
+                    causation_id: Some(session_event.id),
+                    data: json!({"session_id": launch.scope.session_id}),
+                    summary: format!(
+                        "Associated session {} with assignment {assignment_id}.",
+                        launch.scope.session_id
+                    ),
+                    created_at: launch.created_at,
+                })?;
             }
             Ok(())
         })?;
@@ -211,14 +288,12 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         };
         match &event.kind {
             ProviderEventKind::Observation(observation) => {
-                store.transaction(|repositories| {
-                    repositories.record_session_lifecycle(
-                        handle.scope,
-                        observation.lifecycle,
-                        observed_at,
-                    )?;
-                    Ok(())
-                })?;
+                self.record_observation(
+                    store,
+                    &handle,
+                    *observation,
+                    observed_at,
+                )?;
             }
             ProviderEventKind::Output(bytes) => {
                 self.transcripts.append(session_id, bytes)?;
@@ -278,11 +353,67 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         observed_at: i64,
     ) -> Result<(), AgentSessionError> {
         store.transaction(|repositories| {
-            repositories.record_session_lifecycle(
+            let Some(session) =
+                repositories.session(handle.scope.session_id)?
+            else {
+                return Ok(());
+            };
+            let outcome = repositories.record_session_lifecycle(
                 handle.scope,
                 observation.lifecycle,
                 observed_at,
             )?;
+            if outcome == SessionTransitionOutcome::Applied {
+                let session_event = repositories.append_event(&NewEvent {
+                    run_id: handle.scope.run_id,
+                    kind: EventKind::SessionLifecycleChanged,
+                    actor: "provider".to_owned(),
+                    subject: handle.scope.session_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(handle.scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "generation": handle.scope.generation,
+                        "previous_state": session.state.as_str(),
+                        "provider": session.provider,
+                        "state": observation.lifecycle.as_str(),
+                    }),
+                    summary: format!(
+                        "Session {} changed from {} to {}.",
+                        handle.scope.session_id,
+                        session.state,
+                        observation.lifecycle
+                    ),
+                    created_at: observed_at,
+                })?;
+                repositories.append_event(&NewEvent {
+                    run_id: handle.scope.run_id,
+                    kind: EventKind::AgentLifecycleChanged,
+                    actor: "provider".to_owned(),
+                    subject: handle.scope.agent_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(handle.scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: Some(session_event.id),
+                    causation_id: Some(session_event.id),
+                    data: json!({
+                        "generation": handle.scope.generation,
+                        "previous_state": session.state.as_str(),
+                        "state": observation.lifecycle.as_str(),
+                    }),
+                    summary: format!(
+                        "Agent {} changed from {} to {}.",
+                        handle.scope.agent_id,
+                        session.state,
+                        observation.lifecycle
+                    ),
+                    created_at: observed_at,
+                })?;
+            }
             Ok(())
         })?;
         Ok(())
@@ -468,6 +599,22 @@ mod tests {
                         launch.scope.session_id,
                     )?,
                     None
+                );
+                let event_types = repositories
+                    .events_after(run_id, 0, 100)?
+                    .into_iter()
+                    .map(|event| event.event_type)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    event_types,
+                    [
+                        "agent.created",
+                        "session.started",
+                        "session.lifecycle_changed",
+                        "agent.lifecycle_changed",
+                        "session.lifecycle_changed",
+                        "agent.lifecycle_changed",
+                    ]
                 );
                 Ok(())
             })

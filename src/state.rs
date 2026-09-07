@@ -43,6 +43,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "session_credentials",
         sql: include_str!("state/migrations/0003_session_credentials.sql"),
     },
+    Migration {
+        version: 4,
+        name: "durable_messages",
+        sql: include_str!("state/migrations/0004_durable_messages.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -403,6 +408,29 @@ pub(crate) struct MessageRecord {
     pub(crate) acknowledged_at: Option<i64>,
 }
 
+/// The complete input to an idempotent inbox acknowledgement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AcknowledgeMessagesMutation {
+    pub(crate) operation_id: OperationId,
+    pub(crate) run_id: RunId,
+    pub(crate) agent_id: AgentId,
+    pub(crate) through: i64,
+    pub(crate) acknowledged_at: i64,
+}
+
+/// The durable result of acknowledging a recipient-local message cursor.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub(crate) enum AcknowledgeMessagesResult {
+    Acknowledged {
+        acknowledged_through: i64,
+        acknowledged_count: usize,
+    },
+    CursorNotFound {
+        highest_cursor: i64,
+    },
+}
+
 /// Durable ownership and integration metadata for an assignment workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkspaceRecord {
@@ -434,6 +462,70 @@ pub(crate) struct EventRecord {
     pub(crate) correlation_id: Option<EventId>,
     pub(crate) causation_id: Option<EventId>,
     pub(crate) payload: JsonValue,
+    pub(crate) summary: String,
+    pub(crate) created_at: i64,
+}
+
+/// A stable normalized event type stored in the run event stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EventKind {
+    RunStarted,
+    RunStopped,
+    ProjectAttached,
+    AgentCreated,
+    AgentLifecycleChanged,
+    SessionStarted,
+    SessionLifecycleChanged,
+    TaskCreated,
+    TaskClaimed,
+    TaskLifecycleChanged,
+    AssignmentCreated,
+    AssignmentSessionAssociated,
+    AssignmentLifecycleChanged,
+    ClaimReleased,
+    MessageSent,
+    MessageAcknowledged,
+}
+
+impl EventKind {
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::RunStarted => "run.started",
+            Self::RunStopped => "run.stopped",
+            Self::ProjectAttached => "project.attached",
+            Self::AgentCreated => "agent.created",
+            Self::AgentLifecycleChanged => "agent.lifecycle_changed",
+            Self::SessionStarted => "session.started",
+            Self::SessionLifecycleChanged => "session.lifecycle_changed",
+            Self::TaskCreated => "task.created",
+            Self::TaskClaimed => "task.claimed",
+            Self::TaskLifecycleChanged => "task.lifecycle_changed",
+            Self::AssignmentCreated => "assignment.created",
+            Self::AssignmentSessionAssociated => {
+                "assignment.session_associated"
+            }
+            Self::AssignmentLifecycleChanged => "assignment.lifecycle_changed",
+            Self::ClaimReleased => "claim.released",
+            Self::MessageSent => "message.sent",
+            Self::MessageAcknowledged => "message.acknowledged",
+        }
+    }
+}
+
+/// The context and version-independent data for a new normalized event.
+pub(crate) struct NewEvent {
+    pub(crate) run_id: RunId,
+    pub(crate) kind: EventKind,
+    pub(crate) actor: String,
+    pub(crate) subject: String,
+    pub(crate) project_id: Option<ProjectId>,
+    pub(crate) agent_id: Option<AgentId>,
+    pub(crate) task_id: Option<TaskId>,
+    pub(crate) operation_id: Option<OperationId>,
+    pub(crate) correlation_id: Option<EventId>,
+    pub(crate) causation_id: Option<EventId>,
+    pub(crate) data: JsonValue,
     pub(crate) summary: String,
     pub(crate) created_at: i64,
 }
@@ -648,7 +740,9 @@ impl Store {
         };
 
         self.mutate(&mutation, |repositories| {
-            repositories.compare_and_set_claim(claim)
+            let result = repositories.compare_and_set_claim(claim)?;
+            repositories.append_task_claim_events(claim, &result)?;
+            Ok(result)
         })
     }
 
@@ -672,7 +766,163 @@ impl Store {
         };
 
         self.mutate(&mutation, |repositories| {
-            repositories.apply_task_transition(transition)
+            let active_claim = repositories
+                .active_claim_for_task(transition.run_id, transition.task_id)?;
+            let active_assignment = repositories.active_assignment_for_task(
+                transition.run_id,
+                transition.task_id,
+            )?;
+            let result = repositories.apply_task_transition(transition)?;
+            if let TaskTransitionResult::Transitioned {
+                previous_status,
+                status,
+            } = result
+            {
+                let task = repositories.task(transition.task_id)?.ok_or_else(
+                    || StoreError::CorruptTaskState {
+                        id: transition.task_id,
+                        reason: "the transitioned task disappeared".to_owned(),
+                    },
+                )?;
+                let task_event = repositories.append_event(&NewEvent {
+                    run_id: transition.run_id,
+                    kind: EventKind::TaskLifecycleChanged,
+                    actor: mutation_actor(transition.actor_agent_id),
+                    subject: transition.task_id.to_string(),
+                    project_id: Some(task.project_id),
+                    agent_id: transition.actor_agent_id,
+                    task_id: Some(transition.task_id),
+                    operation_id: Some(transition.operation_id),
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "previous_status": previous_status,
+                        "status": status,
+                        "transition": transition.transition,
+                    }),
+                    summary: format!(
+                        "Task {} changed from {previous_status} to {status}.",
+                        transition.task_id
+                    ),
+                    created_at: transition.transitioned_at,
+                })?;
+                if previous_status == TaskStatus::InProgress {
+                    let assignment = active_assignment.ok_or_else(|| {
+                        StoreError::CorruptTaskState {
+                            id: transition.task_id,
+                            reason:
+                                "the transitioned task had no active assignment"
+                                    .to_owned(),
+                        }
+                    })?;
+                    let claim = active_claim.ok_or_else(|| {
+                        StoreError::CorruptTaskState {
+                            id: transition.task_id,
+                            reason: "the transitioned task had no active claim"
+                                .to_owned(),
+                        }
+                    })?;
+                    let assignment_state = match transition.transition {
+                        TaskTransition::Reopen => "released",
+                        TaskTransition::Submit => "completed",
+                        TaskTransition::Cancel => "canceled",
+                        TaskTransition::Close => unreachable!(
+                            "an in-progress task cannot close directly"
+                        ),
+                    };
+                    repositories.append_event(&NewEvent {
+                        run_id: transition.run_id,
+                        kind: EventKind::AssignmentLifecycleChanged,
+                        actor: mutation_actor(transition.actor_agent_id),
+                        subject: assignment.id.to_string(),
+                        project_id: Some(task.project_id),
+                        agent_id: Some(assignment.agent_id),
+                        task_id: Some(transition.task_id),
+                        operation_id: Some(transition.operation_id),
+                        correlation_id: Some(task_event.id),
+                        causation_id: Some(task_event.id),
+                        data: json!({
+                            "previous_state": assignment.state,
+                            "state": assignment_state,
+                        }),
+                        summary: format!(
+                            "Assignment {} changed to {assignment_state}.",
+                            assignment.id
+                        ),
+                        created_at: transition.transitioned_at,
+                    })?;
+                    repositories.append_event(&NewEvent {
+                        run_id: transition.run_id,
+                        kind: EventKind::ClaimReleased,
+                        actor: mutation_actor(transition.actor_agent_id),
+                        subject: transition.task_id.to_string(),
+                        project_id: Some(task.project_id),
+                        agent_id: Some(claim.agent_id),
+                        task_id: Some(transition.task_id),
+                        operation_id: Some(transition.operation_id),
+                        correlation_id: Some(task_event.id),
+                        causation_id: Some(task_event.id),
+                        data: json!({"claim_id": claim.id}),
+                        summary: format!(
+                            "Released the claim on task {}.",
+                            transition.task_id
+                        ),
+                        created_at: transition.transitioned_at,
+                    })?;
+                }
+            }
+            Ok(result)
+        })
+    }
+
+    /// Explicitly acknowledges a recipient-local cursor without allowing regressions.
+    pub(crate) fn acknowledge_messages(
+        &mut self,
+        acknowledgement: &AcknowledgeMessagesMutation,
+    ) -> Result<MutationOutcome<AcknowledgeMessagesResult>, StoreError> {
+        let mutation = Mutation {
+            id: acknowledgement.operation_id,
+            run_id: acknowledgement.run_id,
+            kind: "message.acknowledge".to_owned(),
+            actor_agent_id: Some(acknowledgement.agent_id),
+            request: json!({
+                "agent_id": acknowledgement.agent_id,
+                "through": acknowledgement.through,
+            }),
+            created_at: acknowledgement.acknowledged_at,
+        };
+
+        self.mutate(&mutation, |repositories| {
+            let result = repositories
+                .apply_message_acknowledgement(acknowledgement)?;
+            if let AcknowledgeMessagesResult::Acknowledged {
+                acknowledged_through,
+                acknowledged_count,
+            } = result
+                && acknowledged_count > 0
+            {
+                repositories.append_event(&NewEvent {
+                    run_id: acknowledgement.run_id,
+                    kind: EventKind::MessageAcknowledged,
+                    actor: acknowledgement.agent_id.to_string(),
+                    subject: acknowledgement.agent_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(acknowledgement.agent_id),
+                    task_id: None,
+                    operation_id: Some(acknowledgement.operation_id),
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "acknowledged_count": acknowledged_count,
+                        "acknowledged_through": acknowledged_through,
+                    }),
+                    summary: format!(
+                        "Acknowledged {acknowledged_count} message(s) through cursor {acknowledged_through}."
+                    ),
+                    created_at: acknowledgement.acknowledged_at,
+                })?;
+            }
+            Ok(result)
         })
     }
 
@@ -1821,6 +2071,118 @@ impl Repositories<'_, '_> {
         })
     }
 
+    /// Emits the normalized state changes produced by a successful task claim.
+    pub(crate) fn append_task_claim_events(
+        &self,
+        claim: &ClaimTaskMutation,
+        result: &ClaimTaskResult,
+    ) -> Result<(), StoreError> {
+        let ClaimTaskResult::Claimed {
+            claim_id,
+            assignment_id,
+        } = result
+        else {
+            return Ok(());
+        };
+        let task = self.task(claim.task_id)?.ok_or_else(|| {
+            StoreError::CorruptTaskState {
+                id: claim.task_id,
+                reason: "the claimed task disappeared".to_owned(),
+            }
+        })?;
+        let task_event = self.append_event(&NewEvent {
+            run_id: claim.run_id,
+            kind: EventKind::TaskLifecycleChanged,
+            actor: mutation_actor(claim.actor_agent_id),
+            subject: claim.task_id.to_string(),
+            project_id: Some(task.project_id),
+            agent_id: Some(claim.agent_id),
+            task_id: Some(claim.task_id),
+            operation_id: Some(claim.operation_id),
+            correlation_id: None,
+            causation_id: None,
+            data: json!({
+                "previous_status": TaskStatus::Open,
+                "status": TaskStatus::InProgress,
+                "transition": "claim",
+            }),
+            summary: format!(
+                "Task {} changed from open to in_progress.",
+                claim.task_id
+            ),
+            created_at: claim.claimed_at,
+        })?;
+        self.append_event(&NewEvent {
+            run_id: claim.run_id,
+            kind: EventKind::TaskClaimed,
+            actor: mutation_actor(claim.actor_agent_id),
+            subject: claim.task_id.to_string(),
+            project_id: Some(task.project_id),
+            agent_id: Some(claim.agent_id),
+            task_id: Some(claim.task_id),
+            operation_id: Some(claim.operation_id),
+            correlation_id: Some(task_event.id),
+            causation_id: Some(task_event.id),
+            data: json!({
+                "assignment_id": assignment_id,
+                "claim_id": claim_id,
+            }),
+            summary: format!(
+                "Agent {} claimed task {}.",
+                claim.agent_id, claim.task_id
+            ),
+            created_at: claim.claimed_at,
+        })?;
+        self.append_event(&NewEvent {
+            run_id: claim.run_id,
+            kind: EventKind::AssignmentCreated,
+            actor: mutation_actor(claim.actor_agent_id),
+            subject: assignment_id.to_string(),
+            project_id: Some(task.project_id),
+            agent_id: Some(claim.agent_id),
+            task_id: Some(claim.task_id),
+            operation_id: Some(claim.operation_id),
+            correlation_id: Some(task_event.id),
+            causation_id: Some(task_event.id),
+            data: json!({
+                "claim_id": claim_id,
+                "generation": self.agent(claim.agent_id)?.map(|agent| agent.generation),
+                "state": "active",
+            }),
+            summary: format!("Created assignment {assignment_id}."),
+            created_at: claim.claimed_at,
+        })?;
+        Ok(())
+    }
+
+    fn active_claim_for_task(
+        &self,
+        run_id: RunId,
+        task_id: TaskId,
+    ) -> Result<Option<ClaimRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, task_id, agent_id, operation_id, state, claimed_at, \
+                        released_at FROM claims \
+                 WHERE run_id = ?1 AND task_id = ?2 AND released_at IS NULL",
+                params![run_id, task_id],
+                |row| {
+                    Ok(ClaimRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        task_id: row.get(2)?,
+                        agent_id: row.get(3)?,
+                        operation_id: row.get(4)?,
+                        state: row.get(5)?,
+                        claimed_at: row.get(6)?,
+                        released_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     fn claim_rejection(
         &self,
         claim: &ClaimTaskMutation,
@@ -1953,6 +2315,37 @@ impl Repositories<'_, '_> {
                  FROM assignments WHERE run_id = ?1 AND agent_id = ?2 \
                    AND completed_at IS NULL",
                 params![run_id, agent_id],
+                |row| {
+                    Ok(AssignmentRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        task_id: row.get(2)?,
+                        agent_id: row.get(3)?,
+                        session_id: row.get(4)?,
+                        claim_id: row.get(5)?,
+                        generation: row.get(6)?,
+                        state: row.get(7)?,
+                        summary: row.get(8)?,
+                        created_at: row.get(9)?,
+                        completed_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn active_assignment_for_task(
+        &self,
+        run_id: RunId,
+        task_id: TaskId,
+    ) -> Result<Option<AssignmentRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, task_id, agent_id, session_id, claim_id, generation, \
+                        state, summary, created_at, completed_at FROM assignments \
+                 WHERE run_id = ?1 AND task_id = ?2 AND completed_at IS NULL",
+                params![run_id, task_id],
                 |row| {
                     Ok(AssignmentRecord {
                         id: row.get(0)?,
@@ -2118,6 +2511,48 @@ impl Repositories<'_, '_> {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    fn apply_message_acknowledgement(
+        &self,
+        acknowledgement: &AcknowledgeMessagesMutation,
+    ) -> Result<AcknowledgeMessagesResult, StoreError> {
+        let highest_cursor = self.transaction.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM messages \
+             WHERE run_id = ?1 AND recipient_agent_id = ?2",
+            params![acknowledgement.run_id, acknowledgement.agent_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        if acknowledgement.through <= 0
+            || acknowledgement.through > highest_cursor
+        {
+            return Ok(AcknowledgeMessagesResult::CursorNotFound {
+                highest_cursor,
+            });
+        }
+        let acknowledged_through = self.transaction.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM messages \
+             WHERE run_id = ?1 AND recipient_agent_id = ?2 \
+               AND acknowledged_at IS NOT NULL",
+            params![acknowledgement.run_id, acknowledgement.agent_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let acknowledged_count = self.transaction.execute(
+            "UPDATE messages SET acknowledged_at = ?4 \
+             WHERE run_id = ?1 AND recipient_agent_id = ?2 \
+               AND sequence <= ?3 AND acknowledged_at IS NULL",
+            params![
+                acknowledgement.run_id,
+                acknowledgement.agent_id,
+                acknowledgement.through,
+                acknowledgement.acknowledged_at,
+            ],
+        )?;
+        Ok(AcknowledgeMessagesResult::Acknowledged {
+            acknowledged_through: acknowledged_through
+                .max(acknowledgement.through),
+            acknowledged_count,
+        })
+    }
+
     pub(crate) fn insert_workspace(
         &self,
         workspace: &WorkspaceRecord,
@@ -2206,6 +2641,40 @@ impl Repositories<'_, '_> {
         Ok(())
     }
 
+    /// Appends one normalized, versioned event at the next run-local sequence.
+    pub(crate) fn append_event(
+        &self,
+        event: &NewEvent,
+    ) -> Result<EventRecord, StoreError> {
+        let sequence = self.transaction.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE run_id = ?1",
+            [event.run_id],
+            |row| row.get(0),
+        )?;
+        let event = EventRecord {
+            id: EventId::generate(),
+            run_id: event.run_id,
+            sequence,
+            event_type: event.kind.as_str().to_owned(),
+            actor: event.actor.clone(),
+            subject: event.subject.clone(),
+            project_id: event.project_id,
+            agent_id: event.agent_id,
+            task_id: event.task_id,
+            operation_id: event.operation_id,
+            correlation_id: event.correlation_id,
+            causation_id: event.causation_id,
+            payload: json!({
+                "schema_version": 1,
+                "data": event.data,
+            }),
+            summary: event.summary.clone(),
+            created_at: event.created_at,
+        };
+        self.insert_event(&event)?;
+        Ok(event)
+    }
+
     pub(crate) fn event(
         &self,
         id: EventId,
@@ -2276,6 +2745,10 @@ impl Repositories<'_, '_> {
             })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+}
+
+fn mutation_actor(agent_id: Option<AgentId>) -> String {
+    agent_id.map_or_else(|| "operator".to_owned(), |id| id.to_string())
 }
 
 fn path_bytes(path: &Path) -> &[u8] {
@@ -2376,8 +2849,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AgentRecord, AssignmentRecord, BUSY_TIMEOUT, ClaimRecord,
-        ClaimRejection, ClaimTaskMutation, ClaimTaskResult, CommentRecord,
+        AcknowledgeMessagesMutation, AcknowledgeMessagesResult, AgentRecord,
+        AssignmentRecord, BUSY_TIMEOUT, ClaimRecord, ClaimRejection,
+        ClaimTaskMutation, ClaimTaskResult, CommentRecord,
         ConfigurationSnapshotRecord, DependencyRecord, EventRecord, MIGRATIONS,
         MessageRecord, Mutation, MutationOutcome, OperationRecord,
         ProjectRecord, RunRecord, SessionCredentialRecord, SessionRecord,
@@ -2755,6 +3229,106 @@ mod tests {
                 Ok(())
             })
             .expect("the claim should be inspectable");
+    }
+
+    #[test]
+    fn normalized_events_commit_atomically_once_with_each_state_transition() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        insert_claim_prerequisites(&mut store, &records);
+        let claim = claim_mutation(&records);
+
+        let applied = store
+            .claim_task(&claim)
+            .expect("the claim and its events should commit");
+        assert_eq!(
+            store
+                .claim_task(&claim)
+                .expect("the claim retry should replay"),
+            applied.as_replayed()
+        );
+        store
+            .transition_task(&transition_mutation(
+                &records,
+                TaskTransition::Submit,
+            ))
+            .expect("the task transition and its events should commit");
+
+        store
+            .transaction(|repositories| {
+                let events =
+                    repositories.events_after(records.run.id, 0, 100)?;
+                assert_eq!(
+                    events
+                        .iter()
+                        .map(|event| event.event_type.as_str())
+                        .collect::<Vec<_>>(),
+                    [
+                        "task.lifecycle_changed",
+                        "task.claimed",
+                        "assignment.created",
+                        "task.lifecycle_changed",
+                        "assignment.lifecycle_changed",
+                        "claim.released",
+                    ]
+                );
+                assert_eq!(
+                    events
+                        .iter()
+                        .map(|event| event.sequence)
+                        .collect::<Vec<_>>(),
+                    (1..=6).collect::<Vec<_>>()
+                );
+                assert!(events.iter().all(|event| {
+                    event.payload["schema_version"] == 1
+                        && event.payload.get("data").is_some()
+                }));
+                Ok(())
+            })
+            .expect("the event stream should be inspectable");
+    }
+
+    #[test]
+    fn a_failed_event_insert_rolls_back_its_state_transition() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        insert_claim_prerequisites(&mut store, &records);
+        store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_normalized_events \
+                 BEFORE INSERT ON events BEGIN \
+                     SELECT RAISE(ABORT, 'injected event failure'); \
+                 END;",
+            )
+            .expect("the failure injection should be installed");
+
+        let mutation = claim_mutation(&records);
+        assert!(matches!(
+            store.claim_task(&mutation),
+            Err(super::StoreError::Database(_))
+        ));
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .task(records.task.id)?
+                        .expect("the task should remain")
+                        .status,
+                    TaskStatus::Open
+                );
+                assert_eq!(
+                    repositories.operation(mutation.operation_id)?,
+                    None
+                );
+                assert!(
+                    repositories
+                        .events_after(records.run.id, 0, 100)?
+                        .is_empty()
+                );
+                Ok(())
+            })
+            .expect("the rolled-back state should remain readable");
     }
 
     #[test]
@@ -3296,7 +3870,7 @@ mod tests {
             })
             .expect("the migration ledger should be readable");
 
-        assert_eq!(applied, 3);
+        assert_eq!(applied, MIGRATIONS.len() as i64);
     }
 
     #[test]
@@ -3392,6 +3966,19 @@ mod tests {
                     |row| row.get::<_, i64>(0),
                 )
                 .expect("the claim indexes should be inspectable");
+            let message_triggers = store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM sqlite_schema \
+                     WHERE type = 'trigger' AND name IN (\
+                         'messages_cannot_be_deleted',\
+                         'message_content_is_immutable',\
+                         'message_acknowledgements_are_final'\
+                     )",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("the message triggers should be inspectable");
             let preserved_sessions = store
                 .connection
                 .query_row("SELECT count(*) FROM sessions", [], |row| {
@@ -3402,6 +3989,7 @@ mod tests {
             assert_eq!(applied, MIGRATIONS.len() as i64);
             assert_eq!(credential_table, 1);
             assert_eq!(claim_indexes, 3);
+            assert_eq!(message_triggers, 3);
             assert_eq!(preserved_sessions, 1);
         }
     }
@@ -3452,7 +4040,7 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO schema_migrations (version, name, source) \
-                 VALUES (4, 'future', '-- future migration')",
+                 VALUES (5, 'future', '-- future migration')",
                 [],
             )
             .expect("the test should simulate a newer Coterie version");
@@ -3465,8 +4053,8 @@ mod tests {
         assert!(matches!(
             error,
             super::StoreError::UnsupportedSchema {
-                found: 4,
-                supported: 3,
+                found: 5,
+                supported: 4,
             }
         ));
     }
@@ -3592,6 +4180,139 @@ mod tests {
                 Ok(())
             })
             .expect("the committed records should load");
+    }
+
+    #[test]
+    fn inbox_acknowledgements_are_explicit_idempotent_and_monotonic() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_agent(&records.agent)?;
+                for sequence in 1..=3 {
+                    repositories.insert_message(&MessageRecord {
+                        id: MessageId::generate(),
+                        sequence,
+                        body: format!("Message {sequence}."),
+                        ..records.message.clone()
+                    })?;
+                }
+                Ok(())
+            })
+            .expect("the inbox should be populated");
+        let operation_id = OperationId::generate();
+        let acknowledgement = AcknowledgeMessagesMutation {
+            operation_id,
+            run_id: records.run.id,
+            agent_id: records.agent.id,
+            through: 2,
+            acknowledged_at: 30,
+        };
+
+        let applied = store
+            .acknowledge_messages(&acknowledgement)
+            .expect("the cursor should be acknowledged");
+        assert_eq!(
+            applied,
+            MutationOutcome::Applied(AcknowledgeMessagesResult::Acknowledged {
+                acknowledged_through: 2,
+                acknowledged_count: 2,
+            })
+        );
+        assert_eq!(
+            store
+                .acknowledge_messages(&acknowledgement)
+                .expect("the retry should replay"),
+            applied.as_replayed()
+        );
+
+        let future = store
+            .acknowledge_messages(&AcknowledgeMessagesMutation {
+                operation_id: OperationId::generate(),
+                through: 4,
+                acknowledged_at: 31,
+                ..acknowledgement.clone()
+            })
+            .expect("an unknown cursor should be a durable domain result");
+        assert_eq!(
+            future,
+            MutationOutcome::Applied(
+                AcknowledgeMessagesResult::CursorNotFound { highest_cursor: 3 }
+            )
+        );
+
+        let lower = store
+            .acknowledge_messages(&AcknowledgeMessagesMutation {
+                operation_id: OperationId::generate(),
+                through: 1,
+                acknowledged_at: 31,
+                ..acknowledgement
+            })
+            .expect("an older cursor should be an idempotent no-op");
+        assert_eq!(
+            lower,
+            MutationOutcome::Applied(AcknowledgeMessagesResult::Acknowledged {
+                acknowledged_through: 2,
+                acknowledged_count: 0,
+            })
+        );
+        store
+            .transaction(|repositories| {
+                let messages = repositories.messages_after(
+                    records.run.id,
+                    records.agent.id,
+                    0,
+                )?;
+                assert_eq!(
+                    messages
+                        .iter()
+                        .map(|message| message.acknowledged_at)
+                        .collect::<Vec<_>>(),
+                    vec![Some(30), Some(30), None]
+                );
+                assert_eq!(
+                    repositories.next_message_sequence(
+                        records.run.id,
+                        records.agent.id,
+                    )?,
+                    4
+                );
+                Ok(())
+            })
+            .expect("the monotonic inbox should be inspectable");
+
+        for statement in [
+            "DELETE FROM messages WHERE sequence = 3",
+            "UPDATE messages SET body = 'rewritten' WHERE sequence = 3",
+        ] {
+            assert!(matches!(
+                store.transaction(|repositories| {
+                    repositories.transaction.execute(statement, [])?;
+                    Ok(())
+                }),
+                Err(super::StoreError::Database(_))
+            ));
+        }
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories.next_message_sequence(
+                        records.run.id,
+                        records.agent.id,
+                    )?,
+                    4
+                );
+                assert_eq!(
+                    repositories
+                        .messages_after(records.run.id, records.agent.id, 2)?
+                        .first()
+                        .map(|message| message.body.as_str()),
+                    Some("Message 3.")
+                );
+                Ok(())
+            })
+            .expect("failed rewrites must not alter the inbox");
     }
 
     #[test]
@@ -4205,7 +4926,10 @@ mod tests {
                     operation_id: Some(operation_id),
                     correlation_id: None,
                     causation_id: None,
-                    payload: json!({"assignment_id": ASSIGNMENT_ID}),
+                    payload: json!({
+                        "schema_version": 1,
+                        "data": {"assignment_id": ASSIGNMENT_ID},
+                    }),
                     summary: "Task claimed.".to_owned(),
                     created_at: 26,
                 },

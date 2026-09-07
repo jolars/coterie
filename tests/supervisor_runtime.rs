@@ -111,6 +111,22 @@ fn status_does_not_create_a_run_and_partial_agent_identity_never_becomes_operato
         .expect("the operator inbox rejection should be JSON");
     assert_eq!(error["error"]["code"], "permission_denied");
 
+    let mut acknowledge = fixture.command();
+    acknowledge.args([
+        "inbox",
+        "ack",
+        "1",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB9",
+        "--json",
+    ]);
+    let output = run(acknowledge);
+    assert_eq!(output.status.code(), Some(6));
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the acknowledgement rejection should be JSON");
+    assert_eq!(error["operation_id"], "co-01ARZ3NDEKTSV4RRFFQ69G5FB9");
+    assert_eq!(error["error"]["code"], "permission_denied");
+
     let mut finish = fixture.command();
     finish.args([
         "finish",
@@ -336,8 +352,32 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
     );
 
     let events = fixture.run_json(&["events", "--json"]);
-    assert!(events["data"]["events"].is_array());
-    assert!(events["data"]["next_cursor"].is_number());
+    let events = events["data"]["events"]
+        .as_array()
+        .expect("the typed event stream should be an array");
+    assert!(!events.is_empty());
+    assert!(events.windows(2).all(|events| {
+        events[0]["sequence"].as_u64() < events[1]["sequence"].as_u64()
+    }));
+    assert!(events.iter().all(|event| {
+        event["run_id"] == run_id && event["payload"]["schema_version"] == 1
+    }));
+    for event_type in [
+        "run.started",
+        "project.attached",
+        "agent.created",
+        "session.started",
+        "session.lifecycle_changed",
+        "task.created",
+        "task.claimed",
+        "assignment.created",
+        "message.sent",
+    ] {
+        assert!(
+            events.iter().any(|event| event["event_type"] == event_type),
+            "the runtime should normalize `{event_type}`"
+        );
+    }
 
     let stopped = fixture.run_json(&["stop", "--json"]);
     assert_eq!(stopped["data"]["run_id"], run_id);

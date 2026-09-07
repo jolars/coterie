@@ -96,7 +96,7 @@ later milestones build on.
 - [x] Implement the minimum delegation commands: foreground launch, `status`,
   `whoami`, `prime`, `task create`, `task ready`, `task close`, `spawn`,
   `finish`, `send`, `inbox`, `logs`, `events`, and `stop`.
-- [ ] Persist messages before delivery, use monotonic inbox cursors and explicit
+- [x] Persist messages before delivery, use monotonic inbox cursors and explicit
   acknowledgements, and normalize every state transition into the event
   stream.
 - [ ] Record durable intent before launching a process or changing a workspace;

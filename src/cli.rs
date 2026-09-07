@@ -173,6 +173,25 @@ pub(crate) struct InboxArguments {
     /// Return only messages after this recipient-local sequence.
     #[arg(long, default_value_t = 0)]
     pub(crate) after: u64,
+    #[command(subcommand)]
+    pub(crate) command: Option<InboxCommand>,
+}
+
+/// A mutation applied to the authenticated agent's inbox.
+#[derive(Debug, Subcommand)]
+pub(crate) enum InboxCommand {
+    /// Acknowledge every message through a previously returned cursor.
+    Ack(InboxAckArguments),
+}
+
+/// Inputs for `inbox ack`.
+#[derive(Debug, Args)]
+pub(crate) struct InboxAckArguments {
+    /// The inclusive message cursor to acknowledge.
+    #[arg(value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) through: u64,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
 }
 
 /// Inputs for `logs`.
@@ -630,14 +649,42 @@ fn write_json_line(
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
     use serde_json::json;
 
     use super::{
-        Diagnostic, ErrorCode, ExitCategory, OutputSchema, render_json_error,
-        render_json_mutation_success, render_json_success,
+        Arguments, Command, Diagnostic, ErrorCode, ExitCategory, InboxCommand,
+        OutputSchema, render_json_error, render_json_mutation_success,
+        render_json_success,
     };
 
     const OPERATION_ID: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    #[test]
+    fn inbox_acknowledgement_is_an_explicit_idempotent_command() {
+        let arguments = Arguments::try_parse_from([
+            "coterie",
+            "inbox",
+            "ack",
+            "7",
+            "--operation-id",
+            OPERATION_ID,
+        ])
+        .expect("the acknowledgement command should parse");
+
+        let Command::Inbox(inbox) = arguments.command.expect("a command")
+        else {
+            panic!("the inbox command should be selected");
+        };
+        let Some(InboxCommand::Ack(acknowledgement)) = inbox.command else {
+            panic!("the acknowledgement subcommand should be selected");
+        };
+        assert_eq!(acknowledgement.through, 7);
+        assert_eq!(
+            acknowledgement.mutation.operation_id,
+            Some(OPERATION_ID.parse().expect("a valid operation ID"))
+        );
+    }
 
     #[test]
     fn query_success_matches_the_v1_golden_contract() {

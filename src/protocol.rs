@@ -108,6 +108,10 @@ pub(crate) enum RpcRequest {
     Inbox {
         after: u64,
     },
+    InboxAcknowledge {
+        operation_id: OperationId,
+        through: u64,
+    },
     Logs {
         agent: String,
     },
@@ -230,6 +234,11 @@ pub(crate) enum RpcResponse {
         messages: Vec<MessageSummary>,
         next_cursor: u64,
     },
+    InboxAcknowledged {
+        operation_id: OperationId,
+        acknowledged_through: u64,
+        acknowledged_count: u64,
+    },
     Logs {
         agent: AgentSummary,
         session_id: SessionId,
@@ -320,10 +329,17 @@ pub(crate) struct MessageSummary {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct EventSummary {
     pub(crate) id: EventId,
+    pub(crate) run_id: RunId,
     pub(crate) sequence: u64,
     pub(crate) event_type: String,
     pub(crate) actor: String,
     pub(crate) subject: String,
+    pub(crate) project_id: Option<ProjectId>,
+    pub(crate) agent_id: Option<AgentId>,
+    pub(crate) task_id: Option<TaskId>,
+    pub(crate) operation_id: Option<OperationId>,
+    pub(crate) correlation_id: Option<EventId>,
+    pub(crate) causation_id: Option<EventId>,
     pub(crate) payload: serde_json::Value,
     pub(crate) summary: String,
     pub(crate) created_at: i64,

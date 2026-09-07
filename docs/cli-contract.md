@@ -25,6 +25,7 @@ The minimum delegation commands are:
 | `coterie finish --status <completed\|failed> --summary <text>` | Submit or release the authenticated agent's active assignment. |
 | `coterie send <agent> <message>` | Persist a message for an agent ID or run-local name. |
 | `coterie inbox [--after <cursor>]` | Read the authenticated agent's messages after a monotonic cursor. |
+| `coterie inbox ack <cursor>` | Explicitly acknowledge every message through a returned inbox cursor. |
 | `coterie logs <agent>` | Read the latest provider transcript visible to the caller. |
 | `coterie events [--after <cursor>] [--limit <n>]` | Read typed run events after a monotonic cursor. |
 | `coterie stop` | Stop the active run and wait for its index and socket to retire. |
@@ -33,6 +34,14 @@ The minimum delegation commands are:
 task IDs. Generated help is authoritative for argument spelling and defaults.
 Commands other than the foreground launch require an active run and never
 create one as a side effect.
+
+`send` commits the message and its normalized event before any provider delivery
+can be attempted. Inbox reads never acknowledge messages implicitly. A caller
+passes the returned `next_cursor` to `inbox ack`; acknowledgements are
+operation-ID idempotent, acknowledge every message through that cursor, and
+never move the durable acknowledgement point backward. The M2 fake provider
+does not advertise live steering, so agents receive these messages through the
+durable inbox.
 
 The operator connects through the local operator channel. An agent invocation
 must carry all of `COTERIE_AGENT_ID`, `COTERIE_SESSION_ID`, and `COTERIE_TOKEN`;
@@ -86,6 +95,12 @@ operation ID before dispatch. The RPC request carries that ID, and every
 response after allocation returns it. A programmatic caller retries an
 uncertain mutation with the same ID. Read-only commands neither accept nor
 return an operation ID.
+
+`events` returns immutable records in increasing run-local sequence order. Each
+record includes its run ID, applicable project, agent, task, and operation IDs,
+optional correlation and causation event IDs, and a payload with its own
+`schema_version`. Retrying an already applied mutation does not append duplicate
+events.
 
 Errors detected before an operation ID can be parsed or allocated use the
 ordinary error envelope without `operation_id`.

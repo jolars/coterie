@@ -25,7 +25,7 @@ use tokio::time::{Instant, sleep};
 use crate::auth::{AgentToken, SessionScope};
 use crate::cli::{
     Arguments, Command as CliCommand, FinishStatus as CliFinishStatus,
-    TaskCommand,
+    InboxCommand, TaskCommand,
 };
 use crate::config::{
     AuthorizationDecision, Capability, RoleMode, builtin_standard,
@@ -52,10 +52,11 @@ use crate::providers::{
     ActivityState, LaunchMode, LifecycleState, SessionObservation,
 };
 use crate::state::{
-    AgentRecord, ClaimTaskMutation, ClaimTaskResult, DependencyRecord,
-    EventRecord, MessageRecord, Mutation, MutationOutcome, ProjectRecord,
-    RunRecord, Store, StoreError, TaskRecord, TaskTransitionMutation,
-    TaskTransitionRejection, TaskTransitionResult,
+    AcknowledgeMessagesMutation, AcknowledgeMessagesResult, AgentRecord,
+    ClaimTaskMutation, ClaimTaskResult, DependencyRecord, EventKind,
+    EventRecord, MessageRecord, Mutation, MutationOutcome, NewEvent,
+    ProjectRecord, RunRecord, Store, StoreError, TaskRecord,
+    TaskTransitionMutation, TaskTransitionRejection, TaskTransitionResult,
 };
 use crate::tasks::{TaskStatus, TaskTransition};
 
@@ -338,13 +339,29 @@ fn public_request(
                 false,
             )
         }
-        CliCommand::Inbox(arguments) => (
-            RpcRequest::Inbox {
-                after: arguments.after,
-            },
-            None,
-            false,
-        ),
+        CliCommand::Inbox(arguments) => match arguments.command {
+            None => (
+                RpcRequest::Inbox {
+                    after: arguments.after,
+                },
+                None,
+                false,
+            ),
+            Some(InboxCommand::Ack(arguments)) => {
+                let operation_id = arguments
+                    .mutation
+                    .operation_id
+                    .unwrap_or_else(OperationId::generate);
+                (
+                    RpcRequest::InboxAcknowledge {
+                        operation_id,
+                        through: arguments.through,
+                    },
+                    Some(operation_id),
+                    false,
+                )
+            }
+        },
         CliCommand::Logs(arguments) => (
             RpcRequest::Logs {
                 agent: arguments.agent,
@@ -872,6 +889,10 @@ fn execute_request(
             message,
         ),
         RpcRequest::Inbox { after } => inbox(store, run_id, caller, after),
+        RpcRequest::InboxAcknowledge {
+            operation_id,
+            through,
+        } => acknowledge_inbox(store, run_id, caller, operation_id, through),
         RpcRequest::Logs { agent } => {
             logs(store, run_state_directory, run_id, caller, &agent)
         }
@@ -935,6 +956,25 @@ fn launch_foreground(
                 role: role.clone(),
                 generation: 0,
                 state: LifecycleState::Starting,
+                created_at: now,
+            })?;
+            repositories.append_event(&NewEvent {
+                run_id,
+                kind: EventKind::AgentCreated,
+                actor: event_actor(caller),
+                subject: agent_id.to_string(),
+                project_id: None,
+                agent_id: Some(agent_id),
+                task_id: None,
+                operation_id: Some(operation_id),
+                correlation_id: None,
+                causation_id: None,
+                data: json!({
+                    "generation": 0,
+                    "role": role,
+                    "state": LifecycleState::Starting.as_str(),
+                }),
+                summary: format!("Created foreground agent {agent_id}."),
                 created_at: now,
             })?;
             Ok(LaunchIntent {
@@ -1157,6 +1197,26 @@ fn create_task(
                     created_at: now,
                 })?;
             }
+            repositories.append_event(&NewEvent {
+                run_id,
+                kind: EventKind::TaskCreated,
+                actor: event_actor(caller),
+                subject: task_id.to_string(),
+                project_id: Some(project.id),
+                agent_id: actor_agent_id,
+                task_id: Some(task_id),
+                operation_id: Some(operation_id),
+                correlation_id: None,
+                causation_id: None,
+                data: json!({
+                    "dependencies": dependencies,
+                    "group": group,
+                    "status": TaskStatus::Open,
+                    "title": title,
+                }),
+                summary: format!("Created task {task_id}."),
+                created_at: now,
+            })?;
             Ok(task_id)
         })
         .map_err(|error| match error {
@@ -1337,7 +1397,28 @@ fn spawn_agent(
                 state: LifecycleState::Starting,
                 created_at: now,
             })?;
-            match repositories.compare_and_set_claim(&claim)? {
+            repositories.append_event(&NewEvent {
+                run_id,
+                kind: EventKind::AgentCreated,
+                actor: event_actor(caller),
+                subject: agent_id.to_string(),
+                project_id: None,
+                agent_id: Some(agent_id),
+                task_id: Some(task_id),
+                operation_id: Some(operation_id),
+                correlation_id: None,
+                causation_id: None,
+                data: json!({
+                    "generation": 0,
+                    "role": role,
+                    "state": LifecycleState::Starting.as_str(),
+                }),
+                summary: format!("Created agent {agent_id}."),
+                created_at: now,
+            })?;
+            let claim_result = repositories.compare_and_set_claim(&claim)?;
+            repositories.append_task_claim_events(&claim, &claim_result)?;
+            match claim_result {
                 ClaimTaskResult::Claimed { assignment_id, .. } => {
                     Ok(SpawnIntent {
                         agent_id,
@@ -1525,6 +1606,28 @@ fn send_message(
                 created_at: now,
                 acknowledged_at: None,
             })?;
+            repositories.append_event(&NewEvent {
+                run_id,
+                kind: EventKind::MessageSent,
+                actor: event_actor(caller),
+                subject: message_id.to_string(),
+                project_id: None,
+                agent_id: Some(recipient.id),
+                task_id: None,
+                operation_id: Some(operation_id),
+                correlation_id: None,
+                causation_id: None,
+                data: json!({
+                    "recipient_agent_id": recipient.id,
+                    "sender_agent_id": caller.agent_id(),
+                    "sequence": sequence,
+                }),
+                summary: format!(
+                    "Persisted message {message_id} for {}.",
+                    recipient.name
+                ),
+                created_at: now,
+            })?;
             Ok(MessageIntent {
                 message_id,
                 sequence,
@@ -1591,6 +1694,61 @@ fn inbox(
             RpcFailure::new(RpcFailureCode::Internal, "invalid inbox cursor")
         })?,
     })
+}
+
+fn acknowledge_inbox(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    operation_id: OperationId,
+    through: u64,
+) -> Result<RpcResponse, RpcFailure> {
+    let agent_id = caller.agent_id().ok_or_else(|| {
+        RpcFailure::new(
+            RpcFailureCode::PermissionDenied,
+            "the operator does not have an agent inbox",
+        )
+    })?;
+    let through = i64::try_from(through)
+        .map_err(|_| invalid_argument("inbox cursor is too large"))?;
+    let outcome = store
+        .acknowledge_messages(&AcknowledgeMessagesMutation {
+            operation_id,
+            run_id,
+            agent_id,
+            through,
+            acknowledged_at: rpc_timestamp()?,
+        })
+        .map_err(rpc_state_failure)?;
+    match mutation_value(outcome) {
+        AcknowledgeMessagesResult::Acknowledged {
+            acknowledged_through,
+            acknowledged_count,
+        } => Ok(RpcResponse::InboxAcknowledged {
+            operation_id,
+            acknowledged_through: u64::try_from(acknowledged_through).map_err(
+                |_| {
+                    RpcFailure::new(
+                        RpcFailureCode::Internal,
+                        "invalid acknowledged inbox cursor",
+                    )
+                },
+            )?,
+            acknowledged_count: u64::try_from(acknowledged_count).map_err(
+                |_| {
+                    RpcFailure::new(
+                        RpcFailureCode::Internal,
+                        "invalid acknowledged message count",
+                    )
+                },
+            )?,
+        }),
+        AcknowledgeMessagesResult::CursorNotFound { highest_cursor } => {
+            Err(invalid_argument(format!(
+                "inbox cursor {through} does not exist; highest cursor is {highest_cursor}"
+            )))
+        }
+    }
 }
 
 fn logs(
@@ -1950,6 +2108,7 @@ fn available_commands(
 fn event_summary(event: EventRecord) -> Result<EventSummary, RpcFailure> {
     Ok(EventSummary {
         id: event.id,
+        run_id: event.run_id,
         sequence: u64::try_from(event.sequence).map_err(|_| {
             RpcFailure::new(
                 RpcFailureCode::Internal,
@@ -1959,10 +2118,22 @@ fn event_summary(event: EventRecord) -> Result<EventSummary, RpcFailure> {
         event_type: event.event_type,
         actor: event.actor,
         subject: event.subject,
+        project_id: event.project_id,
+        agent_id: event.agent_id,
+        task_id: event.task_id,
+        operation_id: event.operation_id,
+        correlation_id: event.correlation_id,
+        causation_id: event.causation_id,
         payload: event.payload,
         summary: event.summary,
         created_at: event.created_at,
     })
+}
+
+fn event_actor(caller: &AuthenticatedCaller) -> String {
+    caller
+        .agent_id()
+        .map_or_else(|| "operator".to_owned(), |id| id.to_string())
 }
 
 fn safe_relative_path(path: &Path) -> bool {
@@ -2123,6 +2294,24 @@ fn persist_shutdown(
     };
     let outcome = store.mutate(&mutation, |repositories| {
         repositories.stop_run(run_id, stopped_at)?;
+        repositories.append_event(&NewEvent {
+            run_id,
+            kind: EventKind::RunStopped,
+            actor: "operator".to_owned(),
+            subject: run_id.to_string(),
+            project_id: None,
+            agent_id: None,
+            task_id: None,
+            operation_id: Some(operation_id),
+            correlation_id: None,
+            causation_id: None,
+            data: json!({
+                "previous_status": "active",
+                "status": "stopped",
+            }),
+            summary: format!("Stopped run {run_id}."),
+            created_at: stopped_at,
+        })?;
         Ok(RpcResponse::ShuttingDown {
             run_id,
             operation_id,
@@ -2163,6 +2352,21 @@ fn initialize_store(
                     created_at: now,
                     stopped_at: None,
                 })?;
+                let run_event = repositories.append_event(&NewEvent {
+                    run_id: active.run_id,
+                    kind: EventKind::RunStarted,
+                    actor: "supervisor".to_owned(),
+                    subject: active.run_id.to_string(),
+                    project_id: None,
+                    agent_id: None,
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({"status": "active"}),
+                    summary: format!("Started run {}.", active.run_id),
+                    created_at: now,
+                })?;
                 repositories.insert_project(&ProjectRecord {
                     id: active.project_id,
                     run_id: active.run_id,
@@ -2172,7 +2376,29 @@ fn initialize_store(
                     identity: project.identity.clone(),
                     is_primary: true,
                     attached_at: now,
-                })
+                })?;
+                repositories.append_event(&NewEvent {
+                    run_id: active.run_id,
+                    kind: EventKind::ProjectAttached,
+                    actor: "supervisor".to_owned(),
+                    subject: active.project_id.to_string(),
+                    project_id: Some(active.project_id),
+                    agent_id: None,
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: Some(run_event.id),
+                    causation_id: Some(run_event.id),
+                    data: json!({
+                        "alias": "primary",
+                        "is_primary": true,
+                    }),
+                    summary: format!(
+                        "Attached primary project {}.",
+                        active.project_id
+                    ),
+                    created_at: now,
+                })?;
+                Ok(())
             })?;
         }
         (Some(run), Some(stored_project))
@@ -3404,7 +3630,10 @@ mod tests {
                     operation_id: None,
                     correlation_id: None,
                     causation_id: None,
-                    payload: serde_json::json!({"fixture": true}),
+                    payload: serde_json::json!({
+                        "schema_version": 1,
+                        "data": {"fixture": true},
+                    }),
                     summary: "Fixture event.".to_owned(),
                     created_at: 11,
                 })
@@ -3464,20 +3693,24 @@ mod tests {
             SupervisorClient::connect_operator_at(&socket, &active)
                 .await
                 .expect("the operator should connect");
-        assert!(matches!(
-            operator
-                .request(RpcRequest::Events {
-                    after: 0,
-                    limit: 100,
-                })
-                .await,
-            Ok(RpcResponse::Events {
-                ref events,
-                next_cursor: 1,
-            }) if events.len() == 1
-                && events[0].event_type == "test.fixture"
-                && events[0].payload == serde_json::json!({"fixture": true})
-        ));
+        let initial_events = operator
+            .request(RpcRequest::Events {
+                after: 0,
+                limit: 100,
+            })
+            .await
+            .expect("fixture setup should be observable");
+        let RpcResponse::Events {
+            events,
+            next_cursor: initial_event_cursor,
+        } = initial_events
+        else {
+            panic!("the event stream should be returned");
+        };
+        assert!(events.iter().any(|event| {
+            event.event_type == "test.fixture"
+                && event.payload["data"] == serde_json::json!({"fixture": true})
+        }));
         let sent = operator
             .request(RpcRequest::Send {
                 operation_id: OperationId::generate(),
@@ -3557,6 +3790,35 @@ mod tests {
             }) if messages.len() == 1
                 && messages[0].body == "Check the parser edge cases."
         ));
+        let acknowledgement_operation = OperationId::generate();
+        let acknowledge_request = || RpcRequest::InboxAcknowledge {
+            operation_id: acknowledgement_operation,
+            through: 1,
+        };
+        let acknowledged = agent
+            .request(acknowledge_request())
+            .await
+            .expect("the worker should acknowledge its durable inbox");
+        assert!(matches!(
+            acknowledged,
+            RpcResponse::InboxAcknowledged {
+                acknowledged_through: 1,
+                acknowledged_count: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            agent
+                .request(acknowledge_request())
+                .await
+                .expect("the acknowledgement retry should replay"),
+            acknowledged
+        );
+        assert!(matches!(
+            agent.request(RpcRequest::Inbox { after: 0 }).await,
+            Ok(RpcResponse::Inbox { ref messages, .. })
+                if messages.len() == 1 && messages[0].acknowledged
+        ));
         let finish_operation = OperationId::generate();
         let finish_request = || RpcRequest::Finish {
             operation_id: finish_operation,
@@ -3601,6 +3863,42 @@ mod tests {
                 .expect("the closure retry should replay"),
             closed
         );
+        let events = operator
+            .request(RpcRequest::Events {
+                after: initial_event_cursor,
+                limit: 100,
+            })
+            .await
+            .expect("state transitions should be observable");
+        let RpcResponse::Events { events, .. } = events else {
+            panic!("the event stream should be returned");
+        };
+        let event_types = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>();
+        for event_type in [
+            "message.sent",
+            "message.acknowledged",
+            "task.lifecycle_changed",
+        ] {
+            assert_eq!(
+                event_types
+                    .iter()
+                    .filter(|candidate| **candidate == event_type)
+                    .count(),
+                if event_type == "task.lifecycle_changed" {
+                    2
+                } else {
+                    1
+                },
+                "every applied transition should emit once, including retries"
+            );
+        }
+        assert!(events.iter().all(|event| {
+            event.run_id == active.run_id
+                && event.payload["schema_version"] == 1
+        }));
         assert!(matches!(
             operator.request(RpcRequest::TaskReady).await,
             Ok(RpcResponse::ReadyTasks { ref tasks })
@@ -3673,6 +3971,15 @@ mod tests {
                 .expect("the retry should replay its result"),
             expected
         );
+        store
+            .transaction(|repositories| {
+                let events = repositories.events_after(run_id, 0, 100)?;
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].event_type, "run.stopped");
+                assert_eq!(events[0].operation_id, Some(operation_id));
+                Ok(())
+            })
+            .expect("the shutdown event should be durable exactly once");
 
         let different_operation = "co-01ARZ3NDEKTSV4RRFFQ69G5FAY"
             .parse::<OperationId>()
