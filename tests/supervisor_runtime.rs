@@ -83,8 +83,18 @@ fn public_help_lists_the_minimum_delegation_commands() {
     let stdout =
         String::from_utf8(output.stdout).expect("help should be UTF-8");
     for command in [
-        "status", "whoami", "prime", "task", "spawn", "finish", "send",
-        "inbox", "logs", "events", "stop",
+        "status",
+        "whoami",
+        "prime",
+        "task",
+        "spawn",
+        "finish",
+        "send",
+        "inbox",
+        "logs",
+        "workspace",
+        "events",
+        "stop",
     ] {
         assert!(
             stdout.contains(command),
@@ -105,6 +115,17 @@ fn public_help_lists_the_minimum_delegation_commands() {
             "task help should list `{command}`:\n{stdout}"
         );
     }
+
+    let mut command = fixture.command();
+    command.args(["workspace", "--help"]);
+    let output = run(command);
+    assert!(output.status.success(), "workspace help failed: {output:?}");
+    let stdout = String::from_utf8(output.stdout)
+        .expect("workspace help should be UTF-8");
+    assert!(
+        stdout.contains("integrate"),
+        "workspace help should list `integrate`:\n{stdout}"
+    );
 }
 
 #[test]
@@ -827,9 +848,24 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
         );
     }
 
+    fs::write(workspace_path.join("uncommitted.txt"), "recoverable work\n")
+        .expect("the assignment worktree should become dirty");
     let stopped = fixture.run_json(&["stop", "--json"]);
     assert_eq!(stopped["data"]["run_id"], run_id);
     assert_eq!(stopped["data"]["status"], "stopped");
+    assert!(
+        workspace_path.exists(),
+        "stopping must preserve a dirty, unintegrated worker workspace"
+    );
+    assert_eq!(
+        fs::read_to_string(workspace_path.join("uncommitted.txt"))
+            .expect("recoverable work should remain readable"),
+        "recoverable work\n"
+    );
+    assert!(
+        project_repository.find_reference(&reference_name).is_ok(),
+        "stopping must preserve the owned reference while work is recoverable"
+    );
 }
 
 #[test]

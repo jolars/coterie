@@ -126,6 +126,16 @@ pub(crate) enum StoreError {
         observed: String,
     },
 
+    /// A completed integration observation conflicts with durable state.
+    #[error(
+        "workspace `{assignment_id}` already records target commit `{recorded}`, not `{observed}`"
+    )]
+    WorkspaceTargetConflict {
+        assignment_id: AssignmentId,
+        recorded: String,
+        observed: String,
+    },
+
     /// Orderly shutdown did not find the expected active run.
     #[error("run `{id}` is not active during orderly shutdown")]
     RunNotActive { id: RunId },
@@ -608,6 +618,8 @@ pub(crate) enum EventKind {
     MessageAcknowledged,
     WorkspaceDesired,
     WorkspaceReconciliationChanged,
+    WorkspaceIntegrationDesired,
+    WorkspaceIntegrated,
 }
 
 impl EventKind {
@@ -639,6 +651,10 @@ impl EventKind {
             Self::WorkspaceReconciliationChanged => {
                 "workspace.reconciliation_changed"
             }
+            Self::WorkspaceIntegrationDesired => {
+                "workspace.integration_desired"
+            }
+            Self::WorkspaceIntegrated => "workspace.integrated",
         }
     }
 }
@@ -2992,6 +3008,33 @@ impl Repositories<'_, '_> {
                 self.transaction.execute(
                     "UPDATE workspaces SET result_commit = ?2 WHERE assignment_id = ?1",
                     params![assignment_id, result_commit],
+                )?;
+                Ok(ResourceTransitionOutcome::Applied)
+            }
+        }
+    }
+
+    pub(crate) fn record_workspace_target_commit(
+        &self,
+        assignment_id: AssignmentId,
+        target_commit: &str,
+    ) -> Result<ResourceTransitionOutcome, StoreError> {
+        let Some(workspace) = self.workspace(assignment_id)? else {
+            return Ok(ResourceTransitionOutcome::Stale);
+        };
+        match workspace.target_commit {
+            Some(recorded) if recorded == target_commit => {
+                Ok(ResourceTransitionOutcome::Unchanged)
+            }
+            Some(recorded) => Err(StoreError::WorkspaceTargetConflict {
+                assignment_id,
+                recorded,
+                observed: target_commit.to_owned(),
+            }),
+            None => {
+                self.transaction.execute(
+                    "UPDATE workspaces SET target_commit = ?2 WHERE assignment_id = ?1",
+                    params![assignment_id, target_commit],
                 )?;
                 Ok(ResourceTransitionOutcome::Applied)
             }

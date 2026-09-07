@@ -4,7 +4,12 @@ use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
-use git2::{ErrorCode, Oid, Repository, WorktreeAddOptions};
+use git2::build::CheckoutBuilder;
+use git2::{
+    ErrorCode, ObjectType, Oid, Repository, RepositoryState, Signature, Status,
+    StatusOptions, Time, WorktreeAddOptions,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 
@@ -44,6 +49,42 @@ pub(crate) trait WorkspaceBackend {
         workspace: &WorkspaceRecord,
         project: &ProjectRecord,
     ) -> Result<Option<String>, WorkspaceBackendError>;
+
+    fn prepare_integration(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+        integrated_at: i64,
+    ) -> Result<IntegrationPlan, WorkspaceBackendError>;
+
+    fn integrate(
+        &mut self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+        plan: &IntegrationPlan,
+    ) -> Result<IntegrationRecord, WorkspaceBackendError>;
+}
+
+/// Immutable Git observations recorded before an integration side effect.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IntegrationPlan {
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) project_id: crate::id::ProjectId,
+    pub(crate) target_reference: String,
+    pub(crate) target_commit: String,
+    pub(crate) integrated_at: i64,
+}
+
+/// Exact Git identities observed after applying an integration plan.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct IntegrationRecord {
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) project_id: crate::id::ProjectId,
+    pub(crate) target_reference: String,
+    pub(crate) base_commit: String,
+    pub(crate) result_commit: String,
+    pub(crate) target_commit_before: String,
+    pub(crate) target_commit: String,
 }
 
 /// Reconciles durable workspace ownership with an external backend.
@@ -157,6 +198,69 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         Ok(result_commit)
     }
 
+    /// Captures a read-only, immutable plan for one guarded integration.
+    pub(crate) fn prepare_integration(
+        &self,
+        store: &mut Store,
+        assignment_id: AssignmentId,
+        integrated_at: i64,
+    ) -> Result<IntegrationPlan, WorkspaceError> {
+        let (workspace, project) = integration_records(store, assignment_id)?;
+        Ok(self.backend.prepare_integration(
+            &workspace,
+            &project,
+            integrated_at,
+        )?)
+    }
+
+    /// Applies a durable integration plan and records its exact Git identities.
+    pub(crate) fn integrate(
+        &mut self,
+        store: &mut Store,
+        assignment_id: AssignmentId,
+        plan: &IntegrationPlan,
+        operation_id: crate::id::OperationId,
+        actor: &str,
+    ) -> Result<IntegrationRecord, WorkspaceError> {
+        let (workspace, project) = integration_records(store, assignment_id)?;
+        let integration = self.backend.integrate(&workspace, &project, plan)?;
+        store.transaction(|repositories| {
+            let outcome = repositories.record_workspace_target_commit(
+                assignment_id,
+                &integration.target_commit,
+            )?;
+            if outcome == ResourceTransitionOutcome::Applied {
+                let assignment = repositories
+                    .assignment(assignment_id)?
+                    .ok_or_else(|| StoreError::CorruptAssignmentState {
+                        id: assignment_id,
+                        reason: "the integrated workspace assignment does not exist"
+                            .to_owned(),
+                    })?;
+                repositories.append_event(&NewEvent {
+                    run_id: workspace.run_id,
+                    kind: EventKind::WorkspaceIntegrated,
+                    actor: actor.to_owned(),
+                    subject: assignment_id.to_string(),
+                    project_id: Some(workspace.project_id),
+                    agent_id: Some(assignment.agent_id),
+                    task_id: Some(assignment.task_id),
+                    operation_id: Some(operation_id),
+                    correlation_id: None,
+                    causation_id: None,
+                    data: serde_json::to_value(&integration)?,
+                    summary: format!(
+                        "Integrated workspace {assignment_id} as target commit {}.",
+                        integration.target_commit
+                    ),
+                    created_at: plan.integrated_at,
+                })?;
+            }
+            Ok(())
+        })?;
+        Ok(integration)
+    }
+
     fn record_state(
         &self,
         store: &mut Store,
@@ -204,6 +308,27 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         })?;
         Ok(())
     }
+}
+
+fn integration_records(
+    store: &mut Store,
+    assignment_id: AssignmentId,
+) -> Result<(WorkspaceRecord, ProjectRecord), WorkspaceError> {
+    let (workspace, project) = store.transaction(|repositories| {
+        let workspace = repositories.workspace(assignment_id)?;
+        let project = workspace
+            .as_ref()
+            .map(|workspace| repositories.project(workspace.project_id))
+            .transpose()?
+            .flatten();
+        Ok((workspace, project))
+    })?;
+    let workspace =
+        workspace.ok_or(WorkspaceError::MissingIntent { assignment_id })?;
+    let project = project.ok_or(WorkspaceError::MissingProject {
+        project_id: workspace.project_id,
+    })?;
+    Ok((workspace, project))
 }
 
 /// Native Git workspace operations rooted in one run's private state.
@@ -476,6 +601,110 @@ impl GitWorkspace {
         }
         Ok(parent)
     }
+
+    fn integration_inputs(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+    ) -> Result<IntegrationInputs, WorkspaceBackendError> {
+        Self::validate_identity(workspace, project)?;
+        self.validate_path(workspace, project)?;
+        if workspace.kind != WORKTREE_WORKSPACE {
+            return Err(WorkspaceBackendError::UnsupportedIntegrationKind {
+                assignment_id: workspace.assignment_id,
+                kind: workspace.kind.clone(),
+            });
+        }
+        let base = parse_workspace_commit(
+            workspace,
+            "base",
+            workspace.base_commit.as_deref(),
+        )?;
+        let result = parse_workspace_commit(
+            workspace,
+            "result",
+            workspace.result_commit.as_deref(),
+        )?;
+        let worktree = self.owned_worktree_repository(workspace, project)?;
+        require_clean_repository(
+            &worktree,
+            &workspace.path,
+            WorkspaceBackendError::DirtyWorkspace {
+                assignment_id: workspace.assignment_id,
+                path: workspace.path.clone(),
+            },
+        )?;
+        let observed_result = head_oid(
+            &worktree,
+            "resolve the assignment worktree tip",
+            &workspace.path,
+        )?;
+        if observed_result != result {
+            return Err(WorkspaceBackendError::UnexpectedWorkspaceTip {
+                assignment_id: workspace.assignment_id,
+                expected: result.to_string(),
+                actual: observed_result.to_string(),
+            });
+        }
+        require_linear_result_history(&worktree, workspace, base, result)?;
+
+        let target = Self::source_repository(project)?;
+        require_clean_repository(
+            &target,
+            &project.canonical_path,
+            WorkspaceBackendError::DirtyTarget {
+                project_id: project.id,
+                path: project.canonical_path.clone(),
+            },
+        )?;
+        let target_head =
+            target.head().map_err(|source| WorkspaceBackendError::Git {
+                action: "resolve the integration target HEAD",
+                path: project.canonical_path.clone(),
+                source,
+            })?;
+        if !target_head.is_branch() {
+            return Err(WorkspaceBackendError::AmbiguousTarget {
+                project_id: project.id,
+            });
+        }
+        let target_reference = target_head.name().map_err(|_| {
+            WorkspaceBackendError::AmbiguousTarget {
+                project_id: project.id,
+            }
+        })?;
+        let target_commit = target_head.target().ok_or(
+            WorkspaceBackendError::AmbiguousTarget {
+                project_id: project.id,
+            },
+        )?;
+        let target_reference = target_reference.to_owned();
+        drop(target_head);
+        validate_integration_history(
+            &target,
+            workspace,
+            base,
+            result,
+            target_commit,
+        )?;
+        preflight_integration_tree(
+            &target,
+            workspace,
+            base,
+            result,
+            target_commit,
+        )?;
+
+        Ok(IntegrationInputs {
+            target_reference,
+            target_commit,
+        })
+    }
+}
+
+struct IntegrationInputs {
+    target_reference: String,
+    target_commit: Oid,
 }
 
 impl WorkspaceBackend for GitWorkspace {
@@ -679,6 +908,674 @@ impl WorkspaceBackend for GitWorkspace {
             }),
         }
     }
+
+    fn prepare_integration(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+        integrated_at: i64,
+    ) -> Result<IntegrationPlan, WorkspaceBackendError> {
+        let inputs = self.integration_inputs(workspace, project)?;
+        Ok(IntegrationPlan {
+            assignment_id: workspace.assignment_id,
+            project_id: project.id,
+            target_reference: inputs.target_reference,
+            target_commit: inputs.target_commit.to_string(),
+            integrated_at,
+        })
+    }
+
+    fn integrate(
+        &mut self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+        plan: &IntegrationPlan,
+    ) -> Result<IntegrationRecord, WorkspaceBackendError> {
+        if plan.assignment_id != workspace.assignment_id
+            || plan.project_id != project.id
+        {
+            return Err(WorkspaceBackendError::IntegrationPlanMismatch {
+                assignment_id: workspace.assignment_id,
+            });
+        }
+        Self::validate_identity(workspace, project)?;
+        self.validate_path(workspace, project)?;
+        if workspace.kind != WORKTREE_WORKSPACE {
+            return Err(WorkspaceBackendError::UnsupportedIntegrationKind {
+                assignment_id: workspace.assignment_id,
+                kind: workspace.kind.clone(),
+            });
+        }
+        let base = parse_workspace_commit(
+            workspace,
+            "base",
+            workspace.base_commit.as_deref(),
+        )?;
+        let result = parse_workspace_commit(
+            workspace,
+            "result",
+            workspace.result_commit.as_deref(),
+        )?;
+        let worktree = self.owned_worktree_repository(workspace, project)?;
+        require_clean_repository(
+            &worktree,
+            &workspace.path,
+            WorkspaceBackendError::DirtyWorkspace {
+                assignment_id: workspace.assignment_id,
+                path: workspace.path.clone(),
+            },
+        )?;
+        let observed_result = head_oid(
+            &worktree,
+            "resolve the assignment worktree tip",
+            &workspace.path,
+        )?;
+        if observed_result != result {
+            return Err(WorkspaceBackendError::UnexpectedWorkspaceTip {
+                assignment_id: workspace.assignment_id,
+                expected: result.to_string(),
+                actual: observed_result.to_string(),
+            });
+        }
+        require_linear_result_history(&worktree, workspace, base, result)?;
+
+        let target = Self::source_repository(project)?;
+        let expected_target =
+            Oid::from_str(&plan.target_commit).map_err(|source| {
+                WorkspaceBackendError::InvalidIntegrationPlanCommit {
+                    assignment_id: workspace.assignment_id,
+                    value: plan.target_commit.clone(),
+                    source,
+                }
+            })?;
+        validate_integration_history(
+            &target,
+            workspace,
+            base,
+            result,
+            expected_target,
+        )?;
+        let candidate = integration_candidate(
+            &target,
+            workspace,
+            base,
+            result,
+            expected_target,
+            plan.integrated_at,
+        )?;
+        let head =
+            target.head().map_err(|source| WorkspaceBackendError::Git {
+                action: "recheck the integration target HEAD",
+                path: project.canonical_path.clone(),
+                source,
+            })?;
+        let actual_reference = head.name().map_err(|_| {
+            WorkspaceBackendError::AmbiguousTarget {
+                project_id: project.id,
+            }
+        })?;
+        let actual_target =
+            head.target()
+                .ok_or(WorkspaceBackendError::AmbiguousTarget {
+                    project_id: project.id,
+                })?;
+        if !head.is_branch() || actual_reference != plan.target_reference {
+            return Err(WorkspaceBackendError::UnexpectedTargetReference {
+                project_id: project.id,
+                expected: plan.target_reference.clone(),
+                actual: actual_reference.to_owned(),
+            });
+        }
+        if actual_target == candidate.target_commit {
+            require_clean_repository(
+                &target,
+                &project.canonical_path,
+                WorkspaceBackendError::DirtyTarget {
+                    project_id: project.id,
+                    path: project.canonical_path.clone(),
+                },
+            )?;
+            return Ok(candidate.record(workspace, project, plan));
+        }
+        if actual_target != expected_target {
+            return Err(WorkspaceBackendError::UnexpectedTargetTip {
+                project_id: project.id,
+                expected: expected_target.to_string(),
+                actual: actual_target.to_string(),
+            });
+        }
+
+        if !repository_is_clean(&target)? {
+            if !target_matches_candidate(&target, candidate.tree_id)? {
+                return Err(WorkspaceBackendError::DirtyTarget {
+                    project_id: project.id,
+                    path: project.canonical_path.clone(),
+                });
+            }
+        } else if candidate.target_commit != expected_target {
+            let tree =
+                target.find_tree(candidate.tree_id).map_err(|source| {
+                    WorkspaceBackendError::Git {
+                        action: "resolve the preflighted integration tree",
+                        path: project.canonical_path.clone(),
+                        source,
+                    }
+                })?;
+            let mut checkout = CheckoutBuilder::new();
+            checkout.safe();
+            target
+                .checkout_tree(tree.as_object(), Some(&mut checkout))
+                .map_err(|source| WorkspaceBackendError::Git {
+                    action: "check out the preflighted integration tree",
+                    path: project.canonical_path.clone(),
+                    source,
+                })?;
+        }
+
+        candidate.write_commit(&target, workspace, plan)?;
+        target
+            .reference_matching(
+                &plan.target_reference,
+                candidate.target_commit,
+                true,
+                expected_target,
+                "coterie: integrate assignment workspace",
+            )
+            .map_err(|source| {
+                if source.code() == ErrorCode::Modified {
+                    let actual = target
+                        .head()
+                        .ok()
+                        .and_then(|head| head.target())
+                        .map_or_else(
+                            || "unknown".to_owned(),
+                            |oid| oid.to_string(),
+                        );
+                    WorkspaceBackendError::UnexpectedTargetTip {
+                        project_id: project.id,
+                        expected: expected_target.to_string(),
+                        actual,
+                    }
+                } else {
+                    WorkspaceBackendError::Git {
+                        action: "advance the integration target reference",
+                        path: project.canonical_path.clone(),
+                        source,
+                    }
+                }
+            })?;
+        require_clean_repository(
+            &target,
+            &project.canonical_path,
+            WorkspaceBackendError::DirtyTarget {
+                project_id: project.id,
+                path: project.canonical_path.clone(),
+            },
+        )?;
+        Ok(candidate.record(workspace, project, plan))
+    }
+}
+
+struct IntegrationCandidate {
+    tree_id: Oid,
+    target_commit: Oid,
+    commit_buffer: Option<Vec<u8>>,
+}
+
+impl IntegrationCandidate {
+    fn record(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+        plan: &IntegrationPlan,
+    ) -> IntegrationRecord {
+        IntegrationRecord {
+            assignment_id: workspace.assignment_id,
+            project_id: project.id,
+            target_reference: plan.target_reference.clone(),
+            base_commit: workspace
+                .base_commit
+                .clone()
+                .expect("an integration candidate has a validated base"),
+            result_commit: workspace
+                .result_commit
+                .clone()
+                .expect("an integration candidate has a validated result"),
+            target_commit_before: plan.target_commit.clone(),
+            target_commit: self.target_commit.to_string(),
+        }
+    }
+
+    fn write_commit(
+        &self,
+        repository: &Repository,
+        workspace: &WorkspaceRecord,
+        _plan: &IntegrationPlan,
+    ) -> Result<(), WorkspaceBackendError> {
+        let Some(buffer) = self.commit_buffer.as_deref() else {
+            return Ok(());
+        };
+        let written = repository
+            .odb()
+            .and_then(|database| database.write(ObjectType::Commit, buffer))
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "write the integration commit",
+                path: repository.path().to_owned(),
+                source,
+            })?;
+        if written != self.target_commit {
+            return Err(WorkspaceBackendError::IntegrationPlanMismatch {
+                assignment_id: workspace.assignment_id,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn parse_workspace_commit(
+    workspace: &WorkspaceRecord,
+    field: &'static str,
+    value: Option<&str>,
+) -> Result<Oid, WorkspaceBackendError> {
+    let value = value.ok_or(WorkspaceBackendError::MissingCommit {
+        assignment_id: workspace.assignment_id,
+        field,
+    })?;
+    Oid::from_str(value).map_err(|source| {
+        WorkspaceBackendError::InvalidCommit {
+            assignment_id: workspace.assignment_id,
+            value: value.to_owned(),
+            source,
+        }
+    })
+}
+
+fn head_oid(
+    repository: &Repository,
+    action: &'static str,
+    path: &Path,
+) -> Result<Oid, WorkspaceBackendError> {
+    repository
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .map(|commit| commit.id())
+        .map_err(|source| WorkspaceBackendError::Git {
+            action,
+            path: path.to_owned(),
+            source,
+        })
+}
+
+fn repository_is_clean(
+    repository: &Repository,
+) -> Result<bool, WorkspaceBackendError> {
+    if repository.state() != RepositoryState::Clean {
+        return Ok(false);
+    }
+    let mut options = StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    let statuses =
+        repository.statuses(Some(&mut options)).map_err(|source| {
+            WorkspaceBackendError::Git {
+                action: "inspect repository status",
+                path: repository.path().to_owned(),
+                source,
+            }
+        })?;
+    Ok(statuses.is_empty())
+}
+
+fn require_clean_repository(
+    repository: &Repository,
+    _path: &Path,
+    dirty: WorkspaceBackendError,
+) -> Result<(), WorkspaceBackendError> {
+    if repository_is_clean(repository)? {
+        Ok(())
+    } else {
+        Err(dirty)
+    }
+}
+
+fn require_linear_result_history(
+    repository: &Repository,
+    workspace: &WorkspaceRecord,
+    base: Oid,
+    result: Oid,
+) -> Result<(), WorkspaceBackendError> {
+    let mut current = result;
+    while current != base {
+        let commit = repository.find_commit(current).map_err(|source| {
+            WorkspaceBackendError::Git {
+                action: "walk the assignment result history",
+                path: workspace.path.clone(),
+                source,
+            }
+        })?;
+        if commit.parent_count() != 1 {
+            return Err(WorkspaceBackendError::AmbiguousHistory {
+                assignment_id: workspace.assignment_id,
+            });
+        }
+        current = commit.parent_id(0).map_err(|source| {
+            WorkspaceBackendError::Git {
+                action: "walk the assignment result history",
+                path: workspace.path.clone(),
+                source,
+            }
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_integration_history(
+    repository: &Repository,
+    workspace: &WorkspaceRecord,
+    base: Oid,
+    result: Oid,
+    target: Oid,
+) -> Result<(), WorkspaceBackendError> {
+    repository.find_commit(base).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "resolve the recorded assignment base",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    repository.find_commit(result).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "resolve the recorded assignment result",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    repository.find_commit(target).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "resolve the integration target commit",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    if target == result
+        || repository
+            .graph_descendant_of(target, result)
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "check whether the assignment result is already integrated",
+                path: repository.path().to_owned(),
+                source,
+            })?
+    {
+        return Ok(());
+    }
+    let bases = repository.merge_bases(target, result).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "resolve the integration merge bases",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    if bases.len() != 1 || bases.first() != Some(&base) {
+        return Err(WorkspaceBackendError::AmbiguousHistory {
+            assignment_id: workspace.assignment_id,
+        });
+    }
+    Ok(())
+}
+
+fn preflight_integration_tree(
+    repository: &Repository,
+    workspace: &WorkspaceRecord,
+    base: Oid,
+    result: Oid,
+    target: Oid,
+) -> Result<(), WorkspaceBackendError> {
+    if target == result
+        || target == base
+        || repository
+            .graph_descendant_of(target, result)
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "check whether the assignment result is already integrated",
+                path: repository.path().to_owned(),
+                source,
+            })?
+    {
+        return Ok(());
+    }
+    let base_tree = repository
+        .find_commit(base)
+        .and_then(|commit| commit.tree())
+        .map_err(|source| WorkspaceBackendError::Git {
+            action: "resolve the assignment base tree",
+            path: repository.path().to_owned(),
+            source,
+        })?;
+    let target_tree = repository
+        .find_commit(target)
+        .and_then(|commit| commit.tree())
+        .map_err(|source| WorkspaceBackendError::Git {
+            action: "resolve the integration target tree",
+            path: repository.path().to_owned(),
+            source,
+        })?;
+    let result_tree = repository
+        .find_commit(result)
+        .and_then(|commit| commit.tree())
+        .map_err(|source| WorkspaceBackendError::Git {
+            action: "resolve the assignment result tree",
+            path: repository.path().to_owned(),
+            source,
+        })?;
+    let index = repository
+        .merge_trees(&base_tree, &target_tree, &result_tree, None)
+        .map_err(|source| WorkspaceBackendError::Git {
+            action: "preflight the integration merge",
+            path: repository.path().to_owned(),
+            source,
+        })?;
+    if index.has_conflicts() {
+        return Err(WorkspaceBackendError::IntegrationConflict {
+            assignment_id: workspace.assignment_id,
+        });
+    }
+    Ok(())
+}
+
+fn integration_candidate(
+    repository: &Repository,
+    workspace: &WorkspaceRecord,
+    base: Oid,
+    result: Oid,
+    target: Oid,
+    integrated_at: i64,
+) -> Result<IntegrationCandidate, WorkspaceBackendError> {
+    if target == result
+        || repository
+            .graph_descendant_of(target, result)
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "check whether the assignment result is already integrated",
+                path: repository.path().to_owned(),
+                source,
+            })?
+    {
+        let tree_id = repository
+            .find_commit(target)
+            .and_then(|commit| commit.tree().map(|tree| tree.id()))
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "resolve the integrated target tree",
+                path: repository.path().to_owned(),
+                source,
+            })?;
+        return Ok(IntegrationCandidate {
+            tree_id,
+            target_commit: target,
+            commit_buffer: None,
+        });
+    }
+    if target == base {
+        let tree_id = repository
+            .find_commit(result)
+            .and_then(|commit| commit.tree().map(|tree| tree.id()))
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "resolve the assignment result tree",
+                path: repository.path().to_owned(),
+                source,
+            })?;
+        return Ok(IntegrationCandidate {
+            tree_id,
+            target_commit: result,
+            commit_buffer: None,
+        });
+    }
+
+    let base_tree = repository
+        .find_commit(base)
+        .and_then(|commit| commit.tree())
+        .map_err(|source| WorkspaceBackendError::Git {
+            action: "resolve the assignment base tree",
+            path: repository.path().to_owned(),
+            source,
+        })?;
+    let target_commit = repository.find_commit(target).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "resolve the integration target commit",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    let target_tree =
+        target_commit
+            .tree()
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "resolve the integration target tree",
+                path: repository.path().to_owned(),
+                source,
+            })?;
+    let result_commit = repository.find_commit(result).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "resolve the assignment result commit",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    let result_tree =
+        result_commit
+            .tree()
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "resolve the assignment result tree",
+                path: repository.path().to_owned(),
+                source,
+            })?;
+    let mut index = repository
+        .merge_trees(&base_tree, &target_tree, &result_tree, None)
+        .map_err(|source| WorkspaceBackendError::Git {
+            action: "prepare the integration merge",
+            path: repository.path().to_owned(),
+            source,
+        })?;
+    if index.has_conflicts() {
+        return Err(WorkspaceBackendError::IntegrationConflict {
+            assignment_id: workspace.assignment_id,
+        });
+    }
+    let tree_id = index.write_tree_to(repository).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "write the integration tree",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    let tree = repository.find_tree(tree_id).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "resolve the integration tree",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    let signature = Signature::new(
+        "Coterie",
+        "coterie@localhost",
+        &Time::new(integrated_at, 0),
+    )
+    .map_err(|source| WorkspaceBackendError::Git {
+        action: "construct the integration signature",
+        path: repository.path().to_owned(),
+        source,
+    })?;
+    let message =
+        format!("coterie: integrate assignment {}", workspace.assignment_id);
+    let buffer = repository
+        .commit_create_buffer(
+            &signature,
+            &signature,
+            &message,
+            &tree,
+            &[&target_commit, &result_commit],
+        )
+        .map_err(|source| WorkspaceBackendError::Git {
+            action: "construct the integration commit",
+            path: repository.path().to_owned(),
+            source,
+        })?
+        .to_vec();
+    let target_commit =
+        Oid::hash_object(ObjectType::Commit, &buffer).map_err(|source| {
+            WorkspaceBackendError::Git {
+                action: "identify the integration commit",
+                path: repository.path().to_owned(),
+                source,
+            }
+        })?;
+    Ok(IntegrationCandidate {
+        tree_id,
+        target_commit,
+        commit_buffer: Some(buffer),
+    })
+}
+
+fn target_matches_candidate(
+    repository: &Repository,
+    candidate_tree: Oid,
+) -> Result<bool, WorkspaceBackendError> {
+    if repository.state() != RepositoryState::Clean {
+        return Ok(false);
+    }
+    let mut index =
+        repository
+            .index()
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "inspect the integration target index",
+                path: repository.path().to_owned(),
+                source,
+            })?;
+    let index_tree = index.write_tree_to(repository).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "identify the integration target index",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })?;
+    if index_tree != candidate_tree {
+        return Ok(false);
+    }
+    let mut options = StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(true);
+    let statuses =
+        repository.statuses(Some(&mut options)).map_err(|source| {
+            WorkspaceBackendError::Git {
+                action: "inspect the integration target worktree",
+                path: repository.path().to_owned(),
+                source,
+            }
+        })?;
+    const WORKTREE_CHANGES: Status = Status::WT_NEW
+        .union(Status::WT_MODIFIED)
+        .union(Status::WT_DELETED)
+        .union(Status::WT_TYPECHANGE)
+        .union(Status::WT_RENAMED)
+        .union(Status::CONFLICTED);
+    Ok(statuses
+        .iter()
+        .all(|entry| !entry.status().intersects(WORKTREE_CHANGES)))
 }
 
 fn workspace_reference(workspace: &WorkspaceRecord) -> String {
@@ -738,7 +1635,10 @@ fn repository_matches_project(
 pub(crate) mod fake {
     use std::collections::BTreeMap;
 
-    use super::{WorkspaceBackend, WorkspaceBackendError};
+    use super::{
+        IntegrationPlan, IntegrationRecord, WorkspaceBackend,
+        WorkspaceBackendError,
+    };
     use crate::id::AssignmentId;
     use crate::state::{ExternalResourceState, ProjectRecord, WorkspaceRecord};
 
@@ -852,6 +1752,72 @@ pub(crate) mod fake {
                 .clone()
                 .or_else(|| workspace.result_commit.clone()))
         }
+
+        fn prepare_integration(
+            &self,
+            workspace: &WorkspaceRecord,
+            project: &ProjectRecord,
+            integrated_at: i64,
+        ) -> Result<IntegrationPlan, WorkspaceBackendError> {
+            let target_commit = workspace.base_commit.clone().ok_or(
+                WorkspaceBackendError::MissingCommit {
+                    assignment_id: workspace.assignment_id,
+                    field: "base",
+                },
+            )?;
+            if workspace.result_commit.is_none() && self.result_commit.is_none()
+            {
+                return Err(WorkspaceBackendError::MissingCommit {
+                    assignment_id: workspace.assignment_id,
+                    field: "result",
+                });
+            }
+            Ok(IntegrationPlan {
+                assignment_id: workspace.assignment_id,
+                project_id: project.id,
+                target_reference: "refs/heads/main".to_owned(),
+                target_commit,
+                integrated_at,
+            })
+        }
+
+        fn integrate(
+            &mut self,
+            workspace: &WorkspaceRecord,
+            project: &ProjectRecord,
+            plan: &IntegrationPlan,
+        ) -> Result<IntegrationRecord, WorkspaceBackendError> {
+            if plan.assignment_id != workspace.assignment_id
+                || plan.project_id != project.id
+            {
+                return Err(WorkspaceBackendError::IntegrationPlanMismatch {
+                    assignment_id: workspace.assignment_id,
+                });
+            }
+            let base_commit = workspace.base_commit.clone().ok_or(
+                WorkspaceBackendError::MissingCommit {
+                    assignment_id: workspace.assignment_id,
+                    field: "base",
+                },
+            )?;
+            let result_commit = self
+                .result_commit
+                .clone()
+                .or_else(|| workspace.result_commit.clone())
+                .ok_or(WorkspaceBackendError::MissingCommit {
+                    assignment_id: workspace.assignment_id,
+                    field: "result",
+                })?;
+            Ok(IntegrationRecord {
+                assignment_id: workspace.assignment_id,
+                project_id: project.id,
+                target_reference: plan.target_reference.clone(),
+                base_commit,
+                result_commit: result_commit.clone(),
+                target_commit_before: plan.target_commit.clone(),
+                target_commit: result_commit,
+            })
+        }
     }
 
     fn same_intent(left: &WorkspaceRecord, right: &WorkspaceRecord) -> bool {
@@ -896,9 +1862,78 @@ pub(crate) enum WorkspaceBackendError {
     #[error("workspace `{assignment_id}` has no recorded base commit")]
     MissingBaseCommit { assignment_id: AssignmentId },
     #[error(
+        "workspace `{assignment_id}` has no recorded {field} commit for integration"
+    )]
+    MissingCommit {
+        assignment_id: AssignmentId,
+        field: &'static str,
+    },
+    #[error(
         "workspace `{assignment_id}` has invalid commit `{value}`: {source}"
     )]
     InvalidCommit {
+        assignment_id: AssignmentId,
+        value: String,
+        #[source]
+        source: git2::Error,
+    },
+    #[error("workspace `{assignment_id}` kind `{kind}` cannot be integrated")]
+    UnsupportedIntegrationKind {
+        assignment_id: AssignmentId,
+        kind: String,
+    },
+    #[error("workspace `{assignment_id}` is dirty at {path:?}")]
+    DirtyWorkspace {
+        assignment_id: AssignmentId,
+        path: PathBuf,
+    },
+    #[error("integration target project `{project_id}` is dirty at {path:?}")]
+    DirtyTarget {
+        project_id: crate::id::ProjectId,
+        path: PathBuf,
+    },
+    #[error(
+        "workspace `{assignment_id}` tip is `{actual}`, expected recorded result `{expected}`"
+    )]
+    UnexpectedWorkspaceTip {
+        assignment_id: AssignmentId,
+        expected: String,
+        actual: String,
+    },
+    #[error(
+        "integration target project `{project_id}` has no unambiguous branch HEAD"
+    )]
+    AmbiguousTarget { project_id: crate::id::ProjectId },
+    #[error(
+        "workspace `{assignment_id}` result and target do not have an unambiguous recorded-base history"
+    )]
+    AmbiguousHistory { assignment_id: AssignmentId },
+    #[error(
+        "workspace `{assignment_id}` conflicts with the integration target"
+    )]
+    IntegrationConflict { assignment_id: AssignmentId },
+    #[error(
+        "integration target project `{project_id}` tip is `{actual}`, expected `{expected}`"
+    )]
+    UnexpectedTargetTip {
+        project_id: crate::id::ProjectId,
+        expected: String,
+        actual: String,
+    },
+    #[error(
+        "integration target project `{project_id}` reference is `{actual}`, expected `{expected}`"
+    )]
+    UnexpectedTargetReference {
+        project_id: crate::id::ProjectId,
+        expected: String,
+        actual: String,
+    },
+    #[error("integration plan does not match workspace `{assignment_id}`")]
+    IntegrationPlanMismatch { assignment_id: AssignmentId },
+    #[error(
+        "workspace `{assignment_id}` integration plan has invalid commit `{value}`: {source}"
+    )]
+    InvalidIntegrationPlanCommit {
         assignment_id: AssignmentId,
         value: String,
         #[source]
@@ -942,7 +1977,10 @@ mod tests {
     use serde_json::json;
 
     use super::fake::FakeWorkspace;
-    use super::{GitWorkspace, WorkspaceBackend, WorkspaceSupervisor};
+    use super::{
+        GitWorkspace, WorkspaceBackend, WorkspaceBackendError,
+        WorkspaceSupervisor,
+    };
     use crate::id::{
         AgentId, AssignmentId, OperationId, ProjectId, RunId, TaskId,
     };
@@ -1102,6 +2140,284 @@ mod tests {
     }
 
     #[test]
+    fn guarded_integration_fast_forwards_a_clean_target() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        let result = commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "worker result",
+        );
+        workspace.result_commit = Some(result.clone());
+
+        let plan = backend
+            .prepare_integration(&workspace, &fixture.project, 11)
+            .expect("the clean linear integration should preflight");
+        let integrated = backend
+            .integrate(&workspace, &fixture.project, &plan)
+            .expect("the clean linear integration should apply");
+        assert_eq!(
+            backend
+                .integrate(&workspace, &fixture.project, &plan)
+                .expect("the same durable integration plan should replay"),
+            integrated
+        );
+
+        assert_eq!(integrated.base_commit, fixture.base);
+        assert_eq!(integrated.result_commit, result);
+        assert_eq!(integrated.target_commit_before, fixture.base);
+        assert_eq!(integrated.target_commit, integrated.result_commit);
+        assert_eq!(head_commit(&fixture.project.canonical_path), result);
+        assert_eq!(
+            backend
+                .observe(&workspace, &fixture.project)
+                .expect("integration must preserve the assignment worktree"),
+            ExternalResourceState::Observed
+        );
+        assert_eq!(
+            fs::read_to_string(
+                fixture.project.canonical_path.join("result.txt")
+            )
+            .expect("the integrated file should be checked out"),
+            "result\n"
+        );
+    }
+
+    #[test]
+    fn guarded_integration_merges_nonconflicting_target_changes() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        let result = commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "worker result",
+        );
+        workspace.result_commit = Some(result.clone());
+        let target_before = commit_file(
+            &fixture.project.canonical_path,
+            "target.txt",
+            "target\n",
+            "target advanced",
+        );
+
+        let plan = backend
+            .prepare_integration(&workspace, &fixture.project, 11)
+            .expect("nonconflicting histories should preflight");
+        let integrated = backend
+            .integrate(&workspace, &fixture.project, &plan)
+            .expect("nonconflicting histories should merge");
+
+        assert_eq!(integrated.target_commit_before, target_before);
+        assert_ne!(integrated.target_commit, target_before);
+        assert_ne!(integrated.target_commit, result);
+        let repository = Repository::open(&fixture.project.canonical_path)
+            .expect("the target repository should open");
+        let commit = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("the integration commit should resolve");
+        assert_eq!(commit.parent_count(), 2);
+        assert_eq!(
+            commit.parent_id(0).expect("a first parent").to_string(),
+            target_before
+        );
+        assert_eq!(
+            commit.parent_id(1).expect("a second parent").to_string(),
+            result
+        );
+        assert_eq!(
+            fs::read_to_string(
+                fixture.project.canonical_path.join("result.txt")
+            )
+            .expect("the worker result should be checked out"),
+            "result\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                fixture.project.canonical_path.join("target.txt")
+            )
+            .expect("the target change should remain checked out"),
+            "target\n"
+        );
+    }
+
+    #[test]
+    fn guarded_integration_refuses_a_dirty_target_without_changing_it() {
+        let fixture = GitFixture::new();
+        let (backend, mut workspace) = fixture.materialized_workspace();
+        let result = commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "worker result",
+        );
+        workspace.result_commit = Some(result);
+        fs::write(
+            fixture.project.canonical_path.join("README.md"),
+            "operator edit\n",
+        )
+        .expect("the target should become dirty");
+
+        assert!(matches!(
+            backend.prepare_integration(&workspace, &fixture.project, 11),
+            Err(WorkspaceBackendError::DirtyTarget { .. })
+        ));
+        assert_eq!(head_commit(&fixture.project.canonical_path), fixture.base);
+        assert_eq!(
+            fs::read_to_string(
+                fixture.project.canonical_path.join("README.md")
+            )
+            .expect("the operator edit should remain"),
+            "operator edit\n"
+        );
+    }
+
+    #[test]
+    fn guarded_integration_refuses_an_unexpected_target_tip() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        let result = commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "worker result",
+        );
+        workspace.result_commit = Some(result);
+        let plan = backend
+            .prepare_integration(&workspace, &fixture.project, 11)
+            .expect("the initial target should preflight");
+        let new_target = commit_file(
+            &fixture.project.canonical_path,
+            "target.txt",
+            "target\n",
+            "target advanced",
+        );
+
+        assert!(matches!(
+            backend.integrate(&workspace, &fixture.project, &plan),
+            Err(WorkspaceBackendError::UnexpectedTargetTip {
+                expected,
+                actual,
+                ..
+            }) if expected == fixture.base && actual == new_target
+        ));
+        assert_eq!(head_commit(&fixture.project.canonical_path), new_target);
+    }
+
+    #[test]
+    fn guarded_integration_refuses_an_unexpected_workspace_tip() {
+        let fixture = GitFixture::new();
+        let (backend, mut workspace) = fixture.materialized_workspace();
+        let recorded_result = commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "worker result",
+        );
+        workspace.result_commit = Some(recorded_result.clone());
+        let unexpected_result = commit_file(
+            &workspace.path,
+            "later.txt",
+            "later\n",
+            "unreported worker result",
+        );
+
+        assert!(matches!(
+            backend.prepare_integration(&workspace, &fixture.project, 11),
+            Err(WorkspaceBackendError::UnexpectedWorkspaceTip {
+                expected,
+                actual,
+                ..
+            }) if expected == recorded_result && actual == unexpected_result
+        ));
+        assert_eq!(head_commit(&fixture.project.canonical_path), fixture.base);
+    }
+
+    #[test]
+    fn guarded_integration_refuses_ambiguous_worker_history() {
+        let fixture = GitFixture::new();
+        let (backend, mut workspace) = fixture.materialized_workspace();
+        let first_parent = commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "worker result",
+        );
+        let repository = Repository::open(&workspace.path)
+            .expect("the assignment worktree should open");
+        let first_parent = repository
+            .find_commit(first_parent.parse().expect("a valid commit ID"))
+            .expect("the worker result should resolve");
+        let base = repository
+            .find_commit(fixture.base.parse().expect("a valid base commit ID"))
+            .expect("the base should resolve");
+        let tree = base.tree().expect("the base tree should resolve");
+        let signature = Signature::now("Coterie Test", "test@example.invalid")
+            .expect("the signature should be valid");
+        let side = repository
+            .commit(None, &signature, &signature, "side", &tree, &[&base])
+            .expect("the side commit should be created");
+        let side = repository
+            .find_commit(side)
+            .expect("the side commit should resolve");
+        let tree = first_parent
+            .tree()
+            .expect("the worker result tree should resolve");
+        let merge = repository
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "ambiguous merge",
+                &tree,
+                &[&first_parent, &side],
+            )
+            .expect("the merge commit should be created")
+            .to_string();
+        workspace.result_commit = Some(merge);
+
+        assert!(matches!(
+            backend.prepare_integration(&workspace, &fixture.project, 11),
+            Err(WorkspaceBackendError::AmbiguousHistory { .. })
+        ));
+        assert_eq!(head_commit(&fixture.project.canonical_path), fixture.base);
+    }
+
+    #[test]
+    fn guarded_integration_refuses_conflicts_without_changing_the_target() {
+        let fixture = GitFixture::new();
+        let (backend, mut workspace) = fixture.materialized_workspace();
+        let result = commit_file(
+            &workspace.path,
+            "README.md",
+            "worker edit\n",
+            "worker result",
+        );
+        workspace.result_commit = Some(result);
+        let target = commit_file(
+            &fixture.project.canonical_path,
+            "README.md",
+            "operator edit\n",
+            "target advanced",
+        );
+
+        assert!(matches!(
+            backend.prepare_integration(&workspace, &fixture.project, 11),
+            Err(WorkspaceBackendError::IntegrationConflict { .. })
+        ));
+        assert_eq!(head_commit(&fixture.project.canonical_path), target);
+        assert_eq!(
+            fs::read_to_string(
+                fixture.project.canonical_path.join("README.md")
+            )
+            .expect("the target file should remain readable"),
+            "operator edit\n"
+        );
+    }
+
+    #[test]
     fn git_backend_rejects_worktrees_for_non_git_projects() {
         let fixture = GitFixture::new();
         let mut workspace = fixture.workspace();
@@ -1181,6 +2497,79 @@ mod tests {
             stored_workspace(&mut store, workspace.assignment_id).reconciled_at,
             Some(12),
             "an unchanged observation must not rewrite durable state"
+        );
+    }
+
+    #[test]
+    fn integration_observation_records_the_target_and_event_once() {
+        let fixture = GitFixture::new();
+        let mut workspace = fixture.workspace();
+        workspace.state = ExternalResourceState::Observed;
+        workspace.base_commit =
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned());
+        workspace.result_commit =
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned());
+        let assignment_id = workspace.assignment_id;
+        let mut store =
+            store_with_workspace_records(fixture.project.clone(), workspace);
+        let mut supervisor =
+            WorkspaceSupervisor::new(FakeWorkspace::with_commits(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ));
+        let operation_id = OPERATION_ID
+            .parse::<OperationId>()
+            .expect("valid operation ID");
+        let plan = supervisor
+            .prepare_integration(&mut store, assignment_id, 11)
+            .expect("the fake integration should preflight");
+
+        let integrated = supervisor
+            .integrate(
+                &mut store,
+                assignment_id,
+                &plan,
+                operation_id,
+                "operator",
+            )
+            .expect("the fake integration should be recorded");
+        assert_eq!(
+            supervisor
+                .integrate(
+                    &mut store,
+                    assignment_id,
+                    &plan,
+                    operation_id,
+                    "operator",
+                )
+                .expect("the integration observation should be idempotent"),
+            integrated
+        );
+
+        let (stored, events) = store
+            .transaction(|repositories| {
+                Ok((
+                    repositories
+                        .workspace(assignment_id)?
+                        .expect("the workspace should remain durable"),
+                    repositories.events_after(
+                        fixture.project.run_id,
+                        0,
+                        100,
+                    )?,
+                ))
+            })
+            .expect("the integration state should be readable");
+        assert_eq!(
+            stored.target_commit.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "workspace.integrated")
+                .count(),
+            1
         );
     }
 
@@ -1482,6 +2871,19 @@ mod tests {
             }
         }
 
+        fn materialized_workspace(&self) -> (GitWorkspace, WorkspaceRecord) {
+            let mut workspace = self.workspace();
+            let mut backend = GitWorkspace::new(&self.state);
+            workspace.base_commit = backend
+                .base_commit(&workspace.kind, &self.project)
+                .expect("the base commit should resolve");
+            backend
+                .create(&workspace, &self.project)
+                .expect("the assignment worktree should be created");
+            workspace.state = ExternalResourceState::Observed;
+            (backend, workspace)
+        }
+
         fn reference_name(&self) -> String {
             format!(
                 "refs/heads/coterie/{}/{}",
@@ -1492,6 +2894,55 @@ mod tests {
         fn worktree_name(&self) -> String {
             format!("{}-{}", self.project.run_id, ASSIGNMENT_ID)
         }
+    }
+
+    fn commit_file(
+        repository_path: &Path,
+        path: &str,
+        contents: &str,
+        message: &str,
+    ) -> String {
+        let repository = Repository::open(repository_path)
+            .expect("the repository should open");
+        fs::write(repository_path.join(path), contents)
+            .expect("the commit fixture should be written");
+        let mut index = repository.index().expect("the index should open");
+        index
+            .add_path(Path::new(path))
+            .expect("the fixture should enter the index");
+        index.write().expect("the index should be persisted");
+        let tree_id = index.write_tree().expect("the tree should be written");
+        let tree = repository
+            .find_tree(tree_id)
+            .expect("the tree should resolve");
+        let parent = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("the parent commit should resolve");
+        let signature = Signature::now("Coterie Test", "test@example.invalid")
+            .expect("the signature should be valid");
+        repository
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                message,
+                &tree,
+                &[&parent],
+            )
+            .expect("the fixture commit should be created")
+            .to_string()
+    }
+
+    fn head_commit(repository_path: &Path) -> String {
+        let repository = Repository::open(repository_path)
+            .expect("the repository should open");
+        let commit = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("the HEAD commit should resolve")
+            .id();
+        commit.to_string()
     }
 
     impl Drop for GitFixture {

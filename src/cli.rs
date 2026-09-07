@@ -47,6 +47,8 @@ pub(crate) enum Command {
     Task(TaskArguments),
     /// Launch one configured role for a ready task.
     Spawn(SpawnArguments),
+    /// Inspect or integrate assignment workspaces.
+    Workspace(WorkspaceArguments),
     /// Finish the caller's active assignment.
     Finish(FinishArguments),
     /// Send a durable message to another agent.
@@ -134,6 +136,30 @@ pub(crate) struct SpawnArguments {
     /// The ready task assigned to the new agent.
     #[arg(long)]
     pub(crate) task: crate::id::TaskId,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
+}
+
+/// Workspace commands.
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceArguments {
+    #[command(subcommand)]
+    pub(crate) command: WorkspaceCommand,
+}
+
+/// One assignment-workspace action.
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceCommand {
+    /// Apply a submitted result to its target project after guarded preflight.
+    Integrate(WorkspaceIntegrateArguments),
+}
+
+/// Inputs for `workspace integrate`.
+#[derive(Debug, Args)]
+pub(crate) struct WorkspaceIntegrateArguments {
+    /// The submitted assignment whose result should be integrated.
+    #[arg(long)]
+    pub(crate) assignment: crate::id::AssignmentId,
     #[command(flatten)]
     pub(crate) mutation: MutationArguments,
 }
@@ -654,8 +680,8 @@ mod tests {
 
     use super::{
         Arguments, Command, Diagnostic, ErrorCode, ExitCategory, InboxCommand,
-        OutputSchema, render_json_error, render_json_mutation_success,
-        render_json_success,
+        OutputSchema, WorkspaceCommand, render_json_error,
+        render_json_mutation_success, render_json_success,
     };
 
     const OPERATION_ID: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -682,6 +708,33 @@ mod tests {
         assert_eq!(acknowledgement.through, 7);
         assert_eq!(
             acknowledgement.mutation.operation_id,
+            Some(OPERATION_ID.parse().expect("a valid operation ID"))
+        );
+    }
+
+    #[test]
+    fn workspace_integration_requires_an_assignment_and_supports_retries() {
+        let assignment_id = "ca-01ARZ3NDEKTSV4RRFFQ69G5FAZ";
+        let arguments = Arguments::try_parse_from([
+            "coterie",
+            "workspace",
+            "integrate",
+            "--assignment",
+            assignment_id,
+            "--operation-id",
+            OPERATION_ID,
+        ])
+        .expect("the integration command should parse");
+
+        let Command::Workspace(workspace) =
+            arguments.command.expect("a command")
+        else {
+            panic!("the workspace command should be selected");
+        };
+        let WorkspaceCommand::Integrate(integration) = workspace.command;
+        assert_eq!(integration.assignment.to_string(), assignment_id);
+        assert_eq!(
+            integration.mutation.operation_id,
             Some(OPERATION_ID.parse().expect("a valid operation ID"))
         );
     }

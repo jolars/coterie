@@ -26,7 +26,7 @@ use tokio::time::{Instant, sleep};
 use crate::auth::{AgentToken, SessionScope};
 use crate::cli::{
     Arguments, Command as CliCommand, FinishStatus as CliFinishStatus,
-    InboxCommand, TaskCommand,
+    InboxCommand, TaskCommand, WorkspaceCommand,
 };
 use crate::config::{
     AuthorizationDecision, Capability, RoleMode, WorkspacePolicy,
@@ -43,10 +43,11 @@ use crate::project::{
 use crate::protocol::{
     AgentSummary, CallerChannel, CallerSummary, ClientMessage,
     ConnectionChannel, EventSummary, FinishStatus, FrameError,
-    HandshakeRequest, HandshakeResponse, MessageSummary, PROTOCOL_VERSION,
-    ProjectSummary, RequestAuthentication, RpcFailure, RpcFailureCode,
-    RpcRequest, RpcResponse, RpcResult, ServerMessage, TaskCounts, TaskSummary,
-    VersionedRequest, VersionedResponse, read_frame, write_frame,
+    HandshakeRequest, HandshakeResponse, IntegrationSummary, MessageSummary,
+    PROTOCOL_VERSION, ProjectSummary, RequestAuthentication, RpcFailure,
+    RpcFailureCode, RpcRequest, RpcResponse, RpcResult, ServerMessage,
+    TaskCounts, TaskSummary, VersionedRequest, VersionedResponse, read_frame,
+    write_frame,
 };
 use crate::providers::fake::{FakeEvent, FakeProvider, FakeScript};
 use crate::providers::{
@@ -69,7 +70,10 @@ use crate::tasks::{TaskStatus, TaskTransition};
 use crate::workspace::GitWorkspace;
 #[cfg(test)]
 use crate::workspace::fake::FakeWorkspace;
-use crate::workspace::{WorkspaceBackend, WorkspaceError, WorkspaceSupervisor};
+use crate::workspace::{
+    IntegrationRecord, WorkspaceBackend, WorkspaceBackendError, WorkspaceError,
+    WorkspaceSupervisor,
+};
 
 use self::session::{
     AgentLaunch, AgentSessionError, AgentSessionSupervisor,
@@ -569,6 +573,22 @@ fn public_request(
                 false,
             )
         }
+        CliCommand::Workspace(arguments) => match arguments.command {
+            WorkspaceCommand::Integrate(arguments) => {
+                let operation_id = arguments
+                    .mutation
+                    .operation_id
+                    .unwrap_or_else(OperationId::generate);
+                (
+                    RpcRequest::WorkspaceIntegrate {
+                        operation_id,
+                        assignment_id: arguments.assignment,
+                    },
+                    Some(operation_id),
+                    false,
+                )
+            }
+        },
         CliCommand::Finish(arguments) => {
             let operation_id = arguments
                 .mutation
@@ -1482,6 +1502,17 @@ fn execute_request<B: WorkspaceBackend>(
             operation_id,
             role,
             task_id,
+        ),
+        RpcRequest::WorkspaceIntegrate {
+            operation_id,
+            assignment_id,
+        } => integrate_workspace(
+            store,
+            workspaces,
+            run_id,
+            caller,
+            operation_id,
+            assignment_id,
         ),
         RpcRequest::Finish {
             operation_id,
@@ -2738,6 +2769,154 @@ fn finish_assignment<B: WorkspaceBackend>(
     })
 }
 
+fn integrate_workspace<B: WorkspaceBackend>(
+    store: &mut Store,
+    workspaces: &mut WorkspaceSupervisor<B>,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    operation_id: OperationId,
+    assignment_id: AssignmentId,
+) -> Result<RpcResponse, RpcFailure> {
+    require_capability(store, run_id, caller, "workspace", "integrate")?;
+    let request = json!({"assignment_id": assignment_id});
+    let existing = store
+        .transaction(|repositories| repositories.operation(operation_id))
+        .map_err(rpc_state_failure)?;
+    let prepared = if existing.is_none() {
+        let (assignment, task, workspace) = store
+            .transaction(|repositories| {
+                let assignment = repositories.assignment(assignment_id)?;
+                let task = assignment
+                    .as_ref()
+                    .map(|assignment| repositories.task(assignment.task_id))
+                    .transpose()?
+                    .flatten();
+                let workspace = repositories.workspace(assignment_id)?;
+                Ok((assignment, task, workspace))
+            })
+            .map_err(rpc_state_failure)?;
+        let assignment = assignment
+            .filter(|assignment| assignment.run_id == run_id)
+            .ok_or_else(|| {
+                not_found(format!(
+                    "assignment `{assignment_id}` does not exist"
+                ))
+            })?;
+        if assignment.state != "completed" || assignment.completed_at.is_none()
+        {
+            return Err(conflict(format!(
+                "assignment `{assignment_id}` has not completed successfully"
+            )));
+        }
+        let task = task.ok_or_else(|| {
+            RpcFailure::new(
+                RpcFailureCode::Internal,
+                format!("assignment `{assignment_id}` has no task"),
+            )
+        })?;
+        if task.status != TaskStatus::Submitted {
+            return Err(conflict(format!(
+                "task `{}` is not awaiting integration",
+                task.id
+            )));
+        }
+        let workspace = workspace.ok_or_else(|| {
+            RpcFailure::new(
+                RpcFailureCode::Internal,
+                format!("assignment `{assignment_id}` has no workspace"),
+            )
+        })?;
+        if workspace.state != ExternalResourceState::Observed {
+            return Err(conflict(format!(
+                "workspace `{assignment_id}` reconciliation state is `{}`",
+                workspace.state
+            )));
+        }
+        if workspace.target_commit.is_some() {
+            return Err(conflict(format!(
+                "workspace `{assignment_id}` is already integrated"
+            )));
+        }
+        Some(
+            workspaces
+                .prepare_integration(store, assignment_id, rpc_timestamp()?)
+                .map_err(rpc_workspace_failure)?,
+        )
+    } else {
+        None
+    };
+    let mutation = Mutation {
+        id: operation_id,
+        run_id,
+        kind: "workspace.integrate".to_owned(),
+        actor_agent_id: caller.agent_id(),
+        request,
+        created_at: prepared
+            .as_ref()
+            .map_or_else(rpc_timestamp, |plan| Ok(plan.integrated_at))?,
+    };
+    let outcome = store
+        .mutate(&mutation, |repositories| {
+            let plan = prepared.as_ref().ok_or_else(|| {
+                StoreError::OperationIncomplete {
+                    id: operation_id,
+                    status: "missing integration preflight".to_owned(),
+                }
+            })?;
+            let assignment = repositories.assignment(assignment_id)?.ok_or_else(
+                || StoreError::CorruptAssignmentState {
+                    id: assignment_id,
+                    reason: "the integration assignment disappeared".to_owned(),
+                },
+            )?;
+            repositories.append_event(&NewEvent {
+                run_id,
+                kind: EventKind::WorkspaceIntegrationDesired,
+                actor: event_actor(caller),
+                subject: assignment_id.to_string(),
+                project_id: Some(plan.project_id),
+                agent_id: Some(assignment.agent_id),
+                task_id: Some(assignment.task_id),
+                operation_id: Some(operation_id),
+                correlation_id: None,
+                causation_id: None,
+                data: serde_json::to_value(plan)?,
+                summary: format!(
+                    "Recorded guarded integration intent for workspace {assignment_id}."
+                ),
+                created_at: plan.integrated_at,
+            })?;
+            Ok(plan.clone())
+        })
+        .map_err(rpc_state_failure)?;
+    let plan = mutation_value(outcome);
+    let integration = workspaces
+        .integrate(
+            store,
+            assignment_id,
+            &plan,
+            operation_id,
+            &event_actor(caller),
+        )
+        .map_err(rpc_workspace_failure)?;
+    Ok(RpcResponse::WorkspaceIntegrated {
+        operation_id,
+        integration: integration_summary(integration),
+    })
+}
+
+fn integration_summary(integration: IntegrationRecord) -> IntegrationSummary {
+    IntegrationSummary {
+        assignment_id: integration.assignment_id,
+        project_id: integration.project_id,
+        target_reference: integration.target_reference,
+        base_commit: integration.base_commit,
+        result_commit: integration.result_commit,
+        target_commit_before: integration.target_commit_before,
+        target_commit: integration.target_commit,
+    }
+}
+
 fn send_message(
     store: &mut Store,
     run_id: RunId,
@@ -3245,6 +3424,7 @@ fn available_commands(
             "task ready",
             "task close",
             "spawn",
+            "workspace integrate",
             "send",
             "logs",
             "events",
@@ -3261,6 +3441,7 @@ fn available_commands(
             ("task", "create", "task create"),
             ("task", "close", "task close"),
             ("logs", "*", "logs"),
+            ("workspace", "integrate", "workspace integrate"),
         ] {
             if builtin_standard()
                 .authorize(&agent.role, Capability::new(namespace, action))
@@ -3419,6 +3600,17 @@ fn rpc_session_failure(error: AgentSessionError) -> RpcFailure {
 
 fn rpc_workspace_failure(error: WorkspaceError) -> RpcFailure {
     match error {
+        WorkspaceError::Backend(
+            WorkspaceBackendError::DirtyWorkspace { .. }
+            | WorkspaceBackendError::DirtyTarget { .. }
+            | WorkspaceBackendError::UnexpectedWorkspaceTip { .. }
+            | WorkspaceBackendError::AmbiguousTarget { .. }
+            | WorkspaceBackendError::AmbiguousHistory { .. }
+            | WorkspaceBackendError::IntegrationConflict { .. }
+            | WorkspaceBackendError::UnexpectedTargetTip { .. }
+            | WorkspaceBackendError::UnexpectedTargetReference { .. }
+            | WorkspaceBackendError::IntegrationPlanMismatch { .. },
+        ) => RpcFailure::new(RpcFailureCode::Conflict, error.to_string()),
         WorkspaceError::Backend(_) => {
             RpcFailure::new(RpcFailureCode::Unavailable, error.to_string())
         }
@@ -3437,7 +3629,8 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         StoreError::OperationConflict { .. }
         | StoreError::OperationIncomplete { .. }
         | StoreError::RunNotActive { .. }
-        | StoreError::WorkspaceResultConflict { .. } => {
+        | StoreError::WorkspaceResultConflict { .. }
+        | StoreError::WorkspaceTargetConflict { .. } => {
             RpcFailureCode::Conflict
         }
         StoreError::Database(_)
@@ -4338,7 +4531,8 @@ impl SupervisorError {
                 StoreError::OperationConflict { .. }
                 | StoreError::OperationIncomplete { .. }
                 | StoreError::RunNotActive { .. }
-                | StoreError::WorkspaceResultConflict { .. },
+                | StoreError::WorkspaceResultConflict { .. }
+                | StoreError::WorkspaceTargetConflict { .. },
             ) => crate::cli::ErrorCode::Conflict,
             Self::State(_) | Self::RunStateMismatch { .. } => {
                 crate::cli::ErrorCode::CorruptState
@@ -5104,6 +5298,47 @@ mod tests {
                 .expect("the finish retry should replay"),
             finished
         );
+        assert!(matches!(
+            agent
+                .request(RpcRequest::WorkspaceIntegrate {
+                    operation_id: OperationId::generate(),
+                    assignment_id,
+                })
+                .await,
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::PermissionDenied,
+                ..
+            })
+        ));
+        let integration_operation = OperationId::generate();
+        let integration_request = || RpcRequest::WorkspaceIntegrate {
+            operation_id: integration_operation,
+            assignment_id,
+        };
+        let integrated = operator
+            .request(integration_request())
+            .await
+            .expect("the operator should integrate the submitted result");
+        assert!(matches!(
+            integrated,
+            RpcResponse::WorkspaceIntegrated {
+                ref integration,
+                ..
+            } if integration.assignment_id == assignment_id
+                && integration.base_commit == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                && integration.result_commit == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                && integration.target_commit_before
+                    == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                && integration.target_commit
+                    == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ));
+        assert_eq!(
+            operator
+                .request(integration_request())
+                .await
+                .expect("the integration retry should replay"),
+            integrated
+        );
         let close_operation = OperationId::generate();
         let close_request = || RpcRequest::TaskClose {
             operation_id: close_operation,
@@ -5143,6 +5378,8 @@ mod tests {
         for event_type in [
             "message.sent",
             "message.acknowledged",
+            "workspace.integration_desired",
+            "workspace.integrated",
             "task.lifecycle_changed",
         ] {
             assert_eq!(

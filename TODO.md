@@ -129,7 +129,7 @@ later milestones build on.
 - [x] Implement the workspace trait with `git2`: record a base commit, create a
   task-owned worktree and reference below Coterie's state directory, and
   record the resulting commit without invoking the Git CLI.
-- [ ] Implement explicit guarded integration. Refuse dirty targets, unexpected
+- [x] Implement explicit guarded integration. Refuse dirty targets, unexpected
   tips, ambiguous histories, and conflicts; never remove dirty,
   unintegrated, running, or ambiguously owned work.
 - [ ] Complete the operator loop for task creation, worker spawn, logs and

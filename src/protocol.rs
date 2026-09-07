@@ -14,7 +14,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 2;
+pub(crate) const PROTOCOL_VERSION: u16 = 3;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -113,6 +113,10 @@ pub(crate) enum RpcRequest {
         operation_id: OperationId,
         role: String,
         task_id: TaskId,
+    },
+    WorkspaceIntegrate {
+        operation_id: OperationId,
+        assignment_id: AssignmentId,
     },
     Finish {
         operation_id: OperationId,
@@ -247,6 +251,10 @@ pub(crate) enum RpcResponse {
         assignment_id: AssignmentId,
         task_id: TaskId,
     },
+    WorkspaceIntegrated {
+        operation_id: OperationId,
+        integration: IntegrationSummary,
+    },
     AssignmentFinished {
         operation_id: OperationId,
         assignment_id: AssignmentId,
@@ -328,6 +336,18 @@ pub(crate) struct TaskSummary {
     pub(crate) ready: bool,
     pub(crate) unresolved_dependencies: Vec<TaskId>,
     pub(crate) result: Option<serde_json::Value>,
+}
+
+/// Exact identities recorded by one explicit guarded integration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct IntegrationSummary {
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) project_id: ProjectId,
+    pub(crate) target_reference: String,
+    pub(crate) base_commit: String,
+    pub(crate) result_commit: String,
+    pub(crate) target_commit_before: String,
+    pub(crate) target_commit: String,
 }
 
 /// Counts of tasks in each durable lifecycle state.
@@ -483,7 +503,7 @@ mod tests {
         RpcRequest, VersionedRequest, read_frame, write_frame,
     };
     use crate::auth::AgentToken;
-    use crate::id::{AgentId, OperationId, RunId, SessionId};
+    use crate::id::{AgentId, AssignmentId, OperationId, RunId, SessionId};
     use crate::project::ProjectKey;
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -505,7 +525,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 2,
+                    "protocol_version": 3,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -516,6 +536,31 @@ mod tests {
                             "operation_id": "co-01ARZ3NDEKTSV4RRFFQ69G5FAW"
                         }
                     }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn guarded_integration_wire_shape_identifies_the_assignment() {
+        let operation_id = "co-01ARZ3NDEKTSV4RRFFQ69G5FAW"
+            .parse::<OperationId>()
+            .expect("valid operation ID");
+        let assignment_id = "ca-01ARZ3NDEKTSV4RRFFQ69G5FAX"
+            .parse::<AssignmentId>()
+            .expect("valid assignment ID");
+        let request = RpcRequest::WorkspaceIntegrate {
+            operation_id,
+            assignment_id,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).expect("the request should encode"),
+            json!({
+                "method": "workspace_integrate",
+                "parameters": {
+                    "operation_id": "co-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+                    "assignment_id": "ca-01ARZ3NDEKTSV4RRFFQ69G5FAX"
                 }
             })
         );
@@ -593,7 +638,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 2,
+                    "protocol_version": 3,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

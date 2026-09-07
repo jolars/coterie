@@ -26,6 +26,7 @@ The minimum delegation commands are:
 | `coterie task close <task-id> --summary <text>` | Close a submitted task after explicit validation. |
 | `coterie spawn <role> --task <task-id>` | Instantiate an authorized configured job role and atomically claim a ready task. |
 | `coterie finish --status <completed\|failed> --summary <text>` | Submit or release the authenticated agent's active assignment. |
+| `coterie workspace integrate --assignment <assignment-id>` | Explicitly apply a submitted worktree result after guarded Git preflight. |
 | `coterie send <agent> <message>` | Persist a message for an agent ID or run-local name. |
 | `coterie inbox [--after <cursor>]` | Read the authenticated agent's messages after a monotonic cursor. |
 | `coterie inbox ack <cursor>` | Explicitly acknowledge every message through a returned inbox cursor. |
@@ -37,6 +38,19 @@ The minimum delegation commands are:
 task IDs. Generated help is authoritative for argument spelling and defaults.
 Commands other than the foreground launch require an active run and never
 create one as a side effect.
+
+`workspace integrate` requires a successfully completed assignment whose task is
+`submitted`. Before recording durable intent, it verifies the assignment
+worktree and target repository identities, requires both worktrees to be clean,
+requires the recorded result to be the assignment tip with a linear history from
+its recorded base, captures the target branch and tip, and preflights any merge
+without changing the target. Applying the durable plan uses a compare-and-set
+reference update, so a changed branch or tip is refused. Conflicts and ambiguous
+histories are left untouched for the lead or operator to resolve explicitly.
+The success response records the target reference, base commit, result commit,
+target commit before integration, and resulting target commit. Coterie preserves
+the assignment worktree and its owned reference; cleanup is not implicit in
+integration or shutdown while work may remain recoverable.
 
 `send` commits the message and its normalized event before any provider delivery
 can be attempted. Inbox reads never acknowledge messages implicitly. A caller
@@ -104,6 +118,11 @@ uses its operation ID to prepare the durable session, but emits no wrapper
 response while Codex owns the terminal. A programmatic caller retries an
 uncertain mutation with the same ID. Read-only commands neither accept nor
 return an operation ID.
+
+An integration retry reuses its original preflight plan. It succeeds
+idempotently if that plan already advanced the target, and it refuses a target
+changed by another actor rather than silently replanning under the same
+operation ID.
 
 `events` returns immutable records in increasing run-local sequence order. Each
 record includes its run ID, applicable project, agent, task, and operation IDs,

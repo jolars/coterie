@@ -7,7 +7,7 @@
 > [!WARNING]
 > Coterie is under active development. The foreground now launches an
 > interactive Codex session, but background workers still use the deterministic
-> fake provider, and guarded Git integration remains under development.
+> fake provider.
 
 Coterie is a project-native Rust CLI for coordinating coding agents. It will
 keep orchestration mechanics, durable state, workspaces, and policy enforcement
@@ -19,9 +19,10 @@ The current platform target is Linux, developed on NixOS and tested on Ubuntu.
 The current command slice can launch or reconnect to a durable local run,
 open its foreground Codex TUI, inspect durable state, create and close tasks,
 spawn fake workers, finish assignments, exchange durable messages, read
-transcripts and events, and stop the run. Run `coterie --help` for the generated
-command reference; see the [CLI contract](docs/cli-contract.md) for
-programmatic output and retry rules.
+transcripts and events, explicitly integrate submitted Git worktrees through a
+guarded operation, and stop the run while preserving recoverable work. Run
+`coterie --help` for the generated command reference; see the [CLI
+contract](docs/cli-contract.md) for programmatic output and retry rules.
 
 ## Development
 
