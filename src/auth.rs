@@ -126,7 +126,7 @@ fn decode_nibble(encoded: u8) -> Result<u8, ParseTokenError> {
 }
 
 /// The full scope that fences a session credential.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionScope {
     pub(crate) run_id: RunId,
     pub(crate) agent_id: AgentId,

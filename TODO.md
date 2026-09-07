@@ -115,7 +115,7 @@ later milestones build on.
 
 - [x] Probe the installed Codex version and required capabilities before launch;
   reject incompatible versions with an actionable diagnostic.
-- [ ] Launch the foreground Codex TUI with inherited terminal streams, working
+- [x] Launch the foreground Codex TUI with inherited terminal streams, working
   directory, resize behavior, and signal forwarding. Inject only Coterie's
   orchestration bootstrap through Codex's documented
   `developer_instructions` setting, leaving repository `AGENTS.md` discovery

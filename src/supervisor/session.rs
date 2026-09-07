@@ -15,8 +15,8 @@ use crate::providers::{
 };
 use crate::state::{
     AgentRecord, EventKind, ExternalResourceState, NewEvent,
-    SessionCredentialRecord, SessionRecord, SessionTransitionOutcome, Store,
-    StoreError,
+    SessionCredentialRecord, SessionProcessOwner, SessionRecord,
+    SessionTransitionOutcome, Store, StoreError,
 };
 use crate::transcript::{TranscriptError, TranscriptStore};
 
@@ -278,6 +278,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 created_at: launch.created_at,
                 ended_at: None,
                 reconciled_at: None,
+                process_owner: SessionProcessOwner::Supervisor,
             })?;
             repositories.activate_session_credential(
                 &SessionCredentialRecord {
@@ -367,7 +368,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         };
         let handle = match launch.mode {
             LaunchMode::Interactive => {
-                self.provider.launch_interactive(&specification)?
+                self.provider.launch_interactive(&specification, None)?
             }
             LaunchMode::Job => self.provider.launch_job(&specification)?,
         };
@@ -453,6 +454,16 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 session_id: session.id,
                 generation: session.generation,
             };
+            if session.process_owner == SessionProcessOwner::Foreground {
+                self.record_reconciliation(
+                    store,
+                    scope,
+                    ExternalResourceState::Unknown,
+                    LifecycleState::Unknown,
+                    reconciled_at,
+                )?;
+                continue;
+            }
             let Some(provider_session_id) = session.provider_session_id else {
                 self.record_reconciliation(
                     store,
@@ -817,19 +828,25 @@ fn required_capabilities(
     };
     let startup = (!launch.bootstrap_instruction.is_empty())
         .then_some(ProviderCapability::StartupInstructions);
-    [
-        Some(mode),
-        startup,
-        Some(ProviderCapability::StructuredLifecycleEvents),
-        Some(ProviderCapability::TranscriptStreaming),
-    ]
-    .into_iter()
-    .flatten()
+    let structured = matches!(launch.mode, LaunchMode::Job)
+        .then_some(ProviderCapability::StructuredLifecycleEvents);
+    let transcript = matches!(launch.mode, LaunchMode::Job)
+        .then_some(ProviderCapability::TranscriptStreaming);
+    [Some(mode), startup, structured, transcript]
+        .into_iter()
+        .flatten()
 }
 
 fn validate_provider_probe(
     probe: &crate::providers::ProviderProbe,
     launch: &AgentLaunch,
+) -> Result<(), AgentSessionError> {
+    validate_provider_capabilities(probe, required_capabilities(launch))
+}
+
+pub(crate) fn validate_provider_capabilities(
+    probe: &crate::providers::ProviderProbe,
+    capabilities: impl IntoIterator<Item = ProviderCapability>,
 ) -> Result<(), AgentSessionError> {
     if let crate::providers::ProviderCompatibility::Incompatible {
         reason,
@@ -843,7 +860,7 @@ fn validate_provider_probe(
             remedy: remedy.clone(),
         });
     }
-    for capability in required_capabilities(launch) {
+    for capability in capabilities {
         if !probe.capabilities.contains(&capability) {
             return Err(AgentSessionError::MissingCapability {
                 provider: probe.name.clone(),

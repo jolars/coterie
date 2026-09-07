@@ -9,6 +9,7 @@ use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -49,25 +50,34 @@ use crate::protocol::{
 };
 use crate::providers::fake::{FakeEvent, FakeProvider, FakeScript};
 use crate::providers::{
-    ActivityState, LaunchMode, LifecycleState, SessionObservation,
+    ActivityState, CodexProvider, InteractiveEnvironment, LaunchMode,
+    LaunchSpecification, LifecycleState, Provider, ProviderCapability,
+    SessionObservation,
 };
 use crate::state::{
     AcknowledgeMessagesMutation, AcknowledgeMessagesResult, AgentRecord,
     ClaimTaskMutation, ClaimTaskResult, DependencyRecord, EventKind,
     EventRecord, ExternalResourceState, MessageRecord, Mutation,
-    MutationOutcome, NewEvent, ProjectRecord, RunRecord, Store, StoreError,
-    TaskRecord, TaskTransitionMutation, TaskTransitionRejection,
-    TaskTransitionResult, WorkspaceRecord,
+    MutationOutcome, NewEvent, ProjectRecord, RunRecord,
+    SessionCredentialRecord, SessionProcessOwner, SessionRecord,
+    SessionTransitionOutcome, Store, StoreError, TaskRecord,
+    TaskTransitionMutation, TaskTransitionRejection, TaskTransitionResult,
+    WorkspaceRecord,
 };
 use crate::tasks::{TaskStatus, TaskTransition};
 use crate::workspace::fake::FakeWorkspace;
 use crate::workspace::{WorkspaceError, WorkspaceSupervisor};
 
-use self::session::{AgentLaunch, AgentSessionError, AgentSessionSupervisor};
+use self::session::{
+    AgentLaunch, AgentSessionError, AgentSessionSupervisor,
+    validate_provider_capabilities,
+};
+use crate::transcript::TranscriptStore;
 
 const INTERNAL_SUPERVISOR_ARGUMENT: &str = "__supervisor";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+const FOREGROUND_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const DATABASE_FILE: &str = "state.sqlite3";
 const MAXIMUM_LINUX_SOCKET_PATH_LENGTH: usize = 107;
 
@@ -130,6 +140,10 @@ pub(crate) async fn run(
         None => {
             let operation_id =
                 foreground_operation_id.unwrap_or_else(OperationId::generate);
+            if json_output {
+                return Err(SupervisorError::ForegroundJsonOutputUnsupported
+                    .for_operation(operation_id));
+            }
             let project = discover_current_project()
                 .map_err(|error| error.for_operation(operation_id))?;
             let directories = CoterieDirectories::from_environment()
@@ -138,11 +152,14 @@ pub(crate) async fn run(
             let mut client = connect_or_start(&project, &directories)
                 .await
                 .map_err(|error| error.for_operation(operation_id))?;
-            let response = client
-                .request(RpcRequest::LaunchForeground { operation_id })
-                .await
-                .map_err(|error| error.for_operation(operation_id))?;
-            render_public_response(json_output, Some(operation_id), &response)
+            launch_foreground_codex(
+                &project,
+                &directories,
+                &mut client,
+                operation_id,
+            )
+            .await
+            .map_err(|error| error.for_operation(operation_id))
         }
         Some(command) => {
             if foreground_operation_id.is_some() {
@@ -195,6 +212,236 @@ fn active_entry(
     ActiveRunIndex::new(directories)
         .lookup(&project.identity)?
         .ok_or(SupervisorError::NoActiveRun)
+}
+
+async fn launch_foreground_codex(
+    project: &DiscoveredProject,
+    directories: &CoterieDirectories,
+    client: &mut SupervisorClient,
+    operation_id: OperationId,
+) -> Result<crate::cli::ExitCategory, SupervisorError> {
+    let defaults = compiled_defaults();
+    let binding = defaults
+        .providers
+        .get("codex")
+        .expect("the compiled default archetype binds the Codex provider");
+    let mut provider = CodexProvider::new(binding.command.iter().copied());
+    let probe = provider.probe().map_err(AgentSessionError::from)?;
+    validate_provider_capabilities(
+        &probe,
+        [
+            ProviderCapability::ForegroundInteractive,
+            ProviderCapability::StartupInstructions,
+        ],
+    )?;
+
+    let token = AgentToken::generate().map_err(AgentSessionError::from)?;
+    let response = client
+        .request(RpcRequest::LaunchForeground {
+            operation_id,
+            token: token.clone(),
+        })
+        .await?;
+    let RpcResponse::ForegroundPrepared {
+        run_id,
+        agent,
+        session_id,
+        generation,
+        bootstrap_instruction,
+    } = response
+    else {
+        return Err(SupervisorError::UnexpectedMessage {
+            expected: "a foreground launch specification",
+        });
+    };
+    if run_id != client.run_id() {
+        return Err(SupervisorError::InvalidProof);
+    }
+    let scope = SessionScope {
+        run_id,
+        agent_id: agent.id,
+        session_id,
+        generation,
+    };
+    let socket_path = checked_socket_path(directories, run_id)?;
+    let specification = LaunchSpecification {
+        scope,
+        working_directory: project.canonical_path.clone(),
+        bootstrap_instruction,
+    };
+    let environment = InteractiveEnvironment {
+        project_id: client.project_id(),
+        primary_project_root: project.canonical_path.clone(),
+        role: agent.role,
+        socket_path,
+        token,
+    };
+    let session =
+        match provider.launch_interactive(&specification, Some(&environment)) {
+            Ok(session) => session,
+            Err(error) => {
+                let _observation_may_fail = client
+                    .request(RpcRequest::ForegroundLaunchFailed { scope })
+                    .await;
+                return Err(AgentSessionError::Provider(error).into());
+            }
+        };
+    let process_id = provider
+        .foreground_process_id(&session)
+        .map_err(AgentSessionError::from)?;
+    if let Err(error) = client
+        .request(RpcRequest::ForegroundStarted { scope, process_id })
+        .await
+    {
+        let _child_may_already_be_gone = provider
+            .wait_foreground_until_termination(&session, std::future::ready(()))
+            .await;
+        return Err(error);
+    }
+    let termination = wait_for_foreground_termination(
+        project.clone(),
+        directories.clone(),
+        run_id,
+        scope,
+    );
+    let (status, termination_requested) = match provider
+        .wait_foreground_until_termination(&session, termination)
+        .await
+    {
+        Ok(observation) => observation,
+        Err(error) => {
+            let _observation_may_fail = client
+                .request(RpcRequest::ForegroundObservationLost { scope })
+                .await;
+            return Err(AgentSessionError::Provider(error).into());
+        }
+    };
+    record_foreground_exit(
+        project,
+        directories,
+        client,
+        RpcRequest::ForegroundExited {
+            scope,
+            code: status.code(),
+            signal: status.signal(),
+        },
+        scope,
+        termination_requested,
+    )
+    .await?;
+    Ok(if status.success() {
+        crate::cli::ExitCategory::Success
+    } else {
+        crate::cli::ExitCategory::Unavailable
+    })
+}
+
+async fn wait_for_foreground_termination(
+    project: DiscoveredProject,
+    directories: CoterieDirectories,
+    run_id: RunId,
+    scope: SessionScope,
+) {
+    loop {
+        let Some(entry) = ActiveRunIndex::new(&directories)
+            .lookup(&project.identity)
+            .ok()
+            .flatten()
+        else {
+            sleep(STARTUP_RETRY_INTERVAL).await;
+            continue;
+        };
+        if entry.run_id != run_id {
+            sleep(STARTUP_RETRY_INTERVAL).await;
+            continue;
+        }
+        let Ok(mut control) = connect_or_start(&project, &directories).await
+        else {
+            sleep(STARTUP_RETRY_INTERVAL).await;
+            continue;
+        };
+        match control
+            .request(RpcRequest::WaitForegroundControl { scope })
+            .await
+        {
+            Ok(RpcResponse::ForegroundTerminationRequested { session_id })
+                if session_id == scope.session_id =>
+            {
+                return;
+            }
+            Ok(_) | Err(_) => {
+                sleep(STARTUP_RETRY_INTERVAL).await;
+            }
+        }
+    }
+}
+
+async fn record_foreground_exit(
+    project: &DiscoveredProject,
+    directories: &CoterieDirectories,
+    client: &mut SupervisorClient,
+    request: RpcRequest,
+    scope: SessionScope,
+    termination_requested: bool,
+) -> Result<(), SupervisorError> {
+    match client.request(request.clone()).await {
+        Ok(response) => {
+            return validate_foreground_exit_response(response, scope);
+        }
+        Err(error) if error.is_transient_connection_failure() => {}
+        Err(error) => return Err(error),
+    }
+
+    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    loop {
+        let indexed =
+            ActiveRunIndex::new(directories).lookup(&project.identity)?;
+        let Some(entry) = indexed else {
+            if termination_requested {
+                return Ok(());
+            }
+            return Err(SupervisorError::NoActiveRun);
+        };
+        if entry.run_id != scope.run_id {
+            return Err(SupervisorError::InvalidProof);
+        }
+        match connect_or_start(project, directories).await {
+            Ok(mut reconnected) => match reconnected
+                .request(request.clone())
+                .await
+            {
+                Ok(response) => {
+                    return validate_foreground_exit_response(response, scope);
+                }
+                Err(error)
+                    if error.is_transient_connection_failure()
+                        && Instant::now() < deadline => {}
+                Err(error) => return Err(error),
+            },
+            Err(error)
+                if error.is_transient_connection_failure()
+                    && Instant::now() < deadline => {}
+            Err(error) => return Err(error),
+        }
+        sleep(STARTUP_RETRY_INTERVAL).await;
+    }
+}
+
+fn validate_foreground_exit_response(
+    response: RpcResponse,
+    scope: SessionScope,
+) -> Result<(), SupervisorError> {
+    match response {
+        RpcResponse::ForegroundObserved { session_id, state }
+            if session_id == scope.session_id
+                && state == LifecycleState::Exited.as_str() =>
+        {
+            Ok(())
+        }
+        _ => Err(SupervisorError::UnexpectedMessage {
+            expected: "a foreground exit observation",
+        }),
+    }
 }
 
 async fn connect_for_environment(
@@ -675,6 +922,7 @@ async fn serve_listener(
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(16);
     let mut connections = JoinSet::new();
+    let mut foreground = ForegroundCoordination::default();
     loop {
         tokio::select! {
             shutdown = shutdown_rx.recv() => {
@@ -706,7 +954,29 @@ async fn serve_listener(
                     run_state_directory,
                     active.run_id,
                     command,
+                    &mut foreground,
                 );
+                if foreground.retire_without_response {
+                    break;
+                }
+            }
+            _ = sleep_until_pending_shutdown(&foreground.pending_shutdown),
+                if foreground.pending_shutdown.is_some() =>
+            {
+                let pending = foreground.pending_shutdown
+                    .take()
+                    .expect("the guarded shutdown should be pending");
+                let failure = RpcFailure::new(
+                    RpcFailureCode::Unavailable,
+                    format!(
+                        "timed out waiting for foreground processes before stopping run {}",
+                        active.run_id
+                    ),
+                );
+                for response in pending.responses {
+                    let _request_may_have_disconnected =
+                        response.send(Err(failure.clone()));
+                }
             }
             Some(completed) = connections.join_next(), if !connections.is_empty() => {
                 match completed {
@@ -760,6 +1030,31 @@ enum SupervisorCommand {
     },
 }
 
+struct ForegroundControlWaiter {
+    scope: SessionScope,
+    response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
+}
+
+struct PendingShutdown {
+    operation_id: OperationId,
+    responses: Vec<oneshot::Sender<Result<RpcResponse, RpcFailure>>>,
+    deadline: Instant,
+}
+
+#[derive(Default)]
+struct ForegroundCoordination {
+    controls: BTreeMap<SessionId, ForegroundControlWaiter>,
+    pending_shutdown: Option<PendingShutdown>,
+    retire_without_response: bool,
+}
+
+async fn sleep_until_pending_shutdown(pending: &Option<PendingShutdown>) {
+    let deadline = pending
+        .as_ref()
+        .map_or_else(Instant::now, |shutdown| shutdown.deadline);
+    tokio::time::sleep_until(deadline).await;
+}
+
 fn handle_command(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
@@ -767,6 +1062,7 @@ fn handle_command(
     run_state_directory: &Path,
     run_id: RunId,
     command: SupervisorCommand,
+    foreground: &mut ForegroundCoordination,
 ) {
     match command {
         SupervisorCommand::AuthenticateAgent {
@@ -789,18 +1085,30 @@ fn handle_command(
             operation_id,
             response,
         } => {
-            let result = persist_shutdown(store, run_id, operation_id).map_err(
-                |error| {
-                    RpcFailure::new(RpcFailureCode::Internal, error.to_string())
-                },
-            );
-            let _request_may_have_disconnected = response.send(result);
+            begin_shutdown(store, run_id, operation_id, response, foreground);
         }
         SupervisorCommand::Dispatch {
             caller,
             request,
             response,
         } => {
+            if let RpcRequest::WaitForegroundControl { scope } = request {
+                register_foreground_control(
+                    store,
+                    run_id,
+                    &caller,
+                    scope,
+                    response,
+                    &mut foreground.controls,
+                    foreground.pending_shutdown.is_some(),
+                );
+                return;
+            }
+            let ended_scope = match &request {
+                RpcRequest::ForegroundExited { scope, .. }
+                | RpcRequest::ForegroundLaunchFailed { scope } => Some(*scope),
+                _ => None,
+            };
             let result = execute_request(
                 store,
                 sessions,
@@ -810,8 +1118,212 @@ fn handle_command(
                 &caller,
                 request,
             );
+            let succeeded = result.is_ok();
             let _request_may_have_disconnected = response.send(result);
+            if succeeded && let Some(scope) = ended_scope {
+                release_foreground_control(&mut foreground.controls, scope);
+                finish_shutdown_if_ready(store, run_id, foreground);
+            }
         }
+    }
+}
+
+fn begin_shutdown(
+    store: &mut Store,
+    run_id: RunId,
+    operation_id: OperationId,
+    response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
+    foreground: &mut ForegroundCoordination,
+) {
+    if let Some(pending) = &mut foreground.pending_shutdown {
+        if pending.operation_id == operation_id {
+            pending.responses.push(response);
+        } else {
+            let _request_may_have_disconnected = response.send(Err(conflict(
+                "another run shutdown is already waiting for foreground processes",
+            )));
+        }
+        return;
+    }
+    match active_foreground_scopes(store, run_id) {
+        Ok(scopes) if scopes.is_empty() => {
+            let result = persist_shutdown(store, run_id, operation_id)
+                .map_err(supervisor_rpc_failure);
+            let stopped = result.is_ok();
+            if response.send(result).is_err() && stopped {
+                foreground.retire_without_response = true;
+            }
+        }
+        Ok(scopes) => {
+            foreground.pending_shutdown = Some(PendingShutdown {
+                operation_id,
+                responses: vec![response],
+                deadline: Instant::now() + FOREGROUND_SHUTDOWN_TIMEOUT,
+            });
+            request_foreground_termination(&mut foreground.controls, &scopes);
+        }
+        Err(error) => {
+            let _request_may_have_disconnected =
+                response.send(Err(rpc_state_failure(error)));
+        }
+    }
+}
+
+fn register_foreground_control(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    scope: SessionScope,
+    response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
+    foreground_controls: &mut BTreeMap<SessionId, ForegroundControlWaiter>,
+    shutdown_pending: bool,
+) {
+    let validation = require_operator(
+        caller,
+        "only the foreground operator can await process control",
+    )
+    .and_then(|()| require_foreground_scope(store, run_id, scope))
+    .and_then(|()| {
+        let session = store
+            .transaction(|repositories| repositories.session(scope.session_id))
+            .map_err(rpc_state_failure)?
+            .ok_or_else(|| not_found("the foreground session does not exist"))?;
+        if session.process_owner != SessionProcessOwner::Foreground {
+            return Err(conflict(
+                "the session process is not controlled by the foreground wrapper",
+            ));
+        }
+        if session.state.is_terminal() {
+            return Err(conflict("the foreground session has already ended"));
+        }
+        Ok(())
+    });
+    if let Err(error) = validation {
+        let _request_may_have_disconnected = response.send(Err(error));
+        return;
+    }
+    if shutdown_pending {
+        let _request_may_have_disconnected =
+            response.send(Ok(RpcResponse::ForegroundTerminationRequested {
+                session_id: scope.session_id,
+            }));
+        return;
+    }
+    if foreground_controls
+        .get(&scope.session_id)
+        .is_some_and(|waiter| !waiter.response.is_closed())
+    {
+        let _request_may_have_disconnected = response.send(Err(conflict(
+            "the foreground session already has an active control connection",
+        )));
+        return;
+    }
+    foreground_controls.insert(
+        scope.session_id,
+        ForegroundControlWaiter { scope, response },
+    );
+}
+
+fn request_foreground_termination(
+    foreground_controls: &mut BTreeMap<SessionId, ForegroundControlWaiter>,
+    scopes: &[SessionScope],
+) {
+    for scope in scopes {
+        let Some(waiter) = foreground_controls.remove(&scope.session_id) else {
+            continue;
+        };
+        let result = if waiter.scope == *scope {
+            Ok(RpcResponse::ForegroundTerminationRequested {
+                session_id: scope.session_id,
+            })
+        } else {
+            Err(conflict(
+                "the foreground control connection has a stale session generation",
+            ))
+        };
+        let _foreground_may_have_disconnected = waiter.response.send(result);
+    }
+}
+
+fn release_foreground_control(
+    foreground_controls: &mut BTreeMap<SessionId, ForegroundControlWaiter>,
+    scope: SessionScope,
+) {
+    let Some(waiter) = foreground_controls.remove(&scope.session_id) else {
+        return;
+    };
+    let _foreground_may_have_disconnected =
+        waiter.response.send(Err(conflict(
+            "the foreground session ended without a process-control request",
+        )));
+}
+
+fn finish_shutdown_if_ready(
+    store: &mut Store,
+    run_id: RunId,
+    foreground: &mut ForegroundCoordination,
+) {
+    if foreground.pending_shutdown.is_none() {
+        return;
+    }
+    match active_foreground_scopes(store, run_id) {
+        Ok(scopes) if scopes.is_empty() => {
+            let pending = foreground
+                .pending_shutdown
+                .take()
+                .expect("the checked shutdown should still be pending");
+            let result = persist_shutdown(store, run_id, pending.operation_id)
+                .map_err(supervisor_rpc_failure);
+            let stopped = result.is_ok();
+            let mut delivered = false;
+            for response in pending.responses {
+                delivered |= response.send(result.clone()).is_ok();
+            }
+            if !delivered && stopped {
+                foreground.retire_without_response = true;
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let pending = foreground
+                .pending_shutdown
+                .take()
+                .expect("the checked shutdown should still be pending");
+            let failure = rpc_state_failure(error);
+            for response in pending.responses {
+                let _request_may_have_disconnected =
+                    response.send(Err(failure.clone()));
+            }
+        }
+    }
+}
+
+fn active_foreground_scopes(
+    store: &mut Store,
+    run_id: RunId,
+) -> Result<Vec<SessionScope>, StoreError> {
+    store.transaction(|repositories| {
+        Ok(repositories
+            .sessions(run_id)?
+            .into_iter()
+            .filter(|session| {
+                session.process_owner == SessionProcessOwner::Foreground
+                    && !session.state.is_terminal()
+            })
+            .map(|session| SessionScope {
+                run_id: session.run_id,
+                agent_id: session.agent_id,
+                session_id: session.id,
+                generation: session.generation,
+            })
+            .collect())
+    })
+}
+
+fn supervisor_rpc_failure(error: SupervisorError) -> RpcFailure {
+    match error {
+        SupervisorError::State(error) => rpc_state_failure(error),
+        error => RpcFailure::new(RpcFailureCode::Internal, error.to_string()),
     }
 }
 
@@ -819,6 +1331,8 @@ fn handle_command(
 struct LaunchIntent {
     agent_id: AgentId,
     session_id: SessionId,
+    generation: i64,
+    already_active: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -854,8 +1368,45 @@ fn execute_request(
 ) -> Result<RpcResponse, RpcFailure> {
     match request {
         RpcRequest::Ping => Ok(RpcResponse::Pong { run_id }),
-        RpcRequest::LaunchForeground { operation_id } => {
-            launch_foreground(store, sessions, run_id, caller, operation_id)
+        RpcRequest::LaunchForeground {
+            operation_id,
+            token,
+        } => launch_foreground(store, run_id, caller, operation_id, &token),
+        RpcRequest::ForegroundStarted { scope, process_id } => {
+            observe_foreground_started(store, run_id, caller, scope, process_id)
+        }
+        RpcRequest::WaitForegroundControl { .. } => Err(RpcFailure::new(
+            RpcFailureCode::Internal,
+            "foreground process control was routed through the wrong command path",
+        )),
+        RpcRequest::ForegroundExited {
+            scope,
+            code,
+            signal,
+        } => observe_foreground_ended(
+            store,
+            run_id,
+            caller,
+            scope,
+            ForegroundEnd::Exited { code, signal },
+        ),
+        RpcRequest::ForegroundLaunchFailed { scope } => {
+            observe_foreground_ended(
+                store,
+                run_id,
+                caller,
+                scope,
+                ForegroundEnd::LaunchFailed,
+            )
+        }
+        RpcRequest::ForegroundObservationLost { scope } => {
+            observe_foreground_ended(
+                store,
+                run_id,
+                caller,
+                scope,
+                ForegroundEnd::ObservationLost,
+            )
         }
         RpcRequest::Status => status(store, run_id, caller),
         RpcRequest::Whoami => whoami(store, run_id, caller),
@@ -945,10 +1496,10 @@ fn execute_request(
 
 fn launch_foreground(
     store: &mut Store,
-    sessions: &mut AgentSessionSupervisor<FakeProvider>,
     run_id: RunId,
     caller: &AuthenticatedCaller,
     operation_id: OperationId,
+    token: &AgentToken,
 ) -> Result<RpcResponse, RpcFailure> {
     require_operator(
         caller,
@@ -962,6 +1513,14 @@ fn launch_foreground(
             "the active archetype has no designated foreground role",
         )
     })?;
+    if role_launch_mode(role_definition.mode) != LaunchMode::Interactive {
+        return Err(RpcFailure::new(
+            RpcFailureCode::Internal,
+            "the designated foreground role is not interactive",
+        ));
+    }
+    let provider = role_definition.provider.to_owned();
+    let bootstrap_instruction = bootstrap_instruction(run_id, &role);
     let now = rpc_timestamp()?;
     let agent_id = AgentId::generate();
     let session_id = SessionId::generate();
@@ -979,27 +1538,109 @@ fn launch_foreground(
                 .agents(run_id)?
                 .into_iter()
                 .find(|agent| agent.role == role);
-            if let Some(agent) = existing {
-                return Ok(LaunchIntent {
-                    agent_id: agent.id,
-                    session_id: repositories
-                        .latest_session_for_agent(run_id, agent.id)?
-                        .map_or(session_id, |session| session.id),
-                });
-            }
-            repositories.insert_agent(&AgentRecord {
-                id: agent_id,
+            let (agent_id, generation) = if let Some(agent) = existing {
+                let latest = repositories
+                    .latest_session_for_agent(run_id, agent.id)?
+                    .ok_or_else(|| StoreError::CorruptAgentState {
+                        id: agent.id,
+                        reason: "the agent has no provider session".to_owned(),
+                    })?;
+                if !agent.state.is_terminal() {
+                    return Ok(LaunchIntent {
+                        agent_id: agent.id,
+                        session_id: latest.id,
+                        generation: agent.generation,
+                        already_active: true,
+                    });
+                }
+                let generation =
+                    agent.generation.checked_add(1).ok_or_else(|| {
+                        StoreError::CorruptAgentState {
+                            id: agent.id,
+                            reason: "the session generation is exhausted"
+                                .to_owned(),
+                        }
+                    })?;
+                if !repositories.start_agent_generation(
+                    run_id,
+                    agent.id,
+                    agent.generation,
+                    generation,
+                )? {
+                    return Err(StoreError::CorruptAgentState {
+                        id: agent.id,
+                        reason: "the terminal generation could not be replaced"
+                            .to_owned(),
+                    });
+                }
+                (agent.id, generation)
+            } else {
+                repositories.insert_agent(&AgentRecord {
+                    id: agent_id,
+                    run_id,
+                    role: role.clone(),
+                    generation: 0,
+                    state: LifecycleState::Starting,
+                    created_at: now,
+                })?;
+                repositories.append_event(&NewEvent {
+                    run_id,
+                    kind: EventKind::AgentCreated,
+                    actor: event_actor(caller),
+                    subject: agent_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(agent_id),
+                    task_id: None,
+                    operation_id: Some(operation_id),
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "generation": 0,
+                        "role": role,
+                        "state": LifecycleState::Starting.as_str(),
+                    }),
+                    summary: format!("Created foreground agent {agent_id}."),
+                    created_at: now,
+                })?;
+                (agent_id, 0)
+            };
+            let scope = SessionScope {
                 run_id,
-                role: role.clone(),
-                generation: 0,
+                agent_id,
+                session_id,
+                generation,
+            };
+            repositories.insert_session(&SessionRecord {
+                id: session_id,
+                run_id,
+                agent_id,
+                generation,
+                provider: provider.clone(),
+                provider_session_id: None,
+                reconciliation_state: ExternalResourceState::Desired,
                 state: LifecycleState::Starting,
+                transcript_path: TranscriptStore::relative_path(session_id),
                 created_at: now,
+                ended_at: None,
+                reconciled_at: None,
+                process_owner: SessionProcessOwner::Foreground,
             })?;
+            repositories.activate_session_credential(
+                &SessionCredentialRecord {
+                    session_id,
+                    run_id,
+                    agent_id,
+                    generation,
+                    token_verifier: token.verifier(scope),
+                    created_at: now,
+                    revoked_at: None,
+                },
+            )?;
             repositories.append_event(&NewEvent {
                 run_id,
-                kind: EventKind::AgentCreated,
+                kind: EventKind::SessionStarted,
                 actor: event_actor(caller),
-                subject: agent_id.to_string(),
+                subject: session_id.to_string(),
                 project_id: None,
                 agent_id: Some(agent_id),
                 task_id: None,
@@ -1007,47 +1648,391 @@ fn launch_foreground(
                 correlation_id: None,
                 causation_id: None,
                 data: json!({
-                    "generation": 0,
-                    "role": role,
+                    "generation": generation,
+                    "provider": provider,
                     "state": LifecycleState::Starting.as_str(),
                 }),
-                summary: format!("Created foreground agent {agent_id}."),
+                summary: format!(
+                    "Started session {session_id} for agent {agent_id}."
+                ),
+                created_at: now,
+            })?;
+            let claim = repositories.record_session_reconciliation_state(
+                scope,
+                ExternalResourceState::Unknown,
+                now,
+            )?;
+            if claim != SessionTransitionOutcome::Applied {
+                return Err(StoreError::CorruptAgentState {
+                    id: agent_id,
+                    reason: "the foreground launch intent could not be claimed"
+                        .to_owned(),
+                });
+            }
+            repositories.append_event(&NewEvent {
+                run_id,
+                kind: EventKind::SessionReconciliationChanged,
+                actor: event_actor(caller),
+                subject: session_id.to_string(),
+                project_id: None,
+                agent_id: Some(agent_id),
+                task_id: None,
+                operation_id: Some(operation_id),
+                correlation_id: None,
+                causation_id: None,
+                data: json!({
+                    "previous_state": ExternalResourceState::Desired.as_str(),
+                    "reason": "launch_claimed",
+                    "state": ExternalResourceState::Unknown.as_str(),
+                }),
+                summary: format!(
+                    "Claimed the provider launch for foreground session {session_id}."
+                ),
                 created_at: now,
             })?;
             Ok(LaunchIntent {
                 agent_id,
                 session_id,
+                generation,
+                already_active: false,
             })
         })
         .map_err(rpc_state_failure)?;
-    let intent = mutation_value(outcome);
-    let project = primary_project(store, run_id)?;
-    let launch = AgentLaunch {
-        scope: SessionScope {
-            run_id,
-            agent_id: intent.agent_id,
-            session_id: intent.session_id,
-            generation: 0,
-        },
-        role: role.clone(),
-        mode: role_launch_mode(role_definition.mode),
-        working_directory: project.canonical_path,
-        bootstrap_instruction: bootstrap_instruction(run_id, &role),
-        created_at: now,
+    let intent = match outcome {
+        MutationOutcome::Applied(intent) => intent,
+        MutationOutcome::Replayed(intent) => {
+            let scope = SessionScope {
+                run_id,
+                agent_id: intent.agent_id,
+                session_id: intent.session_id,
+                generation: intent.generation,
+            };
+            let replayable = store
+                .transaction(|repositories| {
+                    let session = repositories.session(intent.session_id)?;
+                    if matches!(
+                        session,
+                        Some(SessionRecord {
+                            reconciliation_state:
+                                ExternalResourceState::Desired,
+                            state: LifecycleState::Starting,
+                            ..
+                        })
+                    ) {
+                        repositories.replace_desired_session_credential(
+                            &SessionCredentialRecord {
+                                session_id: intent.session_id,
+                                run_id,
+                                agent_id: intent.agent_id,
+                                generation: intent.generation,
+                                token_verifier: token.verifier(scope),
+                                created_at: now,
+                                revoked_at: None,
+                            },
+                        )?;
+                        repositories.record_session_reconciliation_state(
+                            scope,
+                            ExternalResourceState::Unknown,
+                            now,
+                        )?;
+                        repositories.append_event(&NewEvent {
+                            run_id,
+                            kind: EventKind::SessionReconciliationChanged,
+                            actor: event_actor(caller),
+                            subject: intent.session_id.to_string(),
+                            project_id: None,
+                            agent_id: Some(intent.agent_id),
+                            task_id: None,
+                            operation_id: Some(operation_id),
+                            correlation_id: None,
+                            causation_id: None,
+                            data: json!({
+                                "previous_state": ExternalResourceState::Desired.as_str(),
+                                "reason": "launch_claimed",
+                                "state": ExternalResourceState::Unknown.as_str(),
+                            }),
+                            summary: format!(
+                                "Claimed the provider launch for foreground session {}.",
+                                intent.session_id
+                            ),
+                            created_at: now,
+                        })?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                })
+                .map_err(rpc_state_failure)?;
+            if !replayable {
+                return Err(conflict(format!(
+                    "foreground operation `{operation_id}` has already attempted its provider launch"
+                )));
+            }
+            intent
+        }
     };
-    if let Some(launched) = sessions
-        .ensure_existing_launch(store, &launch, None)
-        .map_err(rpc_session_failure)?
-    {
-        debug_assert_eq!(launched.scope, launch.scope);
-        let _provider_token = launched.token;
+    if intent.already_active {
+        return Err(conflict(format!(
+            "foreground session `{}` is already active",
+            intent.session_id
+        )));
     }
-    drain_fake_events(sessions, store, intent.session_id, now)?;
-    Ok(RpcResponse::ForegroundLaunched {
+    Ok(RpcResponse::ForegroundPrepared {
         run_id,
         agent: summary_for_agent(store, run_id, intent.agent_id)?,
         session_id: intent.session_id,
+        generation: intent.generation,
+        bootstrap_instruction,
     })
+}
+
+fn observe_foreground_started(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    scope: SessionScope,
+    process_id: u32,
+) -> Result<RpcResponse, RpcFailure> {
+    require_operator(
+        caller,
+        "only the foreground operator can report provider startup",
+    )?;
+    require_foreground_scope(store, run_id, scope)?;
+    let observed_at = rpc_timestamp()?;
+    let provider_session_id = format!("process:{process_id}");
+    store
+        .transaction(|repositories| {
+            let session =
+                repositories.session(scope.session_id)?.ok_or_else(|| {
+                    StoreError::CorruptAgentState {
+                        id: scope.agent_id,
+                        reason: "the foreground session disappeared".to_owned(),
+                    }
+                })?;
+            let reconciliation = repositories
+                .record_session_launch_observation(
+                    scope,
+                    &provider_session_id,
+                    observed_at,
+                )?;
+            if reconciliation == SessionTransitionOutcome::Applied {
+                repositories.append_event(&NewEvent {
+                    run_id,
+                    kind: EventKind::SessionReconciliationChanged,
+                    actor: "foreground".to_owned(),
+                    subject: scope.session_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "previous_state": session.reconciliation_state.as_str(),
+                        "provider_session_id": provider_session_id,
+                        "state": ExternalResourceState::Observed.as_str(),
+                    }),
+                    summary: format!(
+                        "Observed foreground provider session {}.",
+                        scope.session_id
+                    ),
+                    created_at: observed_at,
+                })?;
+            }
+            record_foreground_lifecycle(
+                repositories,
+                &session,
+                scope,
+                LifecycleState::Running,
+                json!({"process_id": process_id}),
+                observed_at,
+            )?;
+            Ok(())
+        })
+        .map_err(rpc_state_failure)?;
+    Ok(RpcResponse::ForegroundObserved {
+        session_id: scope.session_id,
+        state: LifecycleState::Running.as_str().to_owned(),
+    })
+}
+
+enum ForegroundEnd {
+    Exited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+    LaunchFailed,
+    ObservationLost,
+}
+
+fn observe_foreground_ended(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    scope: SessionScope,
+    end: ForegroundEnd,
+) -> Result<RpcResponse, RpcFailure> {
+    require_operator(
+        caller,
+        "only the foreground operator can report provider state",
+    )?;
+    require_foreground_scope(store, run_id, scope)?;
+    let observed_at = rpc_timestamp()?;
+    let (reconciliation, lifecycle, details) = match end {
+        ForegroundEnd::Exited { code, signal } => (
+            ExternalResourceState::Observed,
+            LifecycleState::Exited,
+            json!({"code": code, "signal": signal}),
+        ),
+        ForegroundEnd::LaunchFailed => (
+            ExternalResourceState::Lost,
+            LifecycleState::Lost,
+            json!({"reason": "launch_failed"}),
+        ),
+        ForegroundEnd::ObservationLost => (
+            ExternalResourceState::Unknown,
+            LifecycleState::Unknown,
+            json!({"reason": "observation_failed"}),
+        ),
+    };
+    store
+        .transaction(|repositories| {
+            let session = repositories
+                .session(scope.session_id)?
+                .ok_or_else(|| StoreError::CorruptAgentState {
+                    id: scope.agent_id,
+                    reason: "the foreground session disappeared".to_owned(),
+                })?;
+            let transition = repositories
+                .record_session_reconciliation_state(
+                    scope,
+                    reconciliation,
+                    observed_at,
+                )?;
+            if transition == SessionTransitionOutcome::Applied {
+                repositories.append_event(&NewEvent {
+                    run_id,
+                    kind: EventKind::SessionReconciliationChanged,
+                    actor: "foreground".to_owned(),
+                    subject: scope.session_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(scope.agent_id),
+                    task_id: None,
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "previous_state": session.reconciliation_state.as_str(),
+                        "state": reconciliation.as_str(),
+                    }),
+                    summary: format!(
+                        "Foreground session {} reconciliation changed from {} to {}.",
+                        scope.session_id,
+                        session.reconciliation_state,
+                        reconciliation,
+                    ),
+                    created_at: observed_at,
+                })?;
+            }
+            record_foreground_lifecycle(
+                repositories,
+                &session,
+                scope,
+                lifecycle,
+                details,
+                observed_at,
+            )?;
+            Ok(())
+        })
+        .map_err(rpc_state_failure)?;
+    Ok(RpcResponse::ForegroundObserved {
+        session_id: scope.session_id,
+        state: lifecycle.as_str().to_owned(),
+    })
+}
+
+fn require_foreground_scope(
+    store: &mut Store,
+    run_id: RunId,
+    scope: SessionScope,
+) -> Result<(), RpcFailure> {
+    let session = store
+        .transaction(|repositories| repositories.session(scope.session_id))
+        .map_err(rpc_state_failure)?
+        .ok_or_else(|| not_found("the foreground session does not exist"))?;
+    if scope.run_id != run_id
+        || session.run_id != scope.run_id
+        || session.agent_id != scope.agent_id
+        || session.generation != scope.generation
+        || session.provider != "codex"
+    {
+        return Err(conflict(
+            "the foreground observation does not match its session generation",
+        ));
+    }
+    Ok(())
+}
+
+fn record_foreground_lifecycle(
+    repositories: &crate::state::Repositories<'_, '_>,
+    session: &SessionRecord,
+    scope: SessionScope,
+    lifecycle: LifecycleState,
+    details: serde_json::Value,
+    observed_at: i64,
+) -> Result<(), StoreError> {
+    let outcome =
+        repositories.record_session_lifecycle(scope, lifecycle, observed_at)?;
+    if outcome != SessionTransitionOutcome::Applied {
+        return Ok(());
+    }
+    let session_event = repositories.append_event(&NewEvent {
+        run_id: scope.run_id,
+        kind: EventKind::SessionLifecycleChanged,
+        actor: "foreground".to_owned(),
+        subject: scope.session_id.to_string(),
+        project_id: None,
+        agent_id: Some(scope.agent_id),
+        task_id: None,
+        operation_id: None,
+        correlation_id: None,
+        causation_id: None,
+        data: json!({
+            "details": details,
+            "generation": scope.generation,
+            "previous_state": session.state.as_str(),
+            "provider": session.provider,
+            "state": lifecycle.as_str(),
+        }),
+        summary: format!(
+            "Foreground session {} changed from {} to {}.",
+            scope.session_id, session.state, lifecycle
+        ),
+        created_at: observed_at,
+    })?;
+    repositories.append_event(&NewEvent {
+        run_id: scope.run_id,
+        kind: EventKind::AgentLifecycleChanged,
+        actor: "foreground".to_owned(),
+        subject: scope.agent_id.to_string(),
+        project_id: None,
+        agent_id: Some(scope.agent_id),
+        task_id: None,
+        operation_id: None,
+        correlation_id: Some(session_event.id),
+        causation_id: Some(session_event.id),
+        data: json!({
+            "generation": scope.generation,
+            "previous_state": session.state.as_str(),
+            "state": lifecycle.as_str(),
+        }),
+        summary: format!(
+            "Foreground agent {} changed from {} to {}.",
+            scope.agent_id, session.state, lifecycle
+        ),
+        created_at: observed_at,
+    })?;
+    Ok(())
 }
 
 fn status(
@@ -2140,23 +3125,6 @@ fn task_counts(tasks: &[TaskRecord]) -> TaskCounts {
     counts
 }
 
-fn primary_project(
-    store: &mut Store,
-    run_id: RunId,
-) -> Result<ProjectRecord, RpcFailure> {
-    store
-        .transaction(|repositories| {
-            repositories.project_by_alias(run_id, "primary")
-        })
-        .map_err(rpc_state_failure)?
-        .ok_or_else(|| {
-            RpcFailure::new(
-                RpcFailureCode::Internal,
-                "the run has no primary project",
-            )
-        })
-}
-
 fn available_commands(
     store: &mut Store,
     run_id: RunId,
@@ -2364,6 +3332,7 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         | StoreError::ModifiedMigration { .. }
         | StoreError::UnsupportedSchema { .. }
         | StoreError::MissingOperationResult { .. }
+        | StoreError::CorruptAgentState { .. }
         | StoreError::CorruptTaskState { .. }
         | StoreError::CorruptAssignmentState { .. }
         | StoreError::CredentialAlreadyRevoked { .. }
@@ -2618,6 +3587,7 @@ fn validate_socket_path(path: PathBuf) -> Result<PathBuf, SupervisorError> {
 pub(crate) struct SupervisorClient {
     stream: UnixStream,
     run_id: crate::id::RunId,
+    project_id: ProjectId,
     next_request_id: u64,
     authentication: RequestAuthentication,
 }
@@ -2695,6 +3665,7 @@ impl SupervisorClient {
                 Ok(Self {
                     stream,
                     run_id: response.run_id,
+                    project_id: response.project_id,
                     next_request_id: 1,
                     authentication,
                 })
@@ -2712,6 +3683,11 @@ impl SupervisorClient {
     #[must_use]
     pub(crate) fn run_id(&self) -> crate::id::RunId {
         self.run_id
+    }
+
+    #[must_use]
+    pub(crate) fn project_id(&self) -> ProjectId {
+        self.project_id
     }
 
     pub(crate) async fn ping(
@@ -2883,7 +3859,7 @@ async fn serve_connection(
                 Err(failure) => (RpcResult::Err(failure), false),
             }
         };
-        write_frame(
+        let write_result = write_frame(
             &mut stream,
             &ServerMessage::Response(VersionedResponse {
                 protocol_version: PROTOCOL_VERSION,
@@ -2891,14 +3867,16 @@ async fn serve_connection(
                 result,
             }),
         )
-        .await?;
+        .await;
         if shutting_down {
             shutdown
                 .send(())
                 .await
                 .map_err(|_| SupervisorError::ShutdownChannelClosed)?;
+            write_result?;
             return Ok(());
         }
+        write_result?;
     }
 }
 
@@ -3123,6 +4101,10 @@ pub(crate) enum SupervisorError {
     )]
     ForegroundOperationIdWithCommand,
     #[error(
+        "`--json` is unavailable for the interactive foreground launch because Codex owns the terminal streams"
+    )]
+    ForegroundJsonOutputUnsupported,
+    #[error(
         "agent identity requires `COTERIE_AGENT_ID`, `COTERIE_SESSION_ID`, and `COTERIE_TOKEN`"
     )]
     IncompleteAgentEnvironment,
@@ -3231,6 +4213,9 @@ impl SupervisorError {
             Self::ForegroundOperationIdWithCommand => {
                 crate::cli::ErrorCode::InvalidArgument
             }
+            Self::ForegroundJsonOutputUnsupported => {
+                crate::cli::ErrorCode::InvalidArgument
+            }
             Self::IncompleteAgentEnvironment
             | Self::InvalidAgentEnvironment { .. }
             | Self::AgentEnvironmentRunMismatch { .. } => {
@@ -3251,6 +4236,11 @@ impl SupervisorError {
             | Self::ShutdownTimeout { .. } => {
                 crate::cli::ErrorCode::Unavailable
             }
+            Self::Session(
+                AgentSessionError::Provider(_)
+                | AgentSessionError::IncompatibleProvider { .. }
+                | AgentSessionError::MissingCapability { .. },
+            ) => crate::cli::ErrorCode::Unavailable,
             Self::Project(_)
             | Self::Session(_)
             | Self::Workspace(_)
@@ -3301,8 +4291,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        SupervisorClient, SupervisorCommand, SupervisorError, persist_shutdown,
-        runtime_sessions, runtime_workspaces, serve_connection, serve_listener,
+        AuthenticatedCaller, SupervisorClient, SupervisorCommand,
+        SupervisorError, launch_foreground, persist_shutdown, runtime_sessions,
+        runtime_workspaces, serve_connection, serve_listener,
         validate_handshake, validate_socket_path,
     };
     use crate::auth::{AgentToken, SessionScope};
@@ -3316,7 +4307,7 @@ mod tests {
     use crate::providers::LifecycleState;
     use crate::state::{
         AgentRecord, ProjectRecord, RunRecord, SessionCredentialRecord,
-        SessionRecord, Store, StoreError,
+        SessionProcessOwner, SessionRecord, Store, StoreError,
     };
     use crate::tasks::TaskStatus;
 
@@ -3476,6 +4467,13 @@ mod tests {
                 .code,
             RpcFailureCode::RunMismatch
         );
+        request.protocol_version = 1;
+        assert_eq!(
+            validate_handshake(&request, &active)
+                .expect("the previous wire version should be rejected")
+                .code,
+            RpcFailureCode::ProtocolVersionMismatch
+        );
         request.protocol_version = crate::protocol::PROTOCOL_VERSION + 1;
         assert_eq!(
             validate_handshake(&request, &active)
@@ -3594,6 +4592,7 @@ mod tests {
                     created_at: 12,
                     ended_at: None,
                     reconciled_at: Some(12),
+                    process_owner: SessionProcessOwner::Supervisor,
                 })?;
                 repositories.activate_session_credential(
                     &SessionCredentialRecord {
@@ -3741,26 +4740,34 @@ mod tests {
         let launch = operator
             .request(RpcRequest::LaunchForeground {
                 operation_id: launch_operation,
+                token: AgentToken::generate()
+                    .expect("the lead token should be generated"),
             })
             .await
-            .expect("the fake lead should launch");
-        let (lead_id, lead_session_id) = match launch {
-            RpcResponse::ForegroundLaunched {
+            .expect("the foreground lead should be prepared");
+        let lead_scope = match launch {
+            RpcResponse::ForegroundPrepared {
                 run_id,
                 agent,
                 session_id,
+                generation,
+                ..
             } => {
                 assert_eq!(run_id, active.run_id);
                 assert_eq!(agent.name, "lead");
-                (agent.id, session_id)
+                SessionScope {
+                    run_id,
+                    agent_id: agent.id,
+                    session_id,
+                    generation,
+                }
             }
             response => panic!("unexpected launch response: {response:?}"),
         };
-        let lead_credential = credential_rx
-            .recv()
-            .expect("the fake lead should receive a credential");
-        assert_eq!(lead_credential.scope.agent_id, lead_id);
-        assert_eq!(lead_credential.scope.session_id, lead_session_id);
+        operator
+            .request(RpcRequest::ForegroundLaunchFailed { scope: lead_scope })
+            .await
+            .expect("the unlaunched foreground fixture should become terminal");
 
         let task = operator
             .request(RpcRequest::TaskCreate {
@@ -4042,15 +5049,14 @@ mod tests {
             reconnected
                 .request(RpcRequest::LaunchForeground {
                     operation_id: launch_operation,
+                    token: AgentToken::generate()
+                        .expect("the retry token should be generated"),
                 })
                 .await,
-            Ok(RpcResponse::ForegroundLaunched {
-                run_id,
-                ref agent,
-                session_id,
-            }) if run_id == active.run_id
-                && agent.id == lead_id
-                && session_id == lead_session_id
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::Conflict,
+                ..
+            })
         ));
         assert!(matches!(
             reconnected.request(RpcRequest::TaskReady).await,
@@ -4142,6 +5148,76 @@ mod tests {
             Err(SupervisorError::State(StoreError::RunNotActive { id }))
                 if id == run_id
         ));
+    }
+
+    #[test]
+    fn a_prepared_foreground_launch_is_claimed_before_its_response() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })
+            })
+            .expect("the active run should be inserted");
+        let operation_id = OperationId::generate();
+        let first_token =
+            AgentToken::generate().expect("the token should be generated");
+
+        let first = launch_foreground(
+            &mut store,
+            run_id,
+            &AuthenticatedCaller::Operator,
+            operation_id,
+            &first_token,
+        )
+        .expect("the first caller should claim the launch");
+        let scope = match first {
+            RpcResponse::ForegroundPrepared {
+                agent,
+                session_id,
+                generation,
+                ..
+            } => SessionScope {
+                run_id,
+                agent_id: agent.id,
+                session_id,
+                generation,
+            },
+            response => panic!("unexpected launch response: {response:?}"),
+        };
+
+        let retry_token = AgentToken::generate()
+            .expect("the retry token should be generated");
+        let retry = launch_foreground(
+            &mut store,
+            run_id,
+            &AuthenticatedCaller::Operator,
+            operation_id,
+            &retry_token,
+        )
+        .expect_err("the claimed launch must not be replayed");
+        assert_eq!(retry.code, RpcFailureCode::Conflict);
+        store
+            .transaction(|repositories| {
+                let credential = repositories
+                    .active_session_credential(
+                        run_id,
+                        scope.agent_id,
+                        scope.session_id,
+                    )?
+                    .expect(
+                        "the claimed launch credential should remain active",
+                    );
+                assert!(credential.token_verifier.verify(&first_token, scope));
+                assert!(!credential.token_verifier.verify(&retry_token, scope));
+                Ok(())
+            })
+            .expect("the launch credential should be inspectable");
     }
 
     fn entry(project: &std::path::Path) -> ActiveRunEntry {

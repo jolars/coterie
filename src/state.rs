@@ -55,6 +55,13 @@ const MIGRATIONS: &[Migration] = &[
             "state/migrations/0005_external_resource_reconciliation.sql"
         ),
     },
+    Migration {
+        version: 6,
+        name: "session_process_ownership",
+        sql: include_str!(
+            "state/migrations/0006_session_process_ownership.sql"
+        ),
+    },
 ];
 
 #[derive(Debug)]
@@ -96,6 +103,10 @@ pub(crate) enum StoreError {
     /// A completed operation did not contain the result required for replay.
     #[error("completed operation `{id}` has no durable result")]
     MissingOperationResult { id: OperationId },
+
+    /// An agent record violates a lifecycle invariant.
+    #[error("agent `{id}` has corrupt lifecycle state: {reason}")]
+    CorruptAgentState { id: AgentId, reason: String },
 
     /// Related task, claim, and assignment records violate a lifecycle invariant.
     #[error("task `{id}` has corrupt lifecycle state: {reason}")]
@@ -199,7 +210,41 @@ pub(crate) struct SessionRecord {
     pub(crate) created_at: i64,
     pub(crate) ended_at: Option<i64>,
     pub(crate) reconciled_at: Option<i64>,
+    pub(crate) process_owner: SessionProcessOwner,
 }
+
+/// The Coterie process responsible for controlling one provider execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SessionProcessOwner {
+    Supervisor,
+    Foreground,
+}
+
+impl SessionProcessOwner {
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Supervisor => "supervisor",
+            Self::Foreground => "foreground",
+        }
+    }
+}
+
+impl std::str::FromStr for SessionProcessOwner {
+    type Err = InvalidSessionProcessOwner;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "supervisor" => Ok(Self::Supervisor),
+            "foreground" => Ok(Self::Foreground),
+            _ => Err(InvalidSessionProcessOwner(value.to_owned())),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+#[error("unknown session process owner `{0}`")]
+pub(crate) struct InvalidSessionProcessOwner(String);
 
 /// Durable knowledge about an external side effect owned by Coterie.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1278,6 +1323,31 @@ impl Repositories<'_, '_> {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Starts a replacement session generation only after the previous one is terminal.
+    pub(crate) fn start_agent_generation(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        current_generation: i64,
+        next_generation: i64,
+    ) -> Result<bool, StoreError> {
+        let Some(agent) = self.agent(agent_id)? else {
+            return Ok(false);
+        };
+        if agent.run_id != run_id
+            || agent.generation != current_generation
+            || !agent.state.is_terminal()
+        {
+            return Ok(false);
+        }
+        let changed = self.transaction.execute(
+            "UPDATE agents SET generation = ?3, state = 'starting' \
+             WHERE id = ?1 AND run_id = ?2 AND generation = ?4",
+            params![agent_id, run_id, next_generation, current_generation],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub(crate) fn insert_session(
         &self,
         session: &SessionRecord,
@@ -1286,8 +1356,8 @@ impl Repositories<'_, '_> {
             "INSERT INTO sessions (\
                  id, run_id, agent_id, generation, provider, provider_session_id, \
                  reconciliation_state, state, transcript_path, created_at, ended_at, \
-                 reconciled_at\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 reconciled_at, process_owner\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 session.id,
                 session.run_id,
@@ -1301,6 +1371,7 @@ impl Repositories<'_, '_> {
                 session.created_at,
                 session.ended_at,
                 session.reconciled_at,
+                session.process_owner.as_str(),
             ],
         )?;
         Ok(())
@@ -1315,7 +1386,7 @@ impl Repositories<'_, '_> {
             .query_row(
                 "SELECT id, run_id, agent_id, generation, provider, provider_session_id, \
                         reconciliation_state, state, transcript_path, created_at, ended_at, \
-                        reconciled_at \
+                        reconciled_at, process_owner \
                  FROM sessions WHERE id = ?1",
                 [id],
                 |row| {
@@ -1334,6 +1405,7 @@ impl Repositories<'_, '_> {
                         created_at: row.get(9)?,
                         ended_at: row.get(10)?,
                         reconciled_at: row.get(11)?,
+                        process_owner: decode_session_process_owner(row, 12)?,
                     })
                 },
             )
@@ -1350,7 +1422,7 @@ impl Repositories<'_, '_> {
             .query_row(
                 "SELECT id, run_id, agent_id, generation, provider, provider_session_id, \
                         reconciliation_state, state, transcript_path, created_at, ended_at, \
-                        reconciled_at \
+                        reconciled_at, process_owner \
                  FROM sessions WHERE run_id = ?1 AND agent_id = ?2 \
                  ORDER BY generation DESC LIMIT 1",
                 params![run_id, agent_id],
@@ -1370,6 +1442,7 @@ impl Repositories<'_, '_> {
                         created_at: row.get(9)?,
                         ended_at: row.get(10)?,
                         reconciled_at: row.get(11)?,
+                        process_owner: decode_session_process_owner(row, 12)?,
                     })
                 },
             )
@@ -1383,7 +1456,7 @@ impl Repositories<'_, '_> {
         let mut statement = self.transaction.prepare(
             "SELECT id, run_id, agent_id, generation, provider, provider_session_id, \
                     reconciliation_state, state, transcript_path, created_at, ended_at, \
-                    reconciled_at \
+                    reconciled_at, process_owner \
              FROM sessions WHERE run_id = ?1 ORDER BY created_at, rowid",
         )?;
         let rows = statement.query_map([run_id], |row| {
@@ -1400,6 +1473,7 @@ impl Repositories<'_, '_> {
                 created_at: row.get(9)?,
                 ended_at: row.get(10)?,
                 reconciled_at: row.get(11)?,
+                process_owner: decode_session_process_owner(row, 12)?,
             })
         })?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
@@ -3131,6 +3205,20 @@ fn decode_external_resource_state(
     })
 }
 
+fn decode_session_process_owner(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<SessionProcessOwner> {
+    let encoded = row.get::<_, String>(index)?;
+    encoded.parse().map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            Type::Text,
+            Box::new(error),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -3149,9 +3237,10 @@ mod tests {
         ConfigurationSnapshotRecord, DependencyRecord, EventRecord,
         ExternalResourceState, MIGRATIONS, MessageRecord, Mutation,
         MutationOutcome, OperationRecord, ProjectRecord, RunRecord,
-        SessionCredentialRecord, SessionRecord, SessionTransitionOutcome,
-        Store, TaskGroupRecord, TaskRecord, TaskTransitionMutation,
-        TaskTransitionRejection, TaskTransitionResult, WorkspaceRecord,
+        SessionCredentialRecord, SessionProcessOwner, SessionRecord,
+        SessionTransitionOutcome, Store, TaskGroupRecord, TaskRecord,
+        TaskTransitionMutation, TaskTransitionRejection, TaskTransitionResult,
+        WorkspaceRecord,
     };
     use crate::auth::{AgentToken, SessionScope};
     use crate::id::{
@@ -4226,6 +4315,15 @@ mod tests {
                     ],
                 )
                 .expect("the prior session should be inserted");
+            if prior_count >= 5 {
+                connection
+                    .execute(
+                        "UPDATE sessions SET provider_session_id = 'process:123' \
+                         WHERE id = ?1",
+                        [SESSION_ID],
+                    )
+                    .expect("the prior foreground process identity should be set");
+            }
             drop(connection);
 
             let store =
@@ -4279,12 +4377,28 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .expect("prior sessions should remain readable");
+            let process_owner = store
+                .connection
+                .query_row(
+                    "SELECT process_owner FROM sessions WHERE id = ?1",
+                    [SESSION_ID],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("the migrated process owner should be readable");
 
             assert_eq!(applied, MIGRATIONS.len() as i64);
             assert_eq!(credential_table, 1);
             assert_eq!(claim_indexes, 3);
             assert_eq!(message_triggers, 3);
             assert_eq!(preserved_sessions, 1);
+            assert_eq!(
+                process_owner,
+                if prior_count >= 5 {
+                    "foreground"
+                } else {
+                    "supervisor"
+                }
+            );
         }
     }
 
@@ -5097,6 +5211,7 @@ mod tests {
                     created_at: 14,
                     ended_at: None,
                     reconciled_at: Some(14),
+                    process_owner: SessionProcessOwner::Supervisor,
                 },
                 credential: SessionCredentialRecord {
                     run_id,

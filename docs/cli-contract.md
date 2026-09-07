@@ -6,9 +6,12 @@ output, retry behavior, authentication, and process exit codes.
 ## Commands
 
 Running `coterie` without a subcommand starts a supervisor when necessary and
-launches or reconnects to the foreground agent. During M2, foreground and
-background sessions use the deterministic fake provider; this exercises the
-complete command and persistence boundary without model access.
+launches the foreground Codex TUI in the project directory. Codex inherits the
+terminal streams, so Coterie does not print a wrapper response around the TUI.
+Coterie supplies its orchestration bootstrap through Codex's
+`developer_instructions` setting; Codex otherwise performs its normal project
+instruction discovery, including the repository's `AGENTS.md`. Background
+sessions continue to use the deterministic fake provider during this M3 slice.
 
 The minimum delegation commands are:
 
@@ -57,6 +60,10 @@ and standard error remains empty. A failed response goes to standard error,
 and standard output remains empty. Human-readable diagnostics also go to
 standard error, but do not share a stream with successful JSON.
 
+The interactive foreground launch does not accept `--json`, because Codex owns
+its standard streams for the lifetime of the TUI. Coterie rejects that
+combination before creating a run.
+
 Every response contains `"schema_version": 1`. A read-only success places its
 command-specific result under `data`:
 
@@ -92,7 +99,9 @@ The generated JSON Schemas are:
 Every mutating CLI command accepts the common
 `--operation-id <co-ULID>` option. If it is omitted, the CLI generates an
 operation ID before dispatch. The RPC request carries that ID, and every
-response after allocation returns it. A programmatic caller retries an
+Coterie-rendered response after allocation returns it. The foreground launch
+uses its operation ID to prepare the durable session, but emits no wrapper
+response while Codex owns the terminal. A programmatic caller retries an
 uncertain mutation with the same ID. Read-only commands neither accept nor
 return an operation ID.
 

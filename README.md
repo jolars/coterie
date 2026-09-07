@@ -5,9 +5,9 @@
 [![docs.rs](https://img.shields.io/docsrs/coterie)](https://docs.rs/coterie)
 
 > [!WARNING]
-> Coterie is under active development. The M2 command loop currently uses a
-> deterministic fake provider. M3 now probes Codex compatibility, but Codex
-> process launch and Git worktree integration remain under development.
+> Coterie is under active development. The foreground now launches an
+> interactive Codex session, but background workers still use the deterministic
+> fake provider, and Git worktree integration remains under development.
 
 Coterie is a project-native Rust CLI for coordinating coding agents. It will
 keep orchestration mechanics, durable state, workspaces, and policy enforcement
@@ -17,10 +17,11 @@ providers.
 The current platform target is Linux, developed on NixOS and tested on Ubuntu.
 
 The current command slice can launch or reconnect to a durable local run,
-inspect its state, create and close tasks, spawn fake workers, finish
-assignments, exchange durable messages, read transcripts and events, and stop
-the run. Run `coterie --help` for the generated command reference; see the
-[CLI contract](docs/cli-contract.md) for programmatic output and retry rules.
+open its foreground Codex TUI, inspect durable state, create and close tasks,
+spawn fake workers, finish assignments, exchange durable messages, read
+transcripts and events, and stop the run. Run `coterie --help` for the generated
+command reference; see the [CLI contract](docs/cli-contract.md) for
+programmatic output and retry rules.
 
 ## Development
 

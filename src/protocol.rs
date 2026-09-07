@@ -14,7 +14,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 1;
+pub(crate) const PROTOCOL_VERSION: u16 = 2;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -72,6 +72,25 @@ pub(crate) enum RpcRequest {
     Ping,
     LaunchForeground {
         operation_id: OperationId,
+        token: AgentToken,
+    },
+    ForegroundStarted {
+        scope: crate::auth::SessionScope,
+        process_id: u32,
+    },
+    WaitForegroundControl {
+        scope: crate::auth::SessionScope,
+    },
+    ForegroundExited {
+        scope: crate::auth::SessionScope,
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
+    ForegroundLaunchFailed {
+        scope: crate::auth::SessionScope,
+    },
+    ForegroundObservationLost {
+        scope: crate::auth::SessionScope,
     },
     Status,
     Whoami,
@@ -175,9 +194,18 @@ pub(crate) enum RpcResponse {
     Pong {
         run_id: RunId,
     },
-    ForegroundLaunched {
+    ForegroundPrepared {
         run_id: RunId,
         agent: AgentSummary,
+        session_id: SessionId,
+        generation: i64,
+        bootstrap_instruction: String,
+    },
+    ForegroundObserved {
+        session_id: SessionId,
+        state: String,
+    },
+    ForegroundTerminationRequested {
         session_id: SessionId,
     },
     Status {
@@ -451,8 +479,8 @@ mod tests {
 
     use super::{
         ClientMessage, ConnectionChannel, FrameError, HandshakeRequest,
-        MAXIMUM_FRAME_LENGTH, RequestAuthentication, RpcRequest,
-        VersionedRequest, read_frame, write_frame,
+        MAXIMUM_FRAME_LENGTH, PROTOCOL_VERSION, RequestAuthentication,
+        RpcRequest, VersionedRequest, read_frame, write_frame,
     };
     use crate::auth::AgentToken;
     use crate::id::{AgentId, OperationId, RunId, SessionId};
@@ -466,7 +494,7 @@ mod tests {
             .parse::<OperationId>()
             .expect("valid operation ID");
         let message = ClientMessage::Request(VersionedRequest {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             request_id: 7,
             authentication: RequestAuthentication::Operator,
             request: RpcRequest::Shutdown { operation_id },
@@ -477,7 +505,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -497,7 +525,7 @@ mod tests {
     async fn versioned_typed_frames_round_trip_without_delimiter_ambiguity() {
         let (mut writer, mut reader) = duplex(4096);
         let message = ClientMessage::Handshake(HandshakeRequest {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             expected_run_id: RUN_ID.parse::<RunId>().expect("valid run ID"),
             project_key: ProjectKey::from_hex(
                 "8da92545f14c259a7e013179f6d9709517f20fe830df519c48e21d393f53f7a5",
@@ -520,7 +548,7 @@ mod tests {
     async fn request_envelopes_preserve_ids_and_typed_methods() {
         let (mut writer, mut reader) = duplex(4096);
         let message = ClientMessage::Request(VersionedRequest {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             request_id: 42,
             authentication: RequestAuthentication::Operator,
             request: RpcRequest::Ping,
@@ -546,7 +574,7 @@ mod tests {
                 .parse()
                 .expect("valid token");
         let message = ClientMessage::Request(VersionedRequest {
-            protocol_version: 1,
+            protocol_version: PROTOCOL_VERSION,
             request_id: 9,
             authentication: RequestAuthentication::Agent {
                 agent_id: "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX"
@@ -565,7 +593,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 1,
+                    "protocol_version": 2,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

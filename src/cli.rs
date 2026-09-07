@@ -22,7 +22,7 @@ use crate::id::OperationId;
     about = "Project-native orchestration for coding agents"
 )]
 pub(crate) struct Arguments {
-    /// Emit the versioned machine-readable response.
+    /// Emit the versioned machine-readable response for a subcommand.
     #[arg(long, global = true)]
     pub(crate) json: bool,
 

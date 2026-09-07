@@ -1,17 +1,33 @@
 //! Out-of-process agent harness adapters.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fmt;
-use std::io;
+use std::future::{Future, pending};
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
+use std::thread;
+use std::time::Duration;
 
+use nix::errno::Errno;
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use semver::Version;
+use signal_hook::consts::signal::{
+    SIGHUP, SIGINT, SIGKILL, SIGQUIT, SIGTERM, SIGWINCH,
+};
+use signal_hook::iterator::SignalsInfo;
+use signal_hook::iterator::exfiltrator::WithOrigin;
+use signal_hook::iterator::exfiltrator::origin::Origin;
+use signal_hook::low_level::siginfo::Cause;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::time::{Instant, sleep_until};
 
-use crate::auth::SessionScope;
+use crate::auth::{AgentToken, SessionScope};
+use crate::id::ProjectId;
 
 /// A provider feature that Coterie must verify before depending on it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -68,6 +84,134 @@ pub(crate) struct LaunchSpecification {
     pub(crate) scope: SessionScope,
     pub(crate) working_directory: PathBuf,
     pub(crate) bootstrap_instruction: String,
+}
+
+/// Session identity exposed to one foreground provider process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InteractiveEnvironment {
+    pub(crate) project_id: ProjectId,
+    pub(crate) primary_project_root: PathBuf,
+    pub(crate) role: String,
+    pub(crate) socket_path: PathBuf,
+    pub(crate) token: AgentToken,
+}
+
+/// One foreground Codex process whose terminal is owned by the caller.
+pub(crate) struct CodexInteractiveProcess {
+    child: tokio::process::Child,
+    inherited_terminal: bool,
+    signals: SignalMonitor,
+}
+
+impl CodexInteractiveProcess {
+    #[must_use]
+    pub(crate) fn process_id(&self) -> u32 {
+        self.child
+            .id()
+            .expect("a running Tokio child retains its process ID")
+    }
+
+    pub(crate) fn terminate(&self) -> Result<(), ProviderError> {
+        forward_signal(self.process_id(), SIGTERM)
+    }
+
+    pub(crate) async fn wait_until_termination<F>(
+        mut self,
+        termination: F,
+    ) -> Result<(std::process::ExitStatus, bool), ProviderError>
+    where
+        F: Future<Output = ()>,
+    {
+        let mut termination = Box::pin(termination);
+        let mut termination_requested = false;
+        let mut kill_deadline = None;
+        loop {
+            tokio::select! {
+                status = self.child.wait() => {
+                    return status
+                        .map(|status| (status, termination_requested))
+                        .map_err(ProviderError::InteractiveWait);
+                }
+                signal = self.signals.receiver.recv() => {
+                    let signal = signal.ok_or(
+                        ProviderError::SignalMonitorClosed,
+                    )?;
+                    // Terminal-generated signals already reach Codex because it
+                    // shares Coterie's foreground process group.
+                    if !self.inherited_terminal
+                        || !matches!(signal.cause, Cause::Kernel)
+                    {
+                        forward_signal(self.process_id(), signal.signal)?;
+                    }
+                }
+                () = &mut termination, if !termination_requested => {
+                    self.terminate()?;
+                    termination_requested = true;
+                    kill_deadline = Some(
+                        Instant::now() + Duration::from_secs(2),
+                    );
+                }
+                () = wait_for_deadline(kill_deadline),
+                    if kill_deadline.is_some() =>
+                {
+                    forward_signal(self.process_id(), SIGKILL)?;
+                    kill_deadline = None;
+                }
+            }
+        }
+    }
+}
+
+async fn wait_for_deadline(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep_until(deadline).await,
+        None => pending().await,
+    }
+}
+
+struct SignalMonitor {
+    receiver: mpsc::UnboundedReceiver<Origin>,
+    handle: signal_hook::iterator::Handle,
+}
+
+impl SignalMonitor {
+    fn install() -> Result<Self, ProviderError> {
+        let mut signals = SignalsInfo::<WithOrigin>::new([
+            SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGWINCH,
+        ])
+        .map_err(ProviderError::SignalRegistration)?;
+        let handle = signals.handle();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        thread::Builder::new()
+            .name("coterie-signal-forwarder".to_owned())
+            .spawn(move || {
+                for signal in signals.forever() {
+                    if sender.send(signal).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(ProviderError::SignalThread)?;
+        Ok(Self { receiver, handle })
+    }
+}
+
+impl Drop for SignalMonitor {
+    fn drop(&mut self) {
+        self.handle.close();
+    }
+}
+
+fn forward_signal(process_id: u32, signal: i32) -> Result<(), ProviderError> {
+    let signal = Signal::try_from(signal)
+        .map_err(|_| ProviderError::UnsupportedSignal { signal })?;
+    let process_id = i32::try_from(process_id)
+        .map(Pid::from_raw)
+        .map_err(|_| ProviderError::InvalidProcessId { process_id })?;
+    match kill(process_id, signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(source) => Err(ProviderError::SignalForward { signal, source }),
+    }
 }
 
 /// An opaque provider execution identity bound to a Coterie session scope.
@@ -287,6 +431,7 @@ pub(crate) trait Provider {
     fn launch_interactive(
         &mut self,
         specification: &LaunchSpecification,
+        environment: Option<&InteractiveEnvironment>,
     ) -> Result<ProviderSessionHandle, ProviderError>;
 
     fn launch_job(
@@ -354,6 +499,34 @@ pub(crate) enum ProviderError {
     InvalidVersionOutput { output: String },
     #[error("the Codex adapter does not implement {operation} yet")]
     UnsupportedCodexOperation { operation: &'static str },
+    #[error("the foreground Codex launch is missing its session environment")]
+    MissingInteractiveEnvironment,
+    #[error(
+        "could not start the foreground Codex process with `{executable}`: {source}"
+    )]
+    InteractiveLaunch {
+        executable: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not wait for the foreground Codex process: {0}")]
+    InteractiveWait(#[source] io::Error),
+    #[error("could not register foreground signal handling: {0}")]
+    SignalRegistration(#[source] io::Error),
+    #[error("could not start the foreground signal-forwarding thread: {0}")]
+    SignalThread(#[source] io::Error),
+    #[error("the foreground signal monitor closed while Codex was running")]
+    SignalMonitorClosed,
+    #[error("cannot forward unsupported signal {signal}")]
+    UnsupportedSignal { signal: i32 },
+    #[error("foreground process ID {process_id} does not fit Linux's PID type")]
+    InvalidProcessId { process_id: u32 },
+    #[error("could not forward {signal:?} to foreground Codex: {source}")]
+    SignalForward {
+        signal: Signal,
+        #[source]
+        source: Errno,
+    },
 }
 
 const MINIMUM_CODEX_VERSION: &str = "0.151.0";
@@ -363,6 +536,8 @@ const CODEX_VERSION_REQUIREMENT: &str = ">=0.151.0 and <1.0.0";
 pub(crate) struct CodexProvider {
     command: Vec<OsString>,
     probe_runner: Box<dyn ProbeCommandRunner>,
+    interactive_sessions:
+        BTreeMap<String, (SessionScope, CodexInteractiveProcess)>,
 }
 
 impl CodexProvider {
@@ -372,6 +547,7 @@ impl CodexProvider {
         Self {
             command: command.into_iter().map(Into::into).collect(),
             probe_runner: Box::new(ProcessProbeRunner),
+            interactive_sessions: BTreeMap::new(),
         }
     }
 
@@ -383,6 +559,7 @@ impl CodexProvider {
         Self {
             command: command.into_iter().map(Into::into).collect(),
             probe_runner: Box::new(runner),
+            interactive_sessions: BTreeMap::new(),
         }
     }
 
@@ -412,6 +589,107 @@ impl CodexProvider {
             });
         }
         Ok(output)
+    }
+
+    fn interactive_command(
+        &self,
+        specification: &LaunchSpecification,
+        environment: &InteractiveEnvironment,
+    ) -> Result<Command, ProviderError> {
+        let (program, configured_arguments) = self
+            .command
+            .split_first()
+            .ok_or(ProviderError::EmptyCodexCommand)?;
+        let bootstrap = serde_json::to_string(
+            &specification.bootstrap_instruction,
+        )
+        .expect("a Rust string is always representable as a TOML basic string");
+        let mut command = Command::new(program);
+        command
+            .args(configured_arguments)
+            .arg("--cd")
+            .arg(&specification.working_directory)
+            .arg("--config")
+            .arg(format!("developer_instructions={bootstrap}"))
+            .current_dir(&specification.working_directory)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .env("COTERIE_PROJECT_ROOT", &specification.working_directory)
+            .env("COTERIE_PROJECT_ID", environment.project_id.to_string())
+            .env(
+                "COTERIE_PRIMARY_PROJECT_ROOT",
+                &environment.primary_project_root,
+            )
+            .env("COTERIE_RUN_ID", specification.scope.run_id.to_string())
+            .env("COTERIE_AGENT_ID", specification.scope.agent_id.to_string())
+            .env(
+                "COTERIE_SESSION_ID",
+                specification.scope.session_id.to_string(),
+            )
+            .env("COTERIE_ROLE", &environment.role)
+            .env("COTERIE_SOCKET", &environment.socket_path)
+            .env("COTERIE_TOKEN", environment.token.expose_secret())
+            .env_remove("COTERIE_TASK_ID");
+        Ok(command)
+    }
+
+    fn launch_foreground_process(
+        &self,
+        specification: &LaunchSpecification,
+        environment: &InteractiveEnvironment,
+    ) -> Result<CodexInteractiveProcess, ProviderError> {
+        let inherited_terminal = io::stdin().is_terminal();
+        let signals = SignalMonitor::install()?;
+        let command = self.interactive_command(specification, environment)?;
+        let executable = command.get_program().to_string_lossy().into_owned();
+        let child = tokio::process::Command::from(command).spawn().map_err(
+            |source| ProviderError::InteractiveLaunch { executable, source },
+        )?;
+        Ok(CodexInteractiveProcess {
+            child,
+            inherited_terminal,
+            signals,
+        })
+    }
+
+    pub(crate) fn foreground_process_id(
+        &self,
+        session: &ProviderSessionHandle,
+    ) -> Result<u32, ProviderError> {
+        self.interactive_session(session)
+            .map(CodexInteractiveProcess::process_id)
+    }
+
+    pub(crate) async fn wait_foreground_until_termination<F>(
+        &mut self,
+        session: &ProviderSessionHandle,
+        termination: F,
+    ) -> Result<(std::process::ExitStatus, bool), ProviderError>
+    where
+        F: Future<Output = ()>,
+    {
+        self.interactive_session(session)?;
+        let (_, process) = self
+            .interactive_sessions
+            .remove(session.provider_id())
+            .ok_or_else(|| ProviderError::UnknownSession {
+                provider_id: session.provider_id().to_owned(),
+            })?;
+        process.wait_until_termination(termination).await
+    }
+
+    fn interactive_session(
+        &self,
+        session: &ProviderSessionHandle,
+    ) -> Result<&CodexInteractiveProcess, ProviderError> {
+        self.interactive_sessions
+            .get(session.provider_id())
+            .filter(|(scope, _)| scope == &session.scope)
+            .map(|(_, process)| process)
+            .ok_or_else(|| ProviderError::UnknownSession {
+                provider_id: session.provider_id().to_owned(),
+            })
     }
 
     fn probe_codex(&self) -> Result<ProviderProbe, ProviderError> {
@@ -463,11 +741,17 @@ impl Provider for CodexProvider {
 
     fn launch_interactive(
         &mut self,
-        _specification: &LaunchSpecification,
+        specification: &LaunchSpecification,
+        environment: Option<&InteractiveEnvironment>,
     ) -> Result<ProviderSessionHandle, ProviderError> {
-        Err(ProviderError::UnsupportedCodexOperation {
-            operation: "interactive launch",
-        })
+        let environment =
+            environment.ok_or(ProviderError::MissingInteractiveEnvironment)?;
+        let process =
+            self.launch_foreground_process(specification, environment)?;
+        let provider_id = format!("process:{}", process.process_id());
+        self.interactive_sessions
+            .insert(provider_id.clone(), (specification.scope, process));
+        Ok(ProviderSessionHandle::new(provider_id, specification.scope))
     }
 
     fn launch_job(
@@ -491,10 +775,13 @@ impl Provider for CodexProvider {
 
     fn observe(
         &self,
-        _session: &ProviderSessionHandle,
+        session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError> {
-        Err(ProviderError::UnsupportedCodexOperation {
-            operation: "session observation",
+        self.interactive_session(session)?;
+        Ok(SessionObservation {
+            lifecycle: LifecycleState::Running,
+            activity: ActivityState::Unknown,
+            exit: None,
         })
     }
 
@@ -509,19 +796,28 @@ impl Provider for CodexProvider {
 
     fn interrupt(
         &mut self,
-        _session: &ProviderSessionHandle,
+        session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError> {
-        Err(ProviderError::UnsupportedCodexOperation {
-            operation: "interrupt",
+        forward_signal(
+            self.interactive_session(session)?.process_id(),
+            SIGINT,
+        )?;
+        Ok(SessionObservation {
+            lifecycle: LifecycleState::Running,
+            activity: ActivityState::Unknown,
+            exit: None,
         })
     }
 
     fn terminate(
         &mut self,
-        _session: &ProviderSessionHandle,
+        session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError> {
-        Err(ProviderError::UnsupportedCodexOperation {
-            operation: "termination",
+        self.interactive_session(session)?.terminate()?;
+        Ok(SessionObservation {
+            lifecycle: LifecycleState::Running,
+            activity: ActivityState::Unknown,
+            exit: None,
         })
     }
 }
@@ -834,6 +1130,7 @@ pub(crate) mod fake {
         fn launch_interactive(
             &mut self,
             specification: &LaunchSpecification,
+            _environment: Option<&super::InteractiveEnvironment>,
         ) -> Result<ProviderSessionHandle, ProviderError> {
             self.launch(LaunchMode::Interactive, specification)
         }
@@ -920,8 +1217,8 @@ mod tests {
         ProviderCapability, ProviderCompatibility, ProviderError,
         ProviderEventKind, SessionObservation,
     };
-    use crate::auth::SessionScope;
-    use crate::id::{AgentId, RunId, SessionId};
+    use crate::auth::{AgentToken, SessionScope};
+    use crate::id::{AgentId, ProjectId, RunId, SessionId};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const AGENT_ID: &str = "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX";
@@ -1117,6 +1414,85 @@ mod tests {
     }
 
     #[test]
+    fn codex_interactive_command_preserves_codex_startup_contract() {
+        let provider =
+            CodexProvider::new(["codex-wrapper", "--provider", "codex"]);
+        let specification = specification();
+        let token = AgentToken::generate()
+            .expect("the launch credential should be generated");
+        let environment = super::InteractiveEnvironment {
+            project_id: "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW"
+                .parse::<ProjectId>()
+                .expect("valid project ID"),
+            primary_project_root: PathBuf::from("/tmp/project"),
+            role: "lead".to_owned(),
+            socket_path: PathBuf::from("/tmp/coterie.sock"),
+            token,
+        };
+
+        let command = provider
+            .interactive_command(&specification, &environment)
+            .expect("the interactive command should be valid");
+        let arguments = command.get_args().collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), "codex-wrapper");
+        assert_eq!(
+            command.get_current_dir(),
+            Some(PathBuf::from("/tmp/project").as_path())
+        );
+        assert_eq!(
+            arguments[..4],
+            ["--provider", "codex", "--cd", "/tmp/project"]
+        );
+        assert_eq!(arguments[4], "--config");
+        let override_value = arguments[5]
+            .to_str()
+            .expect("the config override should be UTF-8");
+        assert!(override_value.starts_with("developer_instructions=\""));
+        assert!(override_value.contains("Run `coterie prime`"));
+        assert_eq!(arguments.len(), 6, "the bootstrap must not be a prompt");
+
+        let variables = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            variables["COTERIE_PROJECT_ROOT"],
+            Some("/tmp/project".to_owned())
+        );
+        assert_eq!(
+            variables["COTERIE_PROJECT_ID"],
+            Some("cp-01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned())
+        );
+        assert_eq!(
+            variables["COTERIE_PRIMARY_PROJECT_ROOT"],
+            Some("/tmp/project".to_owned())
+        );
+        assert_eq!(variables["COTERIE_RUN_ID"], Some(RUN_ID.to_owned()));
+        assert_eq!(variables["COTERIE_AGENT_ID"], Some(AGENT_ID.to_owned()));
+        assert_eq!(
+            variables["COTERIE_SESSION_ID"],
+            Some(SESSION_ID.to_owned())
+        );
+        assert_eq!(variables["COTERIE_ROLE"], Some("lead".to_owned()));
+        assert_eq!(
+            variables["COTERIE_SOCKET"],
+            Some("/tmp/coterie.sock".to_owned())
+        );
+        assert!(
+            variables["COTERIE_TOKEN"]
+                .as_deref()
+                .is_some_and(|value| value.starts_with("cot1_"))
+        );
+        assert_eq!(variables["COTERIE_TASK_ID"], None);
+    }
+
+    #[test]
     #[ignore = "requires an explicitly installed Codex CLI"]
     fn installed_codex_satisfies_the_probe_contract() {
         let probe = CodexProvider::new(["codex"])
@@ -1204,7 +1580,7 @@ mod tests {
             FakeProvider::new([FakeScript::new([]), FakeScript::new([])]);
 
         let first = provider
-            .launch_interactive(&specification())
+            .launch_interactive(&specification(), None)
             .expect("the first session should launch");
         let second = provider
             .launch_job(&specification())

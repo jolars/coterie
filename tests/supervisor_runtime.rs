@@ -1,15 +1,74 @@
 use std::fs;
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
 use serde_json::Value;
 
 const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
+const FAKE_CODEX: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli 0.151.0\n'
+  exit 0
+fi
+if [ "$1" = "--help" ]; then
+  printf 'Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n'
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  printf 'Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --json\n'
+  exit 0
+fi
+if [ "${COTERIE_FAKE_MODE-}" = "contract" ]; then
+  {
+    printf 'cwd=%s\0' "$PWD"
+    for argument in "$@"; do
+      printf 'arg=%s\0' "$argument"
+    done
+    for variable in COTERIE_PROJECT_ROOT COTERIE_PROJECT_ID COTERIE_PRIMARY_PROJECT_ROOT COTERIE_RUN_ID COTERIE_AGENT_ID COTERIE_SESSION_ID COTERIE_ROLE COTERIE_SOCKET COTERIE_TOKEN; do
+      eval "value=\${$variable}"
+      printf 'env:%s=%s\0' "$variable" "$value"
+    done
+    if [ "${COTERIE_TASK_ID+x}" = "x" ]; then
+      printf 'env:COTERIE_TASK_ID=%s\0' "$COTERIE_TASK_ID"
+    fi
+  } > "$COTERIE_FAKE_CAPTURE"
+  IFS= read -r input
+  printf 'stdout:%s\n' "$input"
+  printf 'stderr:%s\n' "$input" >&2
+  exit 0
+fi
+if [ "${COTERIE_FAKE_MODE-}" = "signals" ]; then
+  trap 'printf "winch\n" >> "$COTERIE_FAKE_CAPTURE"' WINCH
+  trap 'printf "int\n" >> "$COTERIE_FAKE_CAPTURE"; exit 0' INT
+  printf 'ready\n' > "$COTERIE_FAKE_READY"
+  while :; do
+    :
+  done
+fi
+if [ "${COTERIE_FAKE_MODE-}" = "stop" ]; then
+  trap 'printf "term\n" > "$COTERIE_FAKE_CAPTURE"; exit 0' TERM
+  printf 'ready\n' > "$COTERIE_FAKE_READY"
+  while :; do
+    :
+  done
+fi
+if [ "${COTERIE_FAKE_MODE-}" = "restart" ]; then
+  printf 'ready\n' > "$COTERIE_FAKE_READY"
+  while [ ! -e "$COTERIE_FAKE_RELEASE" ]; do
+    :
+  done
+  exit 23
+fi
+exit 0
+"#;
 
 #[test]
 fn public_help_lists_the_minimum_delegation_commands() {
@@ -65,6 +124,42 @@ fn invalid_programmatic_arguments_use_the_versioned_error_contract() {
 }
 
 #[test]
+fn interactive_foreground_rejects_json_before_starting_a_run() {
+    let fixture = TestEnvironment::new();
+    let mut command = fixture.command();
+    command.arg("--json");
+
+    let output = run(command);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the diagnostic should be one JSON response");
+    assert_eq!(error["error"]["code"], "invalid_argument");
+    assert!(error["operation_id"].as_str().is_some());
+    assert_eq!(fixture.index_entry_count(), 0);
+}
+
+#[test]
+fn missing_codex_is_reported_as_unavailable() {
+    let fixture = TestEnvironment::new();
+    let empty_path = fixture.root.join("empty-path");
+    fs::create_dir(&empty_path).expect("the empty PATH should be created");
+    let mut command = fixture.command();
+    command.env("PATH", empty_path);
+
+    let output = run(command);
+
+    assert_eq!(output.status.code(), Some(7));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("could not execute a Codex probe")
+    );
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
 fn mutation_connection_failures_preserve_the_allocated_operation_id() {
     let fixture = TestEnvironment::new();
     let mut command = fixture.command();
@@ -103,7 +198,7 @@ fn status_does_not_create_a_run_and_partial_agent_identity_never_becomes_operato
     assert_eq!(error["error"]["code"], "not_found");
     assert_eq!(fixture.index_entry_count(), 0);
 
-    fixture.run_json(&["--json"]);
+    fixture.launch(&[]);
     let mut inbox = fixture.command();
     inbox.args(["inbox", "--json"]);
     let output = run(inbox);
@@ -163,12 +258,11 @@ fn human_success_and_diagnostics_use_separate_streams() {
     let fixture = TestEnvironment::new();
     let launch = run(fixture.command());
     assert!(launch.status.success(), "launch failed: {launch:?}");
-    assert!(!launch.stdout.is_empty());
+    assert!(launch.stdout.is_empty());
     assert!(launch.stderr.is_empty());
-    let data: Value = serde_json::from_slice(&launch.stdout)
-        .expect("human output should be readable structured text");
-    assert_eq!(data["agent"]["name"], "lead");
-    assert!(data.get("schema_version").is_none());
+    let status = fixture.run_json(&["status", "--json"]);
+    assert_eq!(status["data"]["agents"][0]["name"], "lead");
+    assert_eq!(status["data"]["agents"][0]["state"], "exited");
 
     let mut invalid = fixture.command();
     invalid.args(["task", "close", "not-a-task"]);
@@ -181,32 +275,297 @@ fn human_success_and_diagnostics_use_separate_streams() {
 }
 
 #[test]
+fn foreground_codex_inherits_streams_directory_identity_and_agents_discovery() {
+    let fixture = TestEnvironment::new();
+    let capture = fixture.root.join("codex-contract");
+    let mut command = fixture.command();
+    command
+        .env("COTERIE_FAKE_MODE", "contract")
+        .env("COTERIE_FAKE_CAPTURE", &capture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("Coterie should start");
+    child
+        .stdin
+        .take()
+        .expect("the foreground stdin should be piped")
+        .write_all(b"terminal input\n")
+        .expect("the terminal input should be writable");
+
+    let output = child
+        .wait_with_output()
+        .expect("the foreground process should finish");
+
+    assert!(output.status.success(), "foreground failed: {output:?}");
+    assert_eq!(output.stdout, b"stdout:terminal input\n");
+    assert_eq!(output.stderr, b"stderr:terminal input\n");
+    let records = fs::read(&capture)
+        .expect("the Codex contract should be captured")
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .map(|record| String::from_utf8(record.to_vec()).expect("UTF-8 record"))
+        .collect::<Vec<_>>();
+    assert!(records.contains(&format!("cwd={}", fixture.project.display())));
+    let arguments = records
+        .iter()
+        .filter_map(|record| record.strip_prefix("arg="))
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.len(), 4, "the bootstrap must not be a prompt");
+    assert_eq!(arguments[0], "--cd");
+    assert_eq!(arguments[1], fixture.project.to_string_lossy());
+    assert_eq!(arguments[2], "--config");
+    assert!(arguments[3].starts_with("developer_instructions=\""));
+    assert!(arguments[3].contains("Run `coterie prime`"));
+    assert!(arguments[3].contains("AGENTS.md"));
+    for variable in [
+        "COTERIE_PROJECT_ROOT",
+        "COTERIE_PROJECT_ID",
+        "COTERIE_PRIMARY_PROJECT_ROOT",
+        "COTERIE_RUN_ID",
+        "COTERIE_AGENT_ID",
+        "COTERIE_SESSION_ID",
+        "COTERIE_ROLE",
+        "COTERIE_SOCKET",
+        "COTERIE_TOKEN",
+    ] {
+        assert!(
+            records.iter().any(|record| {
+                record
+                    .strip_prefix(&format!("env:{variable}="))
+                    .is_some_and(|value| !value.is_empty())
+            }),
+            "Codex should receive {variable}"
+        );
+    }
+    assert!(
+        !records
+            .iter()
+            .any(|record| record.starts_with("env:COTERIE_TASK_ID=")),
+        "a foreground lead must not inherit a stale task identity"
+    );
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn foreground_signals_sent_to_coterie_reach_codex() {
+    let fixture = TestEnvironment::new();
+    let capture = fixture.root.join("codex-signals");
+    let ready = fixture.root.join("codex-ready");
+    let mut command = fixture.command();
+    command
+        .env("COTERIE_FAKE_MODE", "signals")
+        .env("COTERIE_FAKE_CAPTURE", &capture)
+        .env("COTERIE_FAKE_READY", &ready)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("Coterie should start");
+    let _open_stdin = child
+        .stdin
+        .take()
+        .expect("the foreground stdin should stay open");
+    wait_until("the fake Codex process", || ready.exists());
+    let coterie_pid =
+        Pid::from_raw(i32::try_from(child.id()).expect("PID should fit"));
+
+    kill(coterie_pid, Signal::SIGWINCH).expect("SIGWINCH should be sent");
+    wait_until("the resize signal", || {
+        fs::read_to_string(&capture)
+            .unwrap_or_default()
+            .contains("winch")
+    });
+    kill(coterie_pid, Signal::SIGINT).expect("SIGINT should be sent");
+    wait_until("the interrupted foreground", || {
+        child
+            .try_wait()
+            .expect("status should be readable")
+            .is_some()
+    });
+    let status = child.wait().expect("the foreground should be reaped");
+
+    assert!(status.success());
+    let signals = fs::read_to_string(&capture)
+        .expect("the delivered signals should be recorded");
+    assert!(signals.contains("winch\n"));
+    assert!(signals.contains("int\n"));
+    assert_eq!(fixture.index_entry_count(), 1);
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn stop_terminates_and_reaps_the_foreground_codex_process() {
+    let fixture = TestEnvironment::new();
+    let capture = fixture.root.join("codex-stop");
+    let ready = fixture.root.join("codex-ready");
+    let mut command = fixture.command();
+    command
+        .env("COTERIE_FAKE_MODE", "stop")
+        .env("COTERIE_FAKE_CAPTURE", &capture)
+        .env("COTERIE_FAKE_READY", &ready)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut foreground = command.spawn().expect("Coterie should start");
+    wait_until("the fake Codex process", || ready.exists());
+
+    let stopped = fixture.run_json(&["stop", "--json"]);
+
+    assert_eq!(stopped["data"]["status"], "stopped");
+    wait_until("the foreground wrapper", || {
+        foreground
+            .try_wait()
+            .expect("the wrapper status should be readable")
+            .is_some()
+    });
+    assert!(
+        foreground
+            .wait()
+            .expect("the wrapper should be reaped")
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(&capture).expect("Codex should record termination"),
+        "term\n"
+    );
+    assert_eq!(fixture.index_entry_count(), 0);
+}
+
+#[test]
+fn foreground_exit_is_recorded_after_the_supervisor_restarts() {
+    let fixture = TestEnvironment::new();
+    let mut supervisor = fixture.command();
+    supervisor
+        .arg("__supervisor")
+        .arg(RUN_ID)
+        .arg(PROJECT_ID)
+        .arg(&fixture.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut crashed = supervisor.spawn().expect("the supervisor should start");
+    wait_until("supervisor publication", || {
+        fixture.index_entry_count() == 1
+    });
+
+    let ready = fixture.root.join("codex-ready");
+    let release = fixture.root.join("codex-release");
+    let mut command = fixture.command();
+    command
+        .env("COTERIE_FAKE_MODE", "restart")
+        .env("COTERIE_FAKE_READY", &ready)
+        .env("COTERIE_FAKE_RELEASE", &release)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let foreground = command.spawn().expect("Coterie should start");
+    wait_until("the fake Codex process", || ready.exists());
+
+    crashed.kill().expect("the supervisor should crash");
+    crashed
+        .wait()
+        .expect("the crashed supervisor should be reaped");
+    let restarted = run(fixture.connect_command());
+    assert!(restarted.status.success(), "restart failed: {restarted:?}");
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(RUN_ID)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database)
+        .expect("the restarted run database should open");
+    let (state, reconciliation, owner, active_credentials):
+        (String, String, String, i64) = connection
+        .query_row(
+            "SELECT sessions.state, sessions.reconciliation_state, \
+                    sessions.process_owner, \
+                    COUNT(session_credentials.session_id) \
+             FROM sessions \
+             JOIN session_credentials ON session_credentials.session_id = sessions.id \
+             WHERE sessions.provider_session_id LIKE 'process:%' \
+               AND session_credentials.revoked_at IS NULL",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("the live foreground session should remain durable");
+    assert_eq!(state, "unknown");
+    assert_eq!(reconciliation, "unknown");
+    assert_eq!(owner, "foreground");
+    assert_eq!(active_credentials, 1);
+    drop(connection);
+
+    let mut contender = fixture.command();
+    contender.args(["--operation-id", "co-01ARZ3NDEKTSV4RRFFQ69G5FBE"]);
+    let contender = run(contender);
+    assert_eq!(contender.status.code(), Some(5));
+    assert!(
+        String::from_utf8_lossy(&contender.stderr).contains("already active")
+    );
+
+    fs::write(&release, b"exit").expect("Codex should be released");
+    let output = foreground
+        .wait_with_output()
+        .expect("the foreground wrapper should finish");
+
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "foreground output: {output:?}"
+    );
+    let connection = rusqlite::Connection::open(database)
+        .expect("the restarted run database should open");
+    let (state, reconciliation): (String, String) = connection
+        .query_row(
+            "SELECT state, reconciliation_state FROM sessions \
+             WHERE provider_session_id LIKE 'process:%'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("the foreground exit should be durable");
+    assert_eq!(state, "exited");
+    assert_eq!(reconciliation, "observed");
+    let exit_code: i64 = connection
+        .query_row(
+            "SELECT json_extract(payload_json, '$.data.details.code') \
+             FROM events \
+             WHERE event_type = 'session.lifecycle_changed' \
+               AND actor = 'foreground' \
+             ORDER BY sequence DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the definitive foreground exit code should be durable");
+    assert_eq!(exit_code, 23);
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
 fn operator_commands_drive_the_minimum_delegation_flow() {
     let fixture = TestEnvironment::new();
 
-    let launch = fixture.run_json(&[
-        "--operation-id",
-        "co-01ARZ3NDEKTSV4RRFFQ69G5FB0",
-        "--json",
-    ]);
-    let run_id = launch["data"]["run_id"]
+    const FIRST_LAUNCH: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FB0";
+    fixture.launch(&["--operation-id", FIRST_LAUNCH]);
+    let initial_status = fixture.run_json(&["status", "--json"]);
+    let run_id = initial_status["data"]["run_id"]
         .as_str()
-        .expect("launch should identify the run")
+        .expect("status should identify the run")
         .to_owned();
-    assert_eq!(launch["data"]["agent"]["name"], "lead");
-    assert_eq!(launch["data"]["agent"]["state"], "running");
-    assert_eq!(launch["operation_id"], "co-01ARZ3NDEKTSV4RRFFQ69G5FB0");
-    let reconnect = fixture.run_json(&[
-        "--operation-id",
-        "co-01ARZ3NDEKTSV4RRFFQ69G5FB0",
-        "--json",
-    ]);
-    assert_eq!(reconnect["data"]["run_id"], run_id);
-    assert_eq!(reconnect["data"]["agent"], launch["data"]["agent"]);
-    assert_eq!(
-        reconnect["data"]["session_id"],
-        launch["data"]["session_id"]
+    assert_eq!(initial_status["data"]["agents"][0]["name"], "lead");
+    assert_eq!(initial_status["data"]["agents"][0]["state"], "exited");
+    let mut replay = fixture.command();
+    replay.args(["--operation-id", FIRST_LAUNCH]);
+    let replay = run(replay);
+    assert_eq!(replay.status.code(), Some(5));
+    assert!(replay.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&replay.stderr)
+            .contains("has already attempted its provider launch")
     );
+    fixture.launch(&["--operation-id", "co-01ARZ3NDEKTSV4RRFFQ69G5FBD"]);
+    let reconnected = fixture.run_json(&["status", "--json"]);
+    assert_eq!(reconnected["data"]["run_id"], run_id);
+    assert_eq!(reconnected["data"]["agents"][0]["name"], "lead");
+    assert_eq!(reconnected["data"]["agents"][0]["state"], "exited");
 
     let identity = fixture.run_json(&["whoami", "--json"]);
     assert_eq!(identity["data"]["run_id"], run_id);
@@ -316,7 +675,7 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("the session observation should be durable");
-    assert_eq!(provider_session_id.as_deref(), Some("fake-session-2"));
+    assert_eq!(provider_session_id.as_deref(), Some("fake-session-1"));
     assert_eq!(session_reconciliation, "observed");
     let (workspace_kind, workspace_path, workspace_reconciliation): (
         String,
@@ -623,15 +982,7 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
         fixture.index_entry_count() == 1
     });
 
-    let launch = fixture.run_json(&[
-        "--operation-id",
-        "co-01ARZ3NDEKTSV4RRFFQ69G5FB8",
-        "--json",
-    ]);
-    let session_id = launch["data"]["session_id"]
-        .as_str()
-        .expect("launch should return a session ID")
-        .to_owned();
+    fixture.launch(&["--operation-id", "co-01ARZ3NDEKTSV4RRFFQ69G5FB8"]);
     let task = fixture.run_json(&[
         "task",
         "create",
@@ -694,6 +1045,13 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
         .join("state.sqlite3");
     let connection = rusqlite::Connection::open(&database)
         .expect("the active run database should open");
+    let session_id: String = connection
+        .query_row(
+            "SELECT id FROM sessions WHERE provider = 'codex' ORDER BY created_at DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the foreground session should be durable");
     let durable_before = durable_restart_snapshot(&connection);
     assert_eq!(durable_before.tasks.len(), 2);
     assert_eq!(durable_before.dependencies.len(), 1);
@@ -721,7 +1079,7 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
             |row| row.get(0),
         )
         .expect("the reconciled sessions should remain durable");
-    assert_eq!(lost_sessions, 2);
+    assert_eq!(lost_sessions, 1);
     let lost_workspaces: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM workspaces WHERE state = 'lost'",
@@ -739,7 +1097,7 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
             |row| row.get(0),
         )
         .expect("the reconciliation event should be queryable");
-    assert_eq!(lost_events, 2);
+    assert_eq!(lost_events, 1);
     drop(connection);
 
     let tasks_after =
@@ -751,18 +1109,11 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
     assert_eq!(transcript_after, transcript_before);
 
     let mut replay = fixture.command();
-    replay.args(["--operation-id", "co-01ARZ3NDEKTSV4RRFFQ69G5FB8", "--json"]);
+    replay.args(["--operation-id", "co-01ARZ3NDEKTSV4RRFFQ69G5FB8"]);
     let replay = run(replay);
     assert_eq!(replay.status.code(), Some(5));
     assert!(replay.stdout.is_empty());
-    let failure: Value = serde_json::from_slice(&replay.stderr)
-        .expect("the uncertain retry should return a JSON diagnostic");
-    assert_eq!(failure["error"]["code"], "conflict");
-    assert!(
-        failure["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("launch state is `lost`"))
-    );
+    assert!(String::from_utf8_lossy(&replay.stderr).contains("operation"));
 
     let mut shutdown = fixture.command();
     shutdown.arg("__supervisor-shutdown");
@@ -845,7 +1196,7 @@ fn run(mut command: Command) -> std::process::Output {
     command.output().expect("Coterie should execute")
 }
 
-fn wait_until(description: &str, predicate: impl Fn() -> bool) {
+fn wait_until(description: &str, mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !predicate() {
         assert!(Instant::now() < deadline, "{description} timed out");
@@ -866,6 +1217,7 @@ struct TestEnvironment {
     runtime: PathBuf,
     state: PathBuf,
     project: PathBuf,
+    path: std::ffi::OsString,
 }
 
 impl TestEnvironment {
@@ -878,6 +1230,7 @@ impl TestEnvironment {
         let runtime = root.join("runtime");
         let state = root.join("state");
         let project = root.join("project");
+        let bin = root.join("bin");
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -885,11 +1238,24 @@ impl TestEnvironment {
             .expect("the runtime directory should be created");
         fs::create_dir_all(&project)
             .expect("the project directory should be created");
+        fs::create_dir(&bin).expect("the fixture bin directory should exist");
+        let codex = bin.join("codex");
+        fs::write(&codex, FAKE_CODEX)
+            .expect("the fake Codex executable should be written");
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))
+            .expect("the fake Codex executable should be private");
+        let path = std::env::join_paths(std::iter::once(bin).chain(
+            std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ),
+        ))
+        .expect("the fixture PATH should be representable");
         Self {
             root,
             runtime,
             state,
             project,
+            path,
         }
     }
 
@@ -898,8 +1264,24 @@ impl TestEnvironment {
         command
             .current_dir(&self.project)
             .env("XDG_RUNTIME_DIR", &self.runtime)
-            .env("XDG_STATE_HOME", &self.state);
+            .env("XDG_STATE_HOME", &self.state)
+            .env("PATH", &self.path);
         command
+    }
+
+    fn launch(&self, arguments: &[&str]) -> std::process::Output {
+        let mut command = self.command();
+        command.args(arguments);
+        let output = run(command);
+        assert!(
+            output.status.success(),
+            "foreground launch {arguments:?} failed: {output:?}"
+        );
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "the foreground wrapper should not write around the TUI: {output:?}"
+        );
+        output
     }
 
     fn connect_command(&self) -> Command {
