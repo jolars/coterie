@@ -19,11 +19,11 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 if [ "$1" = "--help" ]; then
-  printf 'Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n'
+  printf 'Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --ask-for-approval <APPROVAL_POLICY>\n'
   exit 0
 fi
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-  printf 'Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --json\n'
+  printf 'Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --ask-for-approval <APPROVAL_POLICY>\n  --json\n'
   exit 0
 fi
 if [ "${COTERIE_FAKE_MODE-}" = "contract" ]; then
@@ -311,13 +311,19 @@ fn foreground_codex_inherits_streams_directory_identity_and_agents_discovery() {
         .iter()
         .filter_map(|record| record.strip_prefix("arg="))
         .collect::<Vec<_>>();
-    assert_eq!(arguments.len(), 4, "the bootstrap must not be a prompt");
-    assert_eq!(arguments[0], "--cd");
-    assert_eq!(arguments[1], fixture.project.to_string_lossy());
-    assert_eq!(arguments[2], "--config");
-    assert!(arguments[3].starts_with("developer_instructions=\""));
-    assert!(arguments[3].contains("Run `coterie prime`"));
-    assert!(arguments[3].contains("AGENTS.md"));
+    assert_eq!(arguments.len(), 10, "the bootstrap must not be a prompt");
+    assert_eq!(arguments[0], "--sandbox");
+    assert_eq!(arguments[1], "workspace-write");
+    assert_eq!(arguments[2], "--ask-for-approval");
+    assert_eq!(arguments[3], "on-request");
+    assert_eq!(arguments[4], "--config");
+    assert_eq!(arguments[5], "approvals_reviewer=\"user\"");
+    assert_eq!(arguments[6], "--cd");
+    assert_eq!(arguments[7], fixture.project.to_string_lossy());
+    assert_eq!(arguments[8], "--config");
+    assert!(arguments[9].starts_with("developer_instructions=\""));
+    assert!(arguments[9].contains("Run `coterie prime`"));
+    assert!(arguments[9].contains("AGENTS.md"));
     for variable in [
         "COTERIE_PROJECT_ROOT",
         "COTERIE_PROJECT_ID",

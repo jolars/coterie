@@ -32,6 +32,9 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
 use crate::auth::{AgentToken, SessionScope};
+use crate::config::{
+    ApprovalPolicy, FilesystemPolicy, NetworkPolicy, PermissionProfile,
+};
 use crate::id::{ProjectId, TaskId};
 
 const MAXIMUM_CODEX_JSONL_FRAME_BYTES: u64 = 1024 * 1024;
@@ -44,6 +47,10 @@ pub(crate) enum ProviderCapability {
     ForegroundInteractive,
     BackgroundJobs,
     StructuredLifecycleEvents,
+    WorkingDirectory,
+    FilesystemSandbox,
+    NetworkSandbox,
+    ApprovalPolicy,
     Interrupt,
     Termination,
     TranscriptStreaming,
@@ -56,6 +63,10 @@ impl fmt::Display for ProviderCapability {
             Self::ForegroundInteractive => "foreground interactive sessions",
             Self::BackgroundJobs => "background job execution",
             Self::StructuredLifecycleEvents => "structured lifecycle events",
+            Self::WorkingDirectory => "working directory enforcement",
+            Self::FilesystemSandbox => "filesystem sandbox enforcement",
+            Self::NetworkSandbox => "network sandbox enforcement",
+            Self::ApprovalPolicy => "approval policy enforcement",
             Self::Interrupt => "interrupt",
             Self::Termination => "termination",
             Self::TranscriptStreaming => "transcript streaming",
@@ -91,6 +102,7 @@ pub(crate) enum LaunchMode {
 pub(crate) struct LaunchSpecification {
     pub(crate) scope: SessionScope,
     pub(crate) working_directory: PathBuf,
+    pub(crate) permission_profile: PermissionProfile,
     pub(crate) bootstrap_instruction: String,
 }
 
@@ -700,8 +712,9 @@ impl CodexProvider {
         )
         .expect("a Rust string is always representable as a TOML basic string");
         let mut command = Command::new(program);
+        command.args(configured_arguments);
+        apply_codex_permission_profile(&mut command, specification);
         command
-            .args(configured_arguments)
             .arg("--cd")
             .arg(&specification.working_directory)
             .arg("--config")
@@ -757,10 +770,10 @@ impl CodexProvider {
         )
         .expect("a Rust string is always representable as a TOML basic string");
         let mut command = Command::new(program);
+        command.args(configured_arguments);
+        apply_codex_permission_profile(&mut command, specification);
+        command.arg("exec").arg("--json");
         command
-            .args(configured_arguments)
-            .arg("exec")
-            .arg("--json")
             .arg("--cd")
             .arg(&specification.working_directory)
             .arg("--config")
@@ -1373,13 +1386,11 @@ fn codex_capabilities(
     interactive_help: &str,
     job_help: &str,
 ) -> BTreeSet<ProviderCapability> {
-    let interactive = interactive_help.contains("Usage: codex ")
-        && interactive_help.contains("--cd")
-        && interactive_help.contains("--config");
-    let job = job_help.contains("Usage: codex exec ")
-        && job_help.contains("--cd")
-        && job_help.contains("--config");
+    let interactive = interactive_help.contains("Usage: codex ");
+    let job = job_help.contains("Usage: codex exec ");
     let structured_job = job && job_help.contains("--json");
+    let both_contain =
+        |option| interactive_help.contains(option) && job_help.contains(option);
     let mut capabilities = BTreeSet::new();
     if interactive {
         capabilities.insert(ProviderCapability::ForegroundInteractive);
@@ -1387,14 +1398,58 @@ fn codex_capabilities(
     if job {
         capabilities.insert(ProviderCapability::BackgroundJobs);
     }
-    if interactive && job {
+    if interactive && job && both_contain("--config") {
         capabilities.insert(ProviderCapability::StartupInstructions);
     }
     if structured_job {
         capabilities.insert(ProviderCapability::StructuredLifecycleEvents);
         capabilities.insert(ProviderCapability::TranscriptStreaming);
     }
+    if interactive && job && both_contain("--cd") {
+        capabilities.insert(ProviderCapability::WorkingDirectory);
+    }
+    if interactive && job && both_contain("--sandbox") {
+        capabilities.insert(ProviderCapability::FilesystemSandbox);
+    }
+    if interactive && job && both_contain("--config") {
+        capabilities.insert(ProviderCapability::NetworkSandbox);
+    }
+    if interactive && interactive_help.contains("--ask-for-approval") {
+        capabilities.insert(ProviderCapability::ApprovalPolicy);
+    }
     capabilities
+}
+
+fn apply_codex_permission_profile(
+    command: &mut Command,
+    specification: &LaunchSpecification,
+) {
+    let profile = specification.permission_profile;
+    let sandbox = match profile.filesystem {
+        FilesystemPolicy::ProjectWrite | FilesystemPolicy::WorkspaceWrite => {
+            "workspace-write"
+        }
+        FilesystemPolicy::ReadOnly => "read-only",
+    };
+    let approvals = match profile.approvals {
+        ApprovalPolicy::Interactive => "on-request",
+        ApprovalPolicy::Never => "never",
+    };
+    command
+        .arg("--sandbox")
+        .arg(sandbox)
+        .arg("--ask-for-approval")
+        .arg(approvals);
+    if profile.approvals == ApprovalPolicy::Interactive {
+        command.arg("--config").arg("approvals_reviewer=\"user\"");
+    }
+    if profile.network == NetworkPolicy::Deny {
+        command
+            .arg("--config")
+            .arg("sandbox_workspace_write.network_access=false")
+            .arg("--config")
+            .arg("web_search=\"disabled\"");
+    }
 }
 
 fn diagnostic_output(primary: &[u8], fallback: &[u8]) -> String {
@@ -1502,6 +1557,10 @@ pub(crate) mod fake {
                     ProviderCapability::ForegroundInteractive,
                     ProviderCapability::BackgroundJobs,
                     ProviderCapability::StructuredLifecycleEvents,
+                    ProviderCapability::WorkingDirectory,
+                    ProviderCapability::FilesystemSandbox,
+                    ProviderCapability::NetworkSandbox,
+                    ProviderCapability::ApprovalPolicy,
                     ProviderCapability::Interrupt,
                     ProviderCapability::Termination,
                     ProviderCapability::TranscriptStreaming,
@@ -1704,6 +1763,7 @@ mod tests {
         ProviderEventKind, SessionObservation,
     };
     use crate::auth::{AgentToken, SessionScope};
+    use crate::config::PermissionProfile;
     use crate::id::{AgentId, ProjectId, RunId, SessionId, TaskId};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
@@ -1717,10 +1777,10 @@ mod tests {
         let runner = ScriptedProbeRunner::new([
             Ok(success("codex-cli 0.151.0\n")),
             Ok(success(
-                "Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n",
+                "Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --ask-for-approval <APPROVAL_POLICY>\n",
             )),
             Ok(success(
-                "Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --json\n",
+                "Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --json\n",
             )),
         ]);
         let observations = runner.observations();
@@ -1742,6 +1802,10 @@ mod tests {
                 ProviderCapability::BackgroundJobs,
                 ProviderCapability::StructuredLifecycleEvents,
                 ProviderCapability::TranscriptStreaming,
+                ProviderCapability::WorkingDirectory,
+                ProviderCapability::FilesystemSandbox,
+                ProviderCapability::NetworkSandbox,
+                ProviderCapability::ApprovalPolicy,
             ])
         );
         assert_eq!(
@@ -1768,6 +1832,49 @@ mod tests {
                 ],
             ]
         );
+    }
+
+    #[test]
+    fn codex_probe_does_not_claim_missing_permission_controls() {
+        const INTERACTIVE_HELP: &str = "Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --ask-for-approval <APPROVAL_POLICY>\n";
+        const JOB_HELP: &str = "Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --json\n";
+
+        for (option, capability, remove_from_interactive) in [
+            ("--cd", ProviderCapability::WorkingDirectory, false),
+            ("--sandbox", ProviderCapability::FilesystemSandbox, false),
+            ("--config", ProviderCapability::NetworkSandbox, false),
+            (
+                "--ask-for-approval",
+                ProviderCapability::ApprovalPolicy,
+                true,
+            ),
+        ] {
+            let interactive_help = if remove_from_interactive {
+                INTERACTIVE_HELP.replace(option, "--unsupported")
+            } else {
+                INTERACTIVE_HELP.to_owned()
+            };
+            let job_help = if remove_from_interactive {
+                JOB_HELP.to_owned()
+            } else {
+                JOB_HELP.replace(option, "--unsupported")
+            };
+            let provider = CodexProvider::with_runner(
+                ["codex"],
+                ScriptedProbeRunner::new([
+                    Ok(success("codex-cli 0.151.0\n")),
+                    Ok(success(&interactive_help)),
+                    Ok(success(&job_help)),
+                ]),
+            );
+
+            let probe = provider.probe().expect("the probe should complete");
+
+            assert!(
+                !probe.capabilities.contains(&capability),
+                "the probe must not claim {capability} without `{option}`"
+            );
+        }
     }
 
     #[test]
@@ -1905,7 +2012,8 @@ mod tests {
     fn codex_interactive_command_preserves_codex_startup_contract() {
         let provider =
             CodexProvider::new(["codex-wrapper", "--provider", "codex"]);
-        let specification = specification();
+        let mut specification = specification();
+        specification.permission_profile = permission_profile("interactive");
         let token = AgentToken::generate()
             .expect("the launch credential should be generated");
         let environment = super::InteractiveEnvironment {
@@ -1929,16 +2037,27 @@ mod tests {
             Some(PathBuf::from("/tmp/project").as_path())
         );
         assert_eq!(
-            arguments[..4],
-            ["--provider", "codex", "--cd", "/tmp/project"]
+            arguments[..8],
+            [
+                "--provider",
+                "codex",
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "on-request",
+                "--config",
+                "approvals_reviewer=\"user\"",
+            ]
         );
-        assert_eq!(arguments[4], "--config");
-        let override_value = arguments[5]
+        assert_eq!(arguments[8], "--cd");
+        assert_eq!(arguments[9], "/tmp/project");
+        assert_eq!(arguments[10], "--config");
+        let override_value = arguments[11]
             .to_str()
             .expect("the config override should be UTF-8");
         assert!(override_value.starts_with("developer_instructions=\""));
         assert!(override_value.contains("Run `coterie prime`"));
-        assert_eq!(arguments.len(), 6, "the bootstrap must not be a prompt");
+        assert_eq!(arguments.len(), 12, "the bootstrap must not be a prompt");
 
         let variables = command
             .get_envs()
@@ -2001,20 +2120,28 @@ mod tests {
             Some(PathBuf::from("/tmp/project").as_path())
         );
         assert_eq!(
-            &arguments[..6],
+            &arguments[..15],
             [
                 "--provider",
                 "codex",
+                "--sandbox",
+                "workspace-write",
+                "--ask-for-approval",
+                "never",
+                "--config",
+                "sandbox_workspace_write.network_access=false",
+                "--config",
+                "web_search=\"disabled\"",
                 "exec",
                 "--json",
                 "--cd",
                 "/tmp/project",
+                "--config",
             ]
         );
-        assert_eq!(arguments[6], "--config");
-        assert!(arguments[7].starts_with("developer_instructions=\""));
-        assert!(arguments[7].contains("Run `coterie prime`"));
-        assert_eq!(arguments[8], "Begin your assigned task.");
+        assert!(arguments[15].starts_with("developer_instructions=\""));
+        assert!(arguments[15].contains("Run `coterie prime`"));
+        assert_eq!(arguments[16], "Begin your assigned task.");
 
         let variables = command
             .get_envs()
@@ -2044,6 +2171,39 @@ mod tests {
             variables["COTERIE_TOKEN"]
                 .as_deref()
                 .is_some_and(|value| value.starts_with("cot1_"))
+        );
+    }
+
+    #[test]
+    fn codex_review_profile_is_read_only_offline_and_non_interactive() {
+        let provider = CodexProvider::new(["codex"]);
+        let mut specification = specification();
+        specification.permission_profile = permission_profile("review");
+
+        let command = provider
+            .job_command(&specification, &job_environment())
+            .expect("the review command should be valid");
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            &arguments[..12],
+            [
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                "--config",
+                "sandbox_workspace_write.network_access=false",
+                "--config",
+                "web_search=\"disabled\"",
+                "exec",
+                "--json",
+                "--cd",
+                "/tmp/project",
+            ]
         );
     }
 
@@ -2158,6 +2318,10 @@ mod tests {
             ProviderCapability::BackgroundJobs,
             ProviderCapability::StructuredLifecycleEvents,
             ProviderCapability::TranscriptStreaming,
+            ProviderCapability::WorkingDirectory,
+            ProviderCapability::FilesystemSandbox,
+            ProviderCapability::NetworkSandbox,
+            ProviderCapability::ApprovalPolicy,
         ] {
             assert!(
                 probe.capabilities.contains(&capability),
@@ -2277,8 +2441,16 @@ mod tests {
                 generation: 2,
             },
             working_directory: PathBuf::from("/tmp/project"),
+            permission_profile: permission_profile("worker"),
             bootstrap_instruction: "Run `coterie prime`.".to_owned(),
         }
+    }
+
+    fn permission_profile(name: &str) -> PermissionProfile {
+        *crate::config::builtin_standard()
+            .permission_profiles
+            .get(name)
+            .expect("the built-in permission profile should exist")
     }
 
     fn job_environment() -> JobEnvironment {

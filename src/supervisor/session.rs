@@ -7,6 +7,7 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::auth::{AgentToken, SessionScope, TokenGenerationError};
+use crate::config::{NetworkPolicy, PermissionProfile};
 use crate::id::{AssignmentId, ProjectId, SessionId, TaskId};
 use crate::providers::{
     JobEnvironment, LaunchMode, LaunchSpecification, LifecycleState, Provider,
@@ -31,6 +32,7 @@ pub(crate) struct AgentLaunch {
     pub(crate) primary_project_root: PathBuf,
     pub(crate) task_id: TaskId,
     pub(crate) socket_path: PathBuf,
+    pub(crate) permission_profile: PermissionProfile,
     pub(crate) bootstrap_instruction: String,
     pub(crate) created_at: i64,
 }
@@ -371,6 +373,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         let specification = LaunchSpecification {
             scope: launch.scope,
             working_directory: launch.working_directory.clone(),
+            permission_profile: launch.permission_profile,
             bootstrap_instruction: launch.bootstrap_instruction.clone(),
         };
         let handle = match launch.mode {
@@ -888,6 +891,22 @@ fn required_capabilities(
     [Some(mode), startup, structured, transcript]
         .into_iter()
         .flatten()
+        .chain(required_permission_capabilities(launch.permission_profile))
+}
+
+pub(crate) fn required_permission_capabilities(
+    permission_profile: PermissionProfile,
+) -> impl Iterator<Item = ProviderCapability> {
+    let network = (permission_profile.network == NetworkPolicy::Deny)
+        .then_some(ProviderCapability::NetworkSandbox);
+    [
+        Some(ProviderCapability::WorkingDirectory),
+        Some(ProviderCapability::FilesystemSandbox),
+        network,
+        Some(ProviderCapability::ApprovalPolicy),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 fn validate_provider_probe(
@@ -979,6 +998,7 @@ mod tests {
 
     use super::{AgentLaunch, AgentSessionSupervisor};
     use crate::auth::SessionScope;
+    use crate::config::builtin_standard;
     use crate::id::{AgentId, ProjectId, RunId, SessionId, TaskId};
     use crate::providers::fake::{FakeEvent, FakeProvider, FakeScript};
     use crate::providers::{
@@ -1083,6 +1103,48 @@ mod tests {
                 Ok(())
             })
             .expect("failed preflight must not create durable launch intent");
+    }
+
+    #[test]
+    fn missing_permission_capability_is_rejected_before_launch_intent() {
+        for (capability, diagnostic) in [
+            (ProviderCapability::WorkingDirectory, "working directory"),
+            (ProviderCapability::FilesystemSandbox, "filesystem"),
+            (ProviderCapability::NetworkSandbox, "network"),
+            (ProviderCapability::ApprovalPolicy, "approval"),
+            (
+                ProviderCapability::StartupInstructions,
+                "startup instruction",
+            ),
+        ] {
+            let directory = TestDirectory::new();
+            let mut store = store_with_run(&directory);
+            let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+            let provider = FakeProvider::new([FakeScript::new([])])
+                .without_capability(capability);
+            let mut supervisor =
+                AgentSessionSupervisor::new(provider, &directory.0);
+
+            let error = match supervisor.launch(&mut store, &launch(run_id)) {
+                Err(error) => error,
+                Ok(_) => panic!("an unenforceable permission must fail closed"),
+            };
+
+            assert!(error.to_string().contains(diagnostic));
+            assert!(supervisor.provider.launches().is_empty());
+            store
+                .transaction(|repositories| {
+                    assert_eq!(
+                        repositories
+                            .session(launch(run_id).scope.session_id)?,
+                        None
+                    );
+                    Ok(())
+                })
+                .expect(
+                    "failed preflight must not create durable launch intent",
+                );
+        }
     }
 
     #[test]
@@ -1396,8 +1458,8 @@ mod tests {
             &executable,
             "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then printf 'codex-cli 0.151.0\\n'; exit 0; fi\n\
-             if [ \"$1\" = \"--help\" ]; then printf 'Usage: codex [OPTIONS] [PROMPT]\\n  --config <key=value>\\n  --cd <DIR>\\n'; exit 0; fi\n\
-             if [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--help\" ]; then printf 'Usage: codex exec [OPTIONS] [PROMPT]\\n  --config <key=value>\\n  --cd <DIR>\\n  --json\\n'; exit 0; fi\n\
+             if [ \"$1\" = \"--help\" ]; then printf 'Usage: codex [OPTIONS] [PROMPT]\\n  --config <key=value>\\n  --cd <DIR>\\n  --sandbox <SANDBOX_MODE>\\n  --ask-for-approval <APPROVAL_POLICY>\\n'; exit 0; fi\n\
+             if [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--help\" ]; then printf 'Usage: codex exec [OPTIONS] [PROMPT]\\n  --config <key=value>\\n  --cd <DIR>\\n  --sandbox <SANDBOX_MODE>\\n  --ask-for-approval <APPROVAL_POLICY>\\n  --json\\n'; exit 0; fi\n\
              {\n\
                printf 'project_id=%s\\n' \"$COTERIE_PROJECT_ID\"\n\
                printf 'run_id=%s\\n' \"$COTERIE_RUN_ID\"\n\
@@ -1651,6 +1713,10 @@ mod tests {
             primary_project_root: PathBuf::from("/tmp/project"),
             task_id: TASK_ID.parse::<TaskId>().expect("valid task ID"),
             socket_path: PathBuf::from("/tmp/coterie.sock"),
+            permission_profile: *builtin_standard()
+                .permission_profiles
+                .get("worker")
+                .expect("the worker permission profile should exist"),
             bootstrap_instruction: "Run `coterie prime`.".to_owned(),
             created_at: 10,
         }

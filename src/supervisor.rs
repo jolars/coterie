@@ -70,7 +70,7 @@ use crate::workspace::{WorkspaceError, WorkspaceSupervisor};
 
 use self::session::{
     AgentLaunch, AgentSessionError, AgentSessionSupervisor,
-    validate_provider_capabilities,
+    required_permission_capabilities, validate_provider_capabilities,
 };
 use crate::transcript::TranscriptStore;
 
@@ -225,6 +225,14 @@ async fn launch_foreground_codex(
         .providers
         .get("codex")
         .expect("the compiled default archetype binds the Codex provider");
+    let archetype = builtin_standard();
+    let lead = archetype
+        .role(archetype.lead)
+        .expect("the built-in archetype has its designated lead role");
+    let permission_profile = *archetype
+        .permission_profiles
+        .get(lead.permission_profile)
+        .expect("the built-in lead references a permission profile");
     let mut provider = CodexProvider::new(binding.command.iter().copied());
     let probe = provider.probe().map_err(AgentSessionError::from)?;
     validate_provider_capabilities(
@@ -232,7 +240,9 @@ async fn launch_foreground_codex(
         [
             ProviderCapability::ForegroundInteractive,
             ProviderCapability::StartupInstructions,
-        ],
+        ]
+        .into_iter()
+        .chain(required_permission_capabilities(permission_profile)),
     )?;
 
     let token = AgentToken::generate().map_err(AgentSessionError::from)?;
@@ -267,6 +277,7 @@ async fn launch_foreground_codex(
     let specification = LaunchSpecification {
         scope,
         working_directory: project.canonical_path.clone(),
+        permission_profile,
         bootstrap_instruction,
     };
     let environment = InteractiveEnvironment {
@@ -2349,6 +2360,18 @@ fn spawn_agent(
     let role_definition = archetype
         .role(&role)
         .ok_or_else(|| not_found(format!("role `{role}` is not configured")))?;
+    let permission_profile = *archetype
+        .permission_profiles
+        .get(role_definition.permission_profile)
+        .ok_or_else(|| {
+            RpcFailure::new(
+                RpcFailureCode::Internal,
+                format!(
+                    "role `{role}` references missing permission profile `{}`",
+                    role_definition.permission_profile
+                ),
+            )
+        })?;
     if role_definition.mode != RoleMode::Job {
         return Err(conflict(format!(
             "role `{role}` is not a background job role"
@@ -2568,6 +2591,7 @@ fn spawn_agent(
         primary_project_root: primary_project.canonical_path,
         task_id: intent.task_id,
         socket_path: socket_path.to_path_buf(),
+        permission_profile,
         bootstrap_instruction: bootstrap_instruction(run_id, &role),
         created_at: now,
     };

@@ -123,7 +123,7 @@ later milestones build on.
 - [x] Launch workers through `codex exec --json`, parse its JSONL event stream,
   classify exits and malformed frames, store append-only transcripts, and
   pass only the identity-scoped environment.
-- [ ] Map the built-in permission profiles to enforceable Codex flags. Fail
+- [x] Map the built-in permission profiles to enforceable Codex flags. Fail
   closed when a requested filesystem, network, approval, bootstrap, or
   working directory capability cannot be enforced.
 - [ ] Implement the workspace trait with `git2`: record a base commit, create a
