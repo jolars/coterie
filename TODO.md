@@ -153,7 +153,7 @@ later milestones build on.
 - [x] Closing the foreground leaves the run and active worker intact. A later
   invocation reconstructs orchestration context even when transparent Codex
   session reattachment is unavailable.
-- [ ] Interrupting the foreground reaches Codex but does not stop the run;
+- [x] Interrupting the foreground reaches Codex but does not stop the run;
   `coterie stop` performs bounded shutdown and preserves recoverable work.
 - [ ] Unit, fake-provider, temporary-repository, and opt-in real-Codex contract
   tests pass. CI never requires networked or account-authenticated Codex
