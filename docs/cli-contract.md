@@ -11,7 +11,8 @@ terminal streams, so Coterie does not print a wrapper response around the TUI.
 Coterie supplies its orchestration bootstrap through Codex's
 `developer_instructions` setting; Codex otherwise performs its normal project
 instruction discovery, including the repository's `AGENTS.md`. Background
-sessions continue to use the deterministic fake provider during this M3 slice.
+sessions run as supervised `codex exec --json` jobs, and the supervisor appends
+their validated JSONL output to durable transcripts as it arrives.
 
 The minimum delegation commands are:
 
@@ -39,6 +40,12 @@ task IDs. Generated help is authoritative for argument spelling and defaults.
 Commands other than the foreground launch require an active run and never
 create one as a side effect.
 
+Closing a submitted worktree task requires a recorded successful integration.
+The closure summary records the operator's explicit validation, and the closed
+task result retains both the assignment commits and the resulting target commit.
+A rejected close is an idempotent mutation; after correcting its precondition,
+the caller uses a new operation ID.
+
 `workspace integrate` requires a successfully completed assignment whose task is
 `submitted`. Before recording durable intent, it verifies the assignment
 worktree and target repository identities, requires both worktrees to be clean,
@@ -56,15 +63,24 @@ integration or shutdown while work may remain recoverable.
 can be attempted. Inbox reads never acknowledge messages implicitly. A caller
 passes the returned `next_cursor` to `inbox ack`; acknowledgements are
 operation-ID idempotent, acknowledge every message through that cursor, and
-never move the durable acknowledgement point backward. The M2 fake provider
-does not advertise live steering, so agents receive these messages through the
+never move the durable acknowledgement point backward. The Codex adapter does
+not advertise live steering, so agents receive these messages through the
 durable inbox.
 
 The operator connects through the local operator channel. An agent invocation
-must carry all of `COTERIE_AGENT_ID`, `COTERIE_SESSION_ID`, and `COTERIE_TOKEN`;
-`COTERIE_RUN_ID`, when present, must match the active run. A partial or invalid
-agent environment is an authentication error and never falls back to operator
-authority. Agent names do not affect authentication.
+connects directly to its `COTERIE_SOCKET` and must carry
+`COTERIE_PRIMARY_PROJECT_ROOT`, `COTERIE_PROJECT_ID`, `COTERIE_RUN_ID`,
+`COTERIE_AGENT_ID`, `COTERIE_SESSION_ID`, and `COTERIE_TOKEN`. A partial or
+invalid agent environment is an authentication error and never falls back to
+operator authority. Agent names do not affect authentication.
+
+`coterie stop` stops accepting worker spawns, interrupts supervised workers,
+requests foreground termination, and terminates surviving workers after a
+bounded grace period. It records the run as stopped and retires its socket and
+project index only after every controlled process is terminal. If Coterie
+cannot prove that outcome before the timeout, the command fails and leaves the
+run active. Shutdown does not delete assignment worktrees or their owned
+references.
 
 ## JSON output
 

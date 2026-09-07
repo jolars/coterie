@@ -464,10 +464,34 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         run_id: crate::id::RunId,
         reconciled_at: i64,
     ) -> Result<(), AgentSessionError> {
+        self.reconcile_sessions(store, run_id, reconciled_at, false)
+    }
+
+    /// Rechecks sessions whose provider state could not previously be proved.
+    pub(crate) fn reconcile_unknown_sessions(
+        &mut self,
+        store: &mut Store,
+        run_id: crate::id::RunId,
+        reconciled_at: i64,
+    ) -> Result<(), AgentSessionError> {
+        self.reconcile_sessions(store, run_id, reconciled_at, true)
+    }
+
+    fn reconcile_sessions(
+        &mut self,
+        store: &mut Store,
+        run_id: crate::id::RunId,
+        reconciled_at: i64,
+        unknown_only: bool,
+    ) -> Result<(), AgentSessionError> {
         let sessions =
             store.transaction(|repositories| repositories.sessions(run_id))?;
         for session in sessions {
-            if session.state.is_terminal() {
+            if session.state.is_terminal()
+                || unknown_only
+                    && session.reconciliation_state
+                        != ExternalResourceState::Unknown
+            {
                 continue;
             }
             let scope = SessionScope {
@@ -684,6 +708,34 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         Ok(Some(event))
     }
 
+    /// Drains a bounded batch of provider events without waiting for output.
+    pub(crate) fn advance_available(
+        &mut self,
+        store: &mut Store,
+        run_id: crate::id::RunId,
+        observed_at: i64,
+        maximum_events: usize,
+    ) -> Result<usize, AgentSessionError> {
+        self.reconcile_unknown_sessions(store, run_id, observed_at)?;
+        let session_ids = self.sessions.keys().copied().collect::<Vec<_>>();
+        let mut advanced = 0;
+        loop {
+            let mut made_progress = false;
+            for session_id in &session_ids {
+                if advanced == maximum_events {
+                    return Ok(advanced);
+                }
+                if self.advance(store, *session_id, observed_at)?.is_some() {
+                    advanced += 1;
+                    made_progress = true;
+                }
+            }
+            if !made_progress {
+                return Ok(advanced);
+            }
+        }
+    }
+
     fn append_transcript(
         &self,
         session_id: SessionId,
@@ -888,10 +940,21 @@ fn required_capabilities(
         .then_some(ProviderCapability::StructuredLifecycleEvents);
     let transcript = matches!(launch.mode, LaunchMode::Job)
         .then_some(ProviderCapability::TranscriptStreaming);
-    [Some(mode), startup, structured, transcript]
-        .into_iter()
-        .flatten()
-        .chain(required_permission_capabilities(launch.permission_profile))
+    let interrupt = matches!(launch.mode, LaunchMode::Job)
+        .then_some(ProviderCapability::Interrupt);
+    let termination = matches!(launch.mode, LaunchMode::Job)
+        .then_some(ProviderCapability::Termination);
+    [
+        Some(mode),
+        startup,
+        structured,
+        transcript,
+        interrupt,
+        termination,
+    ]
+    .into_iter()
+    .flatten()
+    .chain(required_permission_capabilities(launch.permission_profile))
 }
 
 pub(crate) fn required_permission_capabilities(
@@ -1221,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_reconciliation_marks_vanished_fake_process_lost_once() {
+    fn restart_reconciliation_migrates_legacy_fake_session_to_lost_once() {
         let directory = TestDirectory::new();
         let mut store = store_with_run(&directory);
         let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
@@ -1235,8 +1298,10 @@ mod tests {
             .expect("the fake session should launch");
         drop(first);
 
-        let mut restarted =
-            AgentSessionSupervisor::new(FakeProvider::new([]), &directory.0);
+        let mut restarted = AgentSessionSupervisor::new(
+            CodexProvider::new(["codex"]),
+            &directory.0,
+        );
         restarted
             .reconcile_after_restart(&mut store, run_id, 11)
             .expect("restart reconciliation should succeed");
@@ -1266,6 +1331,48 @@ mod tests {
                 Ok(())
             })
             .expect("the lost session should be readable");
+    }
+
+    #[test]
+    fn polling_rechecks_an_unknown_session_until_it_is_lost() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let launch = launch(run_id);
+        let mut first = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([])]),
+            &directory.0,
+        );
+        first
+            .launch(&mut store, &launch)
+            .expect("the fake session should launch");
+        drop(first);
+
+        let provider = FakeProvider::new([]).with_missing_recoveries([
+            crate::providers::ProviderRecovery::Unknown,
+            crate::providers::ProviderRecovery::Lost,
+        ]);
+        let mut restarted = AgentSessionSupervisor::new(provider, &directory.0);
+        restarted
+            .reconcile_after_restart(&mut store, run_id, 11)
+            .expect("initial restart reconciliation should remain uncertain");
+        restarted
+            .advance_available(&mut store, run_id, 12, 10)
+            .expect("polling should retry unresolved recovery");
+
+        store
+            .transaction(|repositories| {
+                let session = repositories
+                    .session(launch.scope.session_id)?
+                    .expect("the lost session should remain durable");
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Lost
+                );
+                assert_eq!(session.state, LifecycleState::Lost);
+                Ok(())
+            })
+            .expect("the retried recovery should be readable");
     }
 
     #[test]
@@ -1464,6 +1571,7 @@ mod tests {
                printf 'project_id=%s\\n' \"$COTERIE_PROJECT_ID\"\n\
                printf 'run_id=%s\\n' \"$COTERIE_RUN_ID\"\n\
                printf 'agent_id=%s\\n' \"$COTERIE_AGENT_ID\"\n\
+               printf 'session_id=%s\\n' \"$COTERIE_SESSION_ID\"\n\
                printf 'role=%s\\n' \"$COTERIE_ROLE\"\n\
                printf 'task_id=%s\\n' \"$COTERIE_TASK_ID\"\n\
                printf 'socket=%s\\n' \"$COTERIE_SOCKET\"\n\
@@ -1541,6 +1649,7 @@ mod tests {
             format!("project_id={PROJECT_ID}"),
             format!("run_id={RUN_ID}"),
             format!("agent_id={AGENT_ID}"),
+            format!("session_id={SESSION_ID}"),
             "role=worker".to_owned(),
             format!("task_id={TASK_ID}"),
             format!("socket={}", launch.socket_path.display()),
@@ -1548,7 +1657,7 @@ mod tests {
         ] {
             assert!(environment.lines().any(|line| line == expected));
         }
-        assert!(!environment.contains("ambient_home=present"));
+        assert!(environment.contains("ambient_home=present"));
 
         store
             .transaction(|repositories| {

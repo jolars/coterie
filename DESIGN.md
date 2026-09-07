@@ -543,6 +543,7 @@ COTERIE_PROJECT_ID
 COTERIE_PRIMARY_PROJECT_ROOT
 COTERIE_RUN_ID
 COTERIE_AGENT_ID
+COTERIE_SESSION_ID
 COTERIE_ROLE
 COTERIE_TASK_ID
 COTERIE_SOCKET
@@ -866,11 +867,14 @@ allowlist. Attachment authority and provider filesystem authority are checked
 separately.
 
 Secrets and ambient environment variables are denied by default and passed only
-through trusted global configuration. Coterie redacts exact known credential
-values from storage it controls, stores token verifiers rather than raw tokens,
-and keeps runtime files private to the current user. It does not promise to
-sanitize a provider's independently managed transcript if the provider itself
-prints or stores a secret.
+through compiled defaults or trusted global configuration. The Codex MVP
+allowlist contains `PATH`, `HOME`, `CODEX_HOME`, and `OPENAI_API_KEY`, which
+preserves the project toolchain and Codex authentication without exposing the
+complete supervisor environment. Coterie redacts exact known credential values
+from storage it controls, stores token verifiers rather than raw tokens, and
+keeps runtime files private to the current user. It does not promise to sanitize
+a provider's independently managed transcript if the provider itself prints or
+stores a secret.
 
 ## Safety and reliability invariants
 

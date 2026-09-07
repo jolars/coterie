@@ -49,11 +49,13 @@ use crate::protocol::{
     TaskCounts, TaskSummary, VersionedRequest, VersionedResponse, read_frame,
     write_frame,
 };
+#[cfg(test)]
 use crate::providers::fake::{FakeEvent, FakeProvider, FakeScript};
+#[cfg(test)]
+use crate::providers::{ActivityState, SessionObservation};
 use crate::providers::{
-    ActivityState, CodexProvider, InteractiveEnvironment, LaunchMode,
-    LaunchSpecification, LifecycleState, Provider, ProviderCapability,
-    SessionObservation,
+    CodexProvider, InteractiveEnvironment, LaunchMode, LaunchSpecification,
+    LifecycleState, Provider, ProviderCapability,
 };
 use crate::state::{
     AcknowledgeMessagesMutation, AcknowledgeMessagesResult, AgentRecord,
@@ -84,6 +86,9 @@ use crate::transcript::TranscriptStore;
 const INTERNAL_SUPERVISOR_ARGUMENT: &str = "__supervisor";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+const SESSION_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const MAXIMUM_EVENTS_PER_POLL: usize = 256;
+const WORKER_INTERRUPT_GRACE: Duration = Duration::from_millis(250);
 const FOREGROUND_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const DATABASE_FILE: &str = "state.sqlite3";
 const MAXIMUM_LINUX_SOCKET_PATH_LENGTH: usize = 107;
@@ -173,21 +178,37 @@ pub(crate) async fn run(
                 return Err(SupervisorError::ForegroundOperationIdWithCommand);
             }
             let (request, operation_id, stopping) = public_request(command);
-            let project = discover_current_project()
-                .map_err(|error| command_error(error, operation_id))?;
-            let directories = CoterieDirectories::from_environment()
-                .map_err(SupervisorError::from)
-                .map_err(|error| command_error(error, operation_id))?;
-            let entry = active_entry(&project, &directories)
-                .map_err(|error| command_error(error, operation_id))?;
-            let mut client = connect_for_environment(&directories, &entry)
+            let agent_client = connect_from_agent_environment()
                 .await
                 .map_err(|error| command_error(error, operation_id))?;
+            let (mut client, operator_context) = if let Some(client) =
+                agent_client
+            {
+                (client, None)
+            } else {
+                let project = discover_current_project()
+                    .map_err(|error| command_error(error, operation_id))?;
+                let directories = CoterieDirectories::from_environment()
+                    .map_err(SupervisorError::from)
+                    .map_err(|error| command_error(error, operation_id))?;
+                let entry = active_entry(&project, &directories)
+                    .map_err(|error| command_error(error, operation_id))?;
+                let socket = checked_socket_path(&directories, entry.run_id)
+                    .map_err(|error| command_error(error, operation_id))?;
+                let client =
+                    SupervisorClient::connect_operator_at(&socket, &entry)
+                        .await
+                        .map_err(|error| command_error(error, operation_id))?;
+                (client, Some((project, directories, entry)))
+            };
             let response = client
                 .request(request)
                 .await
                 .map_err(|error| command_error(error, operation_id))?;
             if stopping {
+                let (project, directories, entry) = operator_context
+                    .ok_or(SupervisorError::InvalidProof)
+                    .map_err(|error| command_error(error, operation_id))?;
                 await_retirement(&directories, &project, &entry)
                     .await
                     .map_err(|error| {
@@ -247,6 +268,8 @@ async fn launch_foreground_codex(
         [
             ProviderCapability::ForegroundInteractive,
             ProviderCapability::StartupInstructions,
+            ProviderCapability::Interrupt,
+            ProviderCapability::Termination,
         ]
         .into_iter()
         .chain(required_permission_capabilities(permission_profile)),
@@ -462,41 +485,75 @@ fn validate_foreground_exit_response(
     }
 }
 
-async fn connect_for_environment(
-    directories: &CoterieDirectories,
-    entry: &ActiveRunEntry,
-) -> Result<SupervisorClient, SupervisorError> {
+async fn connect_from_agent_environment()
+-> Result<Option<SupervisorClient>, SupervisorError> {
     let agent_id = env::var_os("COTERIE_AGENT_ID");
     let session_id = env::var_os("COTERIE_SESSION_ID");
     let token = env::var_os("COTERIE_TOKEN");
-    let socket = checked_socket_path(directories, entry.run_id)?;
-    match (agent_id, session_id, token) {
-        (None, None, None) => {
-            SupervisorClient::connect_operator_at(&socket, entry).await
-        }
-        (Some(agent_id), Some(session_id), Some(token)) => {
-            let agent_id =
-                parse_agent_environment(agent_id, "COTERIE_AGENT_ID")?;
-            let session_id =
-                parse_agent_environment(session_id, "COTERIE_SESSION_ID")?;
-            let token = parse_agent_environment(token, "COTERIE_TOKEN")?;
-            if let Some(run_id) = env::var_os("COTERIE_RUN_ID") {
-                let run_id: RunId =
-                    parse_agent_environment(run_id, "COTERIE_RUN_ID")?;
-                if run_id != entry.run_id {
-                    return Err(SupervisorError::AgentEnvironmentRunMismatch {
-                        expected: entry.run_id,
-                        found: run_id,
-                    });
-                }
-            }
-            SupervisorClient::connect_agent_at(
-                &socket, entry, agent_id, session_id, token,
-            )
-            .await
-        }
-        _ => Err(SupervisorError::IncompleteAgentEnvironment),
+    let run_id = env::var_os("COTERIE_RUN_ID");
+    let project_id = env::var_os("COTERIE_PROJECT_ID");
+    let primary_project_root = env::var_os("COTERIE_PRIMARY_PROJECT_ROOT");
+    let socket = env::var_os("COTERIE_SOCKET");
+    if [
+        &agent_id,
+        &session_id,
+        &token,
+        &run_id,
+        &project_id,
+        &primary_project_root,
+        &socket,
+    ]
+    .into_iter()
+    .all(Option::is_none)
+    {
+        return Ok(None);
     }
+    let (
+        Some(agent_id),
+        Some(session_id),
+        Some(token),
+        Some(run_id),
+        Some(project_id),
+        Some(primary_project_root),
+        Some(socket),
+    ) = (
+        agent_id,
+        session_id,
+        token,
+        run_id,
+        project_id,
+        primary_project_root,
+        socket,
+    )
+    else {
+        return Err(SupervisorError::IncompleteAgentEnvironment);
+    };
+    let agent_id = parse_agent_environment(agent_id, "COTERIE_AGENT_ID")?;
+    let session_id = parse_agent_environment(session_id, "COTERIE_SESSION_ID")?;
+    let token = parse_agent_environment(token, "COTERIE_TOKEN")?;
+    let run_id = parse_agent_environment(run_id, "COTERIE_RUN_ID")?;
+    let project_id = parse_agent_environment(project_id, "COTERIE_PROJECT_ID")?;
+    let primary_project_root = PathBuf::from(primary_project_root);
+    if !primary_project_root.is_absolute() {
+        return Err(SupervisorError::InvalidAgentEnvironment {
+            variable: "COTERIE_PRIMARY_PROJECT_ROOT",
+        });
+    }
+    let socket = PathBuf::from(socket);
+    if !socket.is_absolute() {
+        return Err(SupervisorError::InvalidAgentEnvironment {
+            variable: "COTERIE_SOCKET",
+        });
+    }
+    let socket = validate_socket_path(socket)?;
+    let primary_project = DiscoveredProject::discover(primary_project_root)?;
+    let expected =
+        ActiveRunEntry::new(run_id, project_id, primary_project.identity);
+    SupervisorClient::connect_agent_at(
+        &socket, &expected, agent_id, session_id, token,
+    )
+    .await
+    .map(Some)
 }
 
 fn parse_agent_environment<T>(
@@ -946,19 +1003,22 @@ async fn serve(
     Ok(())
 }
 
-async fn serve_listener<B: WorkspaceBackend>(
+async fn serve_listener<P: Provider, B: WorkspaceBackend>(
     listener: UnixListener,
     active: ActiveRunEntry,
     run_state_directory: &Path,
     socket_path: &Path,
     store: &mut Store,
-    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    sessions: &mut AgentSessionSupervisor<P>,
     workspaces: &mut WorkspaceSupervisor<B>,
 ) -> Result<(), SupervisorError> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(16);
     let mut connections = JoinSet::new();
     let mut foreground = ForegroundCoordination::default();
+    let mut session_poll = tokio::time::interval(SESSION_POLL_INTERVAL);
+    session_poll
+        .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             shutdown = shutdown_rx.recv() => {
@@ -999,6 +1059,20 @@ async fn serve_listener<B: WorkspaceBackend>(
                     break;
                 }
             }
+            _ = session_poll.tick() => {
+                sessions.advance_available(
+                    store,
+                    active.run_id,
+                    unix_timestamp()?,
+                    MAXIMUM_EVENTS_PER_POLL,
+                )?;
+                progress_shutdown(
+                    store,
+                    sessions,
+                    active.run_id,
+                    &mut foreground,
+                );
+            }
             _ = sleep_until_pending_shutdown(&foreground.pending_shutdown),
                 if foreground.pending_shutdown.is_some() =>
             {
@@ -1008,7 +1082,7 @@ async fn serve_listener<B: WorkspaceBackend>(
                 let failure = RpcFailure::new(
                     RpcFailureCode::Unavailable,
                     format!(
-                        "timed out waiting for foreground processes before stopping run {}",
+                        "timed out waiting for agent processes before stopping run {}",
                         active.run_id
                     ),
                 );
@@ -1029,6 +1103,22 @@ async fn serve_listener<B: WorkspaceBackend>(
     Ok(())
 }
 
+#[cfg(not(test))]
+fn runtime_sessions(
+    run_state_directory: &Path,
+) -> AgentSessionSupervisor<CodexProvider> {
+    let defaults = compiled_defaults();
+    let binding = defaults
+        .providers
+        .get("codex")
+        .expect("the compiled defaults bind the Codex provider");
+    AgentSessionSupervisor::new(
+        CodexProvider::new(binding.command.iter().copied()),
+        run_state_directory,
+    )
+}
+
+#[cfg(test)]
 fn runtime_sessions(
     run_state_directory: &Path,
 ) -> AgentSessionSupervisor<FakeProvider> {
@@ -1087,6 +1177,8 @@ struct ForegroundControlWaiter {
 struct PendingShutdown {
     operation_id: OperationId,
     responses: Vec<oneshot::Sender<Result<RpcResponse, RpcFailure>>>,
+    terminate_at: Instant,
+    termination_sent: bool,
     deadline: Instant,
 }
 
@@ -1104,9 +1196,9 @@ async fn sleep_until_pending_shutdown(pending: &Option<PendingShutdown>) {
     tokio::time::sleep_until(deadline).await;
 }
 
-fn handle_command<B: WorkspaceBackend>(
+fn handle_command<P: Provider, B: WorkspaceBackend>(
     store: &mut Store,
-    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    sessions: &mut AgentSessionSupervisor<P>,
     workspaces: &mut WorkspaceSupervisor<B>,
     paths: RuntimePaths<'_>,
     run_id: RunId,
@@ -1134,7 +1226,14 @@ fn handle_command<B: WorkspaceBackend>(
             operation_id,
             response,
         } => {
-            begin_shutdown(store, run_id, operation_id, response, foreground);
+            begin_shutdown(
+                store,
+                sessions,
+                run_id,
+                operation_id,
+                response,
+                foreground,
+            );
         }
         SupervisorCommand::Dispatch {
             caller,
@@ -1158,21 +1257,44 @@ fn handle_command<B: WorkspaceBackend>(
                 | RpcRequest::ForegroundLaunchFailed { scope } => Some(*scope),
                 _ => None,
             };
-            let result = execute_request(
-                store, sessions, workspaces, paths, run_id, &caller, request,
-            );
+            let result = if foreground.pending_shutdown.is_some()
+                && matches!(&request, RpcRequest::Spawn { .. })
+            {
+                Err(conflict(
+                    "the run is stopping and no longer accepts worker spawns",
+                ))
+            } else {
+                rpc_timestamp()
+                    .and_then(|observed_at| {
+                        sessions
+                            .advance_available(
+                                store,
+                                run_id,
+                                observed_at,
+                                MAXIMUM_EVENTS_PER_POLL,
+                            )
+                            .map_err(rpc_session_failure)
+                    })
+                    .and_then(|_| {
+                        execute_request(
+                            store, sessions, workspaces, paths, run_id,
+                            &caller, request,
+                        )
+                    })
+            };
             let succeeded = result.is_ok();
             let _request_may_have_disconnected = response.send(result);
             if succeeded && let Some(scope) = ended_scope {
                 release_foreground_control(&mut foreground.controls, scope);
-                finish_shutdown_if_ready(store, run_id, foreground);
+                progress_shutdown(store, sessions, run_id, foreground);
             }
         }
     }
 }
 
-fn begin_shutdown(
+fn begin_shutdown<P: Provider>(
     store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<P>,
     run_id: RunId,
     operation_id: OperationId,
     response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
@@ -1188,8 +1310,27 @@ fn begin_shutdown(
         }
         return;
     }
-    match active_foreground_scopes(store, run_id) {
-        Ok(scopes) if scopes.is_empty() => {
+    let reconciled_at = match rpc_timestamp() {
+        Ok(reconciled_at) => reconciled_at,
+        Err(error) => {
+            let _request_may_have_disconnected = response.send(Err(error));
+            return;
+        }
+    };
+    if let Err(error) =
+        sessions.reconcile_unknown_sessions(store, run_id, reconciled_at)
+    {
+        let _request_may_have_disconnected =
+            response.send(Err(rpc_session_failure(error)));
+        return;
+    }
+    let foreground_scopes = active_foreground_scopes(store, run_id);
+    let background_sessions = active_background_session_ids(store, run_id);
+    match (foreground_scopes, background_sessions) {
+        (Ok(foreground_scopes), Ok(background_sessions))
+            if foreground_scopes.is_empty()
+                && background_sessions.is_empty() =>
+        {
             let result = persist_shutdown(store, run_id, operation_id)
                 .map_err(supervisor_rpc_failure);
             let stopped = result.is_ok();
@@ -1197,15 +1338,39 @@ fn begin_shutdown(
                 foreground.retire_without_response = true;
             }
         }
-        Ok(scopes) => {
+        (Ok(foreground_scopes), Ok(background_sessions)) => {
+            let observed_at = match rpc_timestamp() {
+                Ok(observed_at) => observed_at,
+                Err(error) => {
+                    let _request_may_have_disconnected =
+                        response.send(Err(error));
+                    return;
+                }
+            };
+            for session_id in background_sessions {
+                if let Err(error) =
+                    sessions.interrupt(store, session_id, observed_at)
+                {
+                    let _request_may_have_disconnected =
+                        response.send(Err(rpc_session_failure(error)));
+                    return;
+                }
+            }
+            let now = Instant::now();
             foreground.pending_shutdown = Some(PendingShutdown {
                 operation_id,
                 responses: vec![response],
-                deadline: Instant::now() + FOREGROUND_SHUTDOWN_TIMEOUT,
+                terminate_at: now + WORKER_INTERRUPT_GRACE,
+                termination_sent: false,
+                deadline: now + FOREGROUND_SHUTDOWN_TIMEOUT,
             });
-            request_foreground_termination(&mut foreground.controls, &scopes);
+            request_foreground_termination(
+                &mut foreground.controls,
+                &foreground_scopes,
+            );
+            progress_shutdown(store, sessions, run_id, foreground);
         }
-        Err(error) => {
+        (Err(error), _) | (_, Err(error)) => {
             let _request_may_have_disconnected =
                 response.send(Err(rpc_state_failure(error)));
         }
@@ -1301,16 +1466,22 @@ fn release_foreground_control(
         )));
 }
 
-fn finish_shutdown_if_ready(
+fn progress_shutdown<P: Provider>(
     store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<P>,
     run_id: RunId,
     foreground: &mut ForegroundCoordination,
 ) {
     if foreground.pending_shutdown.is_none() {
         return;
     }
-    match active_foreground_scopes(store, run_id) {
-        Ok(scopes) if scopes.is_empty() => {
+    let foreground_scopes = active_foreground_scopes(store, run_id);
+    let background_sessions = active_background_session_ids(store, run_id);
+    match (foreground_scopes, background_sessions) {
+        (Ok(foreground_scopes), Ok(background_sessions))
+            if foreground_scopes.is_empty()
+                && background_sessions.is_empty() =>
+        {
             let pending = foreground
                 .pending_shutdown
                 .take()
@@ -1326,8 +1497,38 @@ fn finish_shutdown_if_ready(
                 foreground.retire_without_response = true;
             }
         }
-        Ok(_) => {}
-        Err(error) => {
+        (Ok(_), Ok(background_sessions)) => {
+            let should_terminate =
+                foreground.pending_shutdown.as_ref().is_some_and(|pending| {
+                    !pending.termination_sent
+                        && Instant::now() >= pending.terminate_at
+                });
+            if !should_terminate {
+                return;
+            }
+            let observed_at = match rpc_timestamp() {
+                Ok(observed_at) => observed_at,
+                Err(error) => {
+                    fail_pending_shutdown(foreground, error);
+                    return;
+                }
+            };
+            for session_id in background_sessions {
+                if let Err(error) =
+                    sessions.terminate(store, session_id, observed_at)
+                {
+                    fail_pending_shutdown(
+                        foreground,
+                        rpc_session_failure(error),
+                    );
+                    return;
+                }
+            }
+            if let Some(pending) = &mut foreground.pending_shutdown {
+                pending.termination_sent = true;
+            }
+        }
+        (Err(error), _) | (_, Err(error)) => {
             let pending = foreground
                 .pending_shutdown
                 .take()
@@ -1338,6 +1539,19 @@ fn finish_shutdown_if_ready(
                     response.send(Err(failure.clone()));
             }
         }
+    }
+}
+
+fn fail_pending_shutdown(
+    foreground: &mut ForegroundCoordination,
+    failure: RpcFailure,
+) {
+    let Some(pending) = foreground.pending_shutdown.take() else {
+        return;
+    };
+    for response in pending.responses {
+        let _request_may_have_disconnected =
+            response.send(Err(failure.clone()));
     }
 }
 
@@ -1359,6 +1573,23 @@ fn active_foreground_scopes(
                 session_id: session.id,
                 generation: session.generation,
             })
+            .collect())
+    })
+}
+
+fn active_background_session_ids(
+    store: &mut Store,
+    run_id: RunId,
+) -> Result<Vec<SessionId>, StoreError> {
+    store.transaction(|repositories| {
+        Ok(repositories
+            .sessions(run_id)?
+            .into_iter()
+            .filter(|session| {
+                session.process_owner == SessionProcessOwner::Supervisor
+                    && !session.state.is_terminal()
+            })
+            .map(|session| session.id)
             .collect())
     })
 }
@@ -1392,9 +1623,9 @@ struct MessageIntent {
     sequence: i64,
 }
 
-struct SpawnRuntime<'a, B> {
+struct SpawnRuntime<'a, P, B> {
     store: &'a mut Store,
-    sessions: &'a mut AgentSessionSupervisor<FakeProvider>,
+    sessions: &'a mut AgentSessionSupervisor<P>,
     workspaces: &'a mut WorkspaceSupervisor<B>,
     run_state_directory: &'a Path,
     socket_path: &'a Path,
@@ -1407,9 +1638,9 @@ struct RuntimePaths<'a> {
     socket_path: &'a Path,
 }
 
-fn execute_request<B: WorkspaceBackend>(
+fn execute_request<P: Provider, B: WorkspaceBackend>(
     store: &mut Store,
-    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    sessions: &mut AgentSessionSupervisor<P>,
     workspaces: &mut WorkspaceSupervisor<B>,
     paths: RuntimePaths<'_>,
     run_id: RunId,
@@ -2346,23 +2577,69 @@ fn close_task(
     if summary.trim().is_empty() {
         return Err(invalid_argument("closure summary cannot be empty"));
     }
-    let result = store
-        .transaction(|repositories| {
-            if let Some(operation) = repositories.operation(operation_id)? {
-                return Ok(operation
-                    .request
-                    .get("result")
-                    .cloned()
-                    .filter(|result| !result.is_null()));
-            }
-            let assignment_result =
-                repositories.task(task_id)?.and_then(|task| task.result);
-            Ok(Some(json!({
-                "assignment_result": assignment_result,
-                "validation_summary": summary,
-            })))
-        })
+    let existing = store
+        .transaction(|repositories| repositories.operation(operation_id))
         .map_err(rpc_state_failure)?;
+    let result = if let Some(operation) = existing {
+        operation
+            .request
+            .get("result")
+            .cloned()
+            .filter(|result| !result.is_null())
+    } else {
+        let (task, assignment, workspace) = store
+            .transaction(|repositories| {
+                let task = repositories.task(task_id)?;
+                let assignment = task
+                    .as_ref()
+                    .filter(|task| task.status == TaskStatus::Submitted)
+                    .map(|_| {
+                        repositories.latest_assignment_for_task(run_id, task_id)
+                    })
+                    .transpose()?
+                    .flatten();
+                let workspace = assignment
+                    .as_ref()
+                    .map(|assignment| repositories.workspace(assignment.id))
+                    .transpose()?
+                    .flatten();
+                Ok((task, assignment, workspace))
+            })
+            .map_err(rpc_state_failure)?;
+        let assignment_result =
+            task.as_ref().and_then(|task| task.result.clone());
+        let mut result = json!({
+            "assignment_result": assignment_result,
+            "validation_summary": summary,
+        });
+        if task.is_some_and(|task| task.status == TaskStatus::Submitted) {
+            let assignment = assignment.ok_or_else(|| {
+                RpcFailure::new(
+                    RpcFailureCode::Internal,
+                    format!("submitted task `{task_id}` has no assignment"),
+                )
+            })?;
+            let workspace = workspace.ok_or_else(|| {
+                RpcFailure::new(
+                    RpcFailureCode::Internal,
+                    format!(
+                        "submitted task `{task_id}` has no assignment workspace"
+                    ),
+                )
+            })?;
+            if workspace.kind == "worktree"
+                && let Some(target_commit) = workspace.target_commit
+            {
+                result["integration"] = json!({
+                    "assignment_id": assignment.id,
+                    "base_commit": workspace.base_commit,
+                    "result_commit": workspace.result_commit,
+                    "target_commit": target_commit,
+                });
+            }
+        }
+        Some(result)
+    };
     let transition = TaskTransitionMutation {
         operation_id,
         run_id,
@@ -2385,8 +2662,8 @@ fn close_task(
     })
 }
 
-fn spawn_agent<B: WorkspaceBackend>(
-    runtime: SpawnRuntime<'_, B>,
+fn spawn_agent<P: Provider, B: WorkspaceBackend>(
+    runtime: SpawnRuntime<'_, P, B>,
     caller: &AuthenticatedCaller,
     operation_id: OperationId,
     role: String,
@@ -2665,7 +2942,7 @@ fn spawn_agent<B: WorkspaceBackend>(
         debug_assert_eq!(launched.scope, launch.scope);
         let _provider_token = launched.token;
     }
-    drain_fake_events(sessions, store, intent.session_id, now)?;
+    drain_available_events(sessions, store, intent.session_id, now)?;
     Ok(RpcResponse::Spawned {
         operation_id,
         agent: summary_for_agent(store, run_id, intent.agent_id)?,
@@ -3508,11 +3785,16 @@ fn require_transition(
         ) => Err(conflict(format!(
             "task `{task_id}` cannot {action} from `{status}`"
         ))),
+        TaskTransitionResult::Rejected(
+            TaskTransitionRejection::AcceptanceNotMet,
+        ) => Err(conflict(format!(
+            "task `{task_id}` cannot close because its worktree assignment has not been integrated"
+        ))),
     }
 }
 
-fn drain_fake_events(
-    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+fn drain_available_events<P: Provider>(
+    sessions: &mut AgentSessionSupervisor<P>,
     store: &mut Store,
     session_id: SessionId,
     observed_at: i64,
@@ -4410,16 +4692,10 @@ pub(crate) enum SupervisorError {
         "`--json` is unavailable for the interactive foreground launch because Codex owns the terminal streams"
     )]
     ForegroundJsonOutputUnsupported,
-    #[error(
-        "agent identity requires `COTERIE_AGENT_ID`, `COTERIE_SESSION_ID`, and `COTERIE_TOKEN`"
-    )]
+    #[error("agent identity requires the complete Coterie session environment")]
     IncompleteAgentEnvironment,
     #[error("agent environment variable `{variable}` is invalid")]
     InvalidAgentEnvironment { variable: &'static str },
-    #[error(
-        "agent environment belongs to run {found}, but this project is attached to {expected}"
-    )]
-    AgentEnvironmentRunMismatch { expected: RunId, found: RunId },
     #[error("run {run_id} and project {project_id} do not match durable state")]
     RunStateMismatch {
         run_id: RunId,
@@ -4523,8 +4799,7 @@ impl SupervisorError {
                 crate::cli::ErrorCode::InvalidArgument
             }
             Self::IncompleteAgentEnvironment
-            | Self::InvalidAgentEnvironment { .. }
-            | Self::AgentEnvironmentRunMismatch { .. } => {
+            | Self::InvalidAgentEnvironment { .. } => {
                 crate::cli::ErrorCode::Unauthenticated
             }
             Self::State(
@@ -4596,13 +4871,14 @@ mod tests {
     use std::path::PathBuf;
 
     use tokio::net::UnixListener;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     use super::{
-        AuthenticatedCaller, SupervisorClient, SupervisorCommand,
-        SupervisorError, launch_foreground, persist_shutdown, runtime_sessions,
-        runtime_workspaces, serve_connection, serve_listener,
-        validate_handshake, validate_socket_path,
+        AuthenticatedCaller, ForegroundCoordination, SupervisorClient,
+        SupervisorCommand, SupervisorError, begin_shutdown, launch_foreground,
+        persist_shutdown, runtime_sessions, runtime_workspaces,
+        serve_connection, serve_listener, validate_handshake,
+        validate_socket_path,
     };
     use crate::auth::{AgentToken, SessionScope};
     use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
@@ -4614,8 +4890,9 @@ mod tests {
     };
     use crate::providers::LifecycleState;
     use crate::state::{
-        AgentRecord, ProjectRecord, RunRecord, SessionCredentialRecord,
-        SessionProcessOwner, SessionRecord, Store, StoreError,
+        AgentRecord, ExternalResourceState, ProjectRecord, RunRecord,
+        SessionCredentialRecord, SessionProcessOwner, SessionRecord, Store,
+        StoreError,
     };
     use crate::tasks::TaskStatus;
     use crate::workspace::WorkspaceSupervisor;
@@ -4893,7 +5170,7 @@ mod tests {
                     run_id: active.run_id,
                     agent_id,
                     generation: scope.generation,
-                    provider: "fake".to_owned(),
+                    provider: "codex".to_owned(),
                     provider_session_id: Some("fake-session".to_owned()),
                     reconciliation_state:
                         crate::state::ExternalResourceState::Observed,
@@ -4902,7 +5179,7 @@ mod tests {
                     created_at: 12,
                     ended_at: None,
                     reconciled_at: Some(12),
-                    process_owner: SessionProcessOwner::Supervisor,
+                    process_owner: SessionProcessOwner::Foreground,
                 })?;
                 repositories.activate_session_credential(
                     &SessionCredentialRecord {
@@ -4983,6 +5260,19 @@ mod tests {
             SupervisorClient::connect_operator_at(&socket, &active)
                 .await
                 .expect("the operator channel handshake should succeed");
+        assert!(matches!(
+            operator
+                .request(RpcRequest::ForegroundExited {
+                    scope,
+                    code: Some(0),
+                    signal: None,
+                })
+                .await,
+            Ok(RpcResponse::ForegroundObserved {
+                session_id: observed_session_id,
+                state,
+            }) if observed_session_id == session_id && state == "exited"
+        ));
         operator
             .shutdown(OperationId::generate())
             .await
@@ -5446,6 +5736,12 @@ mod tests {
                     "status": "completed",
                     "summary": "Parser and tests implemented.",
                 },
+                "integration": {
+                    "assignment_id": assignment_id,
+                    "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "result_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "target_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                },
                 "validation_summary": "Integrated and verified.",
             }))
         );
@@ -5511,6 +5807,87 @@ mod tests {
             Err(SupervisorError::State(StoreError::RunNotActive { id }))
                 if id == run_id
         ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_rechecks_unknown_background_sessions_before_control() {
+        let fixture = TestDirectory::new();
+        let mut store = Store::open(&fixture.join("state.sqlite3"))
+            .expect("the store should open");
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let agent_id = AGENT_ID.parse::<AgentId>().expect("valid agent ID");
+        let session_id =
+            SESSION_ID.parse::<SessionId>().expect("valid session ID");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_agent(&AgentRecord {
+                    id: agent_id,
+                    run_id,
+                    role: "worker".to_owned(),
+                    generation: 1,
+                    state: LifecycleState::Unknown,
+                    created_at: 10,
+                })?;
+                repositories.insert_session(&SessionRecord {
+                    id: session_id,
+                    run_id,
+                    agent_id,
+                    generation: 1,
+                    provider: "fake".to_owned(),
+                    provider_session_id: Some("fake-session-1".to_owned()),
+                    reconciliation_state: ExternalResourceState::Unknown,
+                    state: LifecycleState::Unknown,
+                    transcript_path: PathBuf::from("transcripts/session.jsonl"),
+                    created_at: 10,
+                    ended_at: None,
+                    reconciled_at: Some(11),
+                    process_owner: SessionProcessOwner::Supervisor,
+                })
+            })
+            .expect("the unknown session should be inserted");
+        let mut sessions = runtime_sessions(&fixture.0);
+        let mut foreground = ForegroundCoordination::default();
+        let operation_id = OperationId::generate();
+        let (response_tx, response_rx) = oneshot::channel();
+
+        begin_shutdown(
+            &mut store,
+            &mut sessions,
+            run_id,
+            operation_id,
+            response_tx,
+            &mut foreground,
+        );
+
+        assert_eq!(
+            response_rx
+                .await
+                .expect("shutdown should respond")
+                .expect("the absent session should not prevent shutdown"),
+            RpcResponse::ShuttingDown {
+                run_id,
+                operation_id,
+            }
+        );
+        store
+            .transaction(|repositories| {
+                let session = repositories
+                    .session(session_id)?
+                    .expect("the session should remain durable");
+                assert_eq!(session.state, LifecycleState::Lost);
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Lost
+                );
+                Ok(())
+            })
+            .expect("the shutdown reconciliation should be readable");
     }
 
     #[test]

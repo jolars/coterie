@@ -470,6 +470,7 @@ pub(crate) enum TaskTransitionResult {
 pub(crate) enum TaskTransitionRejection {
     TaskNotFound,
     InvalidStatus { status: TaskStatus },
+    AcceptanceNotMet,
 }
 
 /// The durable result of trying to claim a task.
@@ -2040,6 +2041,19 @@ impl Repositories<'_, '_> {
             ));
         };
 
+        if mutation.transition == TaskTransition::Close
+            && task.status == TaskStatus::Submitted
+            && let Some(assignment) = self
+                .latest_assignment_for_task(mutation.run_id, mutation.task_id)?
+            && let Some(workspace) = self.workspace(assignment.id)?
+            && workspace.kind == "worktree"
+            && workspace.target_commit.is_none()
+        {
+            return Ok(TaskTransitionResult::Rejected(
+                TaskTransitionRejection::AcceptanceNotMet,
+            ));
+        }
+
         if task.status == TaskStatus::InProgress {
             self.release_task_ownership(mutation)?;
         }
@@ -2676,6 +2690,38 @@ impl Repositories<'_, '_> {
                 "SELECT id, run_id, task_id, agent_id, session_id, claim_id, generation, \
                         state, summary, created_at, completed_at FROM assignments \
                  WHERE run_id = ?1 AND task_id = ?2 AND completed_at IS NULL",
+                params![run_id, task_id],
+                |row| {
+                    Ok(AssignmentRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        task_id: row.get(2)?,
+                        agent_id: row.get(3)?,
+                        session_id: row.get(4)?,
+                        claim_id: row.get(5)?,
+                        generation: row.get(6)?,
+                        state: row.get(7)?,
+                        summary: row.get(8)?,
+                        created_at: row.get(9)?,
+                        completed_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn latest_assignment_for_task(
+        &self,
+        run_id: RunId,
+        task_id: TaskId,
+    ) -> Result<Option<AssignmentRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, task_id, agent_id, session_id, claim_id, generation, \
+                        state, summary, created_at, completed_at FROM assignments \
+                 WHERE run_id = ?1 AND task_id = ?2 \
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 params![run_id, task_id],
                 |row| {
                     Ok(AssignmentRecord {
@@ -4282,6 +4328,75 @@ mod tests {
                 .expect("the missing-task result should replay"),
             rejected.as_replayed()
         );
+    }
+
+    #[test]
+    fn worktree_closure_requires_durable_integration_evidence() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        insert_claim_prerequisites(&mut store, &records);
+        store
+            .claim_task(&claim_mutation(&records))
+            .expect("the task should be claimed");
+        let submitted = TaskTransitionMutation {
+            operation_id: OperationId::generate(),
+            ..transition_mutation(&records, TaskTransition::Submit)
+        };
+        store
+            .transition_task(&submitted)
+            .expect("the assignment should be submitted");
+        let mut workspace = records.workspace.clone();
+        workspace.state = ExternalResourceState::Observed;
+        workspace.result_commit =
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned());
+        store
+            .transaction(|repositories| {
+                repositories.insert_workspace(&workspace)
+            })
+            .expect("the submitted worktree should be recorded");
+        let closure = TaskTransitionMutation {
+            operation_id: OperationId::generate(),
+            ..transition_mutation(&records, TaskTransition::Close)
+        };
+
+        let rejected = store
+            .transition_task(&closure)
+            .expect("the acceptance rejection should be durable");
+
+        assert_eq!(
+            rejected,
+            MutationOutcome::Applied(TaskTransitionResult::Rejected(
+                TaskTransitionRejection::AcceptanceNotMet
+            ))
+        );
+        store
+            .transaction(|repositories| {
+                repositories.record_workspace_target_commit(
+                    workspace.assignment_id,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )?;
+                Ok(())
+            })
+            .expect("integration evidence should be recorded");
+        assert_eq!(
+            store
+                .transition_task(&closure)
+                .expect("the rejected operation should replay"),
+            rejected.as_replayed()
+        );
+        let accepted = TaskTransitionMutation {
+            operation_id: OperationId::generate(),
+            ..closure
+        };
+        assert!(matches!(
+            store
+                .transition_task(&accepted)
+                .expect("a new close should observe the integration"),
+            MutationOutcome::Applied(TaskTransitionResult::Transitioned {
+                status: TaskStatus::Closed,
+                ..
+            })
+        ));
     }
 
     #[test]

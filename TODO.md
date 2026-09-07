@@ -132,7 +132,7 @@ later milestones build on.
 - [x] Implement explicit guarded integration. Refuse dirty targets, unexpected
   tips, ambiguous histories, and conflicts; never remove dirty,
   unintegrated, running, or ambiguously owned work.
-- [ ] Complete the operator loop for task creation, worker spawn, logs and
+- [x] Complete the operator loop for task creation, worker spawn, logs and
   messages, assignment submission, integration, validation, task closure,
   and safe stop.
 - [ ] Document installation, Codex prerequisites, the Sidekick custom-command

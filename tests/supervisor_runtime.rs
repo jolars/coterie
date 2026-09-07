@@ -68,6 +68,27 @@ if [ "${COTERIE_FAKE_MODE-}" = "restart" ]; then
   done
   exit 23
 fi
+is_job=false
+for argument in "$@"; do
+  if [ "$argument" = "exec" ]; then
+    is_job=true
+  fi
+done
+if [ "$is_job" = true ]; then
+  parent=$PPID
+  printf '{"type":"thread.started","thread_id":"thread-1"}\n'
+  while [ ! -e "$COTERIE_SOCKET.release" ]; do
+    if [ ! -e "/proc/$parent" ]; then
+      exit 0
+    fi
+  done
+  coterie="${0%/*}/coterie"
+  "$coterie" inbox --json > /dev/null || exit 20
+  "$coterie" inbox ack 1 --json > /dev/null || exit 21
+  "$coterie" finish --status completed --summary "Implemented and tested." --json > /dev/null || exit 22
+  printf '{"type":"turn.completed","usage":{}}\n'
+  exit 0
+fi
 exit 0
 "#;
 
@@ -703,7 +724,11 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("the session observation should be durable");
-    assert_eq!(provider_session_id.as_deref(), Some("fake-session-1"));
+    let worker_process_id = provider_session_id
+        .as_deref()
+        .and_then(|provider_id| provider_id.strip_prefix("process:"))
+        .and_then(|process_id| process_id.parse::<u32>().ok())
+        .expect("the Codex worker should have a process identity");
     assert_eq!(session_reconciliation, "observed");
     let (workspace_kind, workspace_path, workspace_reconciliation, base_commit): (
         String,
@@ -809,12 +834,23 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
     ]);
     assert_eq!(retried_send, sent);
 
-    let logs = fixture.run_json(&["logs", "worker-1", "--json"]);
+    let mut logs = None;
+    wait_until("the worker transcript", || {
+        let observed = fixture.run_json(&["logs", "worker-1", "--json"]);
+        let ready = observed["data"]["transcript"]
+            .as_str()
+            .is_some_and(|transcript| transcript.contains("thread.started"));
+        if ready {
+            logs = Some(observed);
+        }
+        ready
+    });
+    let logs = logs.expect("the worker transcript should be observed");
     assert_eq!(logs["data"]["agent"]["name"], "worker-1");
     assert!(
         logs["data"]["transcript"]
             .as_str()
-            .is_some_and(|transcript| transcript.contains("session.ready"))
+            .is_some_and(|transcript| transcript.contains("thread.started"))
     );
 
     let events = fixture.run_json(&["events", "--json"]);
@@ -866,6 +902,171 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
         project_repository.find_reference(&reference_name).is_ok(),
         "stopping must preserve the owned reference while work is recoverable"
     );
+    assert!(
+        !Path::new("/proc")
+            .join(worker_process_id.to_string())
+            .exists(),
+        "stopping must terminate and reap the active Codex worker"
+    );
+}
+
+#[test]
+fn operator_completes_the_codex_worker_loop_through_validation() {
+    let fixture = TestEnvironment::new();
+    fixture.launch(&[]);
+    let status = fixture.run_json(&["status", "--json"]);
+    let run_id = status["data"]["run_id"]
+        .as_str()
+        .expect("status should identify the run")
+        .to_owned();
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Implement the worker result",
+        "--json",
+    ]);
+    let task_id = task["data"]["task"]["id"]
+        .as_str()
+        .expect("task creation should return an ID")
+        .to_owned();
+    let spawn =
+        fixture.run_json(&["spawn", "worker", "--task", &task_id, "--json"]);
+    let assignment_id = spawn["data"]["assignment_id"]
+        .as_str()
+        .expect("spawn should return an assignment ID")
+        .to_owned();
+
+    fixture.run_json(&[
+        "send",
+        "worker-1",
+        "Include the requested result and tests.",
+        "--json",
+    ]);
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(&run_id)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database)
+        .expect("the active run database should open");
+    let workspace_bytes: Vec<u8> = connection
+        .query_row(
+            "SELECT path FROM workspaces WHERE assignment_id = ?1",
+            [&assignment_id],
+            |row| row.get(0),
+        )
+        .expect("the assignment workspace should be durable");
+    drop(connection);
+    let workspace = Path::new(std::ffi::OsStr::from_bytes(&workspace_bytes));
+    let result_commit = commit_file(
+        workspace,
+        Path::new("result.txt"),
+        "worker result\n",
+        "implement worker result",
+    );
+    let socket = fixture
+        .runtime
+        .join("coterie")
+        .join(format!("{run_id}.sock"));
+    fs::write(socket.with_extension("sock.release"), b"finish")
+        .expect("the scripted worker should be released");
+
+    wait_until("the submitted assignment", || {
+        fixture.run_json(&["status", "--json"])["data"]["tasks"]["submitted"]
+            == 1
+    });
+    let mut premature_close = fixture.command();
+    premature_close.args([
+        "task",
+        "close",
+        &task_id,
+        "--summary",
+        "Validated before integration.",
+        "--json",
+    ]);
+    let premature_close = run(premature_close);
+    assert_eq!(premature_close.status.code(), Some(5));
+    let error: Value = serde_json::from_slice(&premature_close.stderr)
+        .expect("the integration requirement should be a JSON diagnostic");
+    assert_eq!(error["error"]["code"], "conflict");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not been integrated"))
+    );
+
+    let integrated = fixture.run_json(&[
+        "workspace",
+        "integrate",
+        "--assignment",
+        &assignment_id,
+        "--json",
+    ]);
+    assert_eq!(
+        integrated["data"]["integration"]["result_commit"],
+        result_commit
+    );
+    let target_commit = integrated["data"]["integration"]["target_commit"]
+        .as_str()
+        .expect("integration should return the target commit")
+        .to_owned();
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("result.txt"))
+            .expect("the integrated result should be readable"),
+        "worker result\n"
+    );
+
+    let closed = fixture.run_json(&[
+        "task",
+        "close",
+        &task_id,
+        "--summary",
+        "Integrated result and validated its tests.",
+        "--json",
+    ]);
+    assert_eq!(closed["data"]["task"]["status"], "closed");
+    assert_eq!(
+        closed["data"]["task"]["result"]["integration"]["target_commit"],
+        target_commit
+    );
+    assert_eq!(
+        closed["data"]["task"]["result"]["validation_summary"],
+        "Integrated result and validated its tests."
+    );
+
+    let mut logs = None;
+    wait_until("the complete worker transcript", || {
+        let observed = fixture.run_json(&["logs", "worker-1", "--json"]);
+        let complete = observed["data"]["transcript"]
+            .as_str()
+            .is_some_and(|transcript| transcript.contains("turn.completed"));
+        if complete {
+            logs = Some(observed);
+        }
+        complete
+    });
+    let logs = logs.expect("the complete worker transcript should be observed");
+    let transcript = logs["data"]["transcript"]
+        .as_str()
+        .expect("the worker transcript should be returned");
+    assert!(transcript.contains("thread.started"));
+    assert!(transcript.contains("turn.completed"));
+    let events = fixture.run_json(&["events", "--json"]);
+    let events = events["data"]["events"]
+        .as_array()
+        .expect("events should be returned");
+    for event_type in [
+        "message.sent",
+        "message.acknowledged",
+        "workspace.integrated",
+        "task.lifecycle_changed",
+    ] {
+        assert!(
+            events.iter().any(|event| event["event_type"] == event_type),
+            "the completed loop should contain `{event_type}`"
+        );
+    }
+    fixture.run_json(&["stop", "--json"]);
 }
 
 #[test]
@@ -1086,7 +1287,7 @@ fn stale_index_and_socket_restart_the_same_durable_run() {
 }
 
 #[test]
-fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
+fn restart_marks_a_vanished_codex_worker_lost() {
     let fixture = TestEnvironment::new();
     let log_path = fixture.root.join("reconciliation-supervisor.log");
     let log = fs::File::create(&log_path).expect("the log should be created");
@@ -1168,11 +1369,22 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
         .expect("the active run database should open");
     let session_id: String = connection
         .query_row(
-            "SELECT id FROM sessions WHERE provider = 'codex' ORDER BY created_at DESC LIMIT 1",
+            "SELECT id FROM sessions WHERE process_owner = 'foreground' \
+             ORDER BY created_at DESC LIMIT 1",
             [],
             |row| row.get(0),
         )
         .expect("the foreground session should be durable");
+    let worker_process_id: u32 = connection
+        .query_row(
+            "SELECT provider_session_id FROM sessions WHERE id = ?1",
+            [&worker_session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("the worker process identity should be durable")
+        .strip_prefix("process:")
+        .and_then(|process_id| process_id.parse().ok())
+        .expect("the worker should have a process identity");
     let durable_before = durable_restart_snapshot(&connection);
     assert_eq!(durable_before.tasks.len(), 2);
     assert_eq!(durable_before.dependencies.len(), 1);
@@ -1185,6 +1397,11 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
         .kill()
         .expect("the owned fixture process should stop");
     crashed.wait().expect("the killed process should be reaped");
+    wait_until("the orphaned Codex worker to exit", || {
+        !Path::new("/proc")
+            .join(worker_process_id.to_string())
+            .exists()
+    });
     let restart = run(fixture.connect_command());
     assert!(restart.status.success(), "restart failed: {restart:?}");
 
@@ -1213,8 +1430,9 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
         .query_row(
             "SELECT COUNT(*) FROM events \
              WHERE event_type = 'session.reconciliation_changed' \
+               AND subject = ?1 \
                AND json_extract(payload_json, '$.data.state') = 'lost'",
-            [],
+            [&worker_session_id],
             |row| row.get(0),
         )
         .expect("the reconciliation event should be queryable");
@@ -1333,6 +1551,44 @@ fn mode(path: &Path) -> u32 {
         & 0o777
 }
 
+fn commit_file(
+    worktree: &Path,
+    relative_path: &Path,
+    contents: &str,
+    message: &str,
+) -> String {
+    fs::write(worktree.join(relative_path), contents)
+        .expect("the worker result should be written");
+    let repository =
+        Repository::open(worktree).expect("the worker repository should open");
+    let mut index = repository.index().expect("the index should open");
+    index
+        .add_path(relative_path)
+        .expect("the worker result should enter the index");
+    index.write().expect("the index should be persisted");
+    let tree_id = index.write_tree().expect("the tree should be written");
+    let tree = repository
+        .find_tree(tree_id)
+        .expect("the worker result tree should resolve");
+    let parent = repository
+        .head()
+        .and_then(|head| head.peel_to_commit())
+        .expect("the worker base commit should resolve");
+    let signature = Signature::now("Coterie Worker", "worker@example.invalid")
+        .expect("the worker signature should be valid");
+    repository
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &[&parent],
+        )
+        .expect("the worker result commit should be created")
+        .to_string()
+}
+
 struct TestEnvironment {
     root: PathBuf,
     runtime: PathBuf,
@@ -1405,6 +1661,11 @@ impl TestEnvironment {
             .expect("the fake Codex executable should be written");
         fs::set_permissions(&codex, fs::Permissions::from_mode(0o700))
             .expect("the fake Codex executable should be private");
+        std::os::unix::fs::symlink(
+            env!("CARGO_BIN_EXE_coterie"),
+            bin.join("coterie"),
+        )
+        .expect("the scripted worker should find the Coterie binary");
         let path = std::env::join_paths(std::iter::once(bin).chain(
             std::env::split_paths(
                 &std::env::var_os("PATH").unwrap_or_default(),

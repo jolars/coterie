@@ -39,6 +39,8 @@ use crate::id::{ProjectId, TaskId};
 
 const MAXIMUM_CODEX_JSONL_FRAME_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_PENDING_CODEX_FRAMES: usize = 64;
+const CODEX_RUNTIME_ENVIRONMENT_VARIABLES: [&str; 4] =
+    ["PATH", "HOME", "CODEX_HOME", "OPENAI_API_KEY"];
 
 /// A provider feature that Coterie must verify before depending on it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -259,6 +261,18 @@ fn forward_signal(process_id: u32, signal: i32) -> Result<(), ProviderError> {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(source) => Err(ProviderError::SignalForward { signal, source }),
     }
+}
+
+fn process_is_absent(provider_session_id: &str) -> bool {
+    let Some(process_id) = provider_session_id
+        .strip_prefix("process:")
+        .and_then(|process_id| process_id.parse::<u32>().ok())
+        .filter(|process_id| *process_id > 0)
+        .and_then(|process_id| i32::try_from(process_id).ok())
+    else {
+        return false;
+    };
+    matches!(kill(Pid::from_raw(process_id), None), Err(Errno::ESRCH))
 }
 
 /// An opaque provider execution identity bound to a Coterie session scope.
@@ -783,7 +797,9 @@ impl CodexProvider {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .env_clear()
+            .env_clear();
+        apply_codex_runtime_environment(&mut command, env::vars_os());
+        command
             .env("COTERIE_PROJECT_ROOT", &specification.working_directory)
             .env("COTERIE_PROJECT_ID", environment.project_id.to_string())
             .env(
@@ -792,6 +808,10 @@ impl CodexProvider {
             )
             .env("COTERIE_RUN_ID", specification.scope.run_id.to_string())
             .env("COTERIE_AGENT_ID", specification.scope.agent_id.to_string())
+            .env(
+                "COTERIE_SESSION_ID",
+                specification.scope.session_id.to_string(),
+            )
             .env("COTERIE_ROLE", &environment.role)
             .env("COTERIE_TASK_ID", environment.task_id.to_string())
             .env("COTERIE_SOCKET", &environment.socket_path)
@@ -1045,6 +1065,17 @@ fn terminate_failed_job_launch(child: &mut Child) {
     let _process_may_not_be_waitable = child.wait();
 }
 
+fn apply_codex_runtime_environment(
+    command: &mut Command,
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) {
+    command.envs(environment.into_iter().filter(|(name, _)| {
+        CODEX_RUNTIME_ENVIRONMENT_VARIABLES
+            .iter()
+            .any(|allowed| name == OsStr::new(allowed))
+    }));
+}
+
 fn parse_codex_jsonl_frame(
     bytes: &[u8],
 ) -> Result<Option<SessionObservation>, String> {
@@ -1217,8 +1248,20 @@ impl Provider for CodexProvider {
         provider_session_id: &str,
         scope: SessionScope,
     ) -> Result<ProviderRecovery, ProviderError> {
-        Ok(self.job_sessions.get(provider_session_id).map_or(
-            ProviderRecovery::Unknown,
+        if provider_session_id
+            .strip_prefix("fake-session-")
+            .is_some_and(|suffix| suffix.parse::<u64>().is_ok())
+        {
+            return Ok(ProviderRecovery::Lost);
+        }
+        Ok(self.job_sessions.get(provider_session_id).map_or_else(
+            || {
+                if process_is_absent(provider_session_id) {
+                    ProviderRecovery::Lost
+                } else {
+                    ProviderRecovery::Unknown
+                }
+            },
             |process| {
                 if process.scope == scope {
                     ProviderRecovery::Observed {
@@ -1398,6 +1441,10 @@ fn codex_capabilities(
     if job {
         capabilities.insert(ProviderCapability::BackgroundJobs);
     }
+    if interactive || job {
+        capabilities.insert(ProviderCapability::Interrupt);
+        capabilities.insert(ProviderCapability::Termination);
+    }
     if interactive && job && both_contain("--config") {
         capabilities.insert(ProviderCapability::StartupInstructions);
     }
@@ -1541,6 +1588,8 @@ pub(crate) mod fake {
         next_session: u64,
         capabilities: BTreeSet<ProviderCapability>,
         compatibility: ProviderCompatibility,
+        #[cfg(test)]
+        missing_recoveries: std::cell::RefCell<VecDeque<ProviderRecovery>>,
     }
 
     impl FakeProvider {
@@ -1566,7 +1615,18 @@ pub(crate) mod fake {
                     ProviderCapability::TranscriptStreaming,
                 ]),
                 compatibility: ProviderCompatibility::Compatible,
+                #[cfg(test)]
+                missing_recoveries: std::cell::RefCell::new(VecDeque::new()),
             }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn with_missing_recoveries(
+            self,
+            recoveries: impl IntoIterator<Item = ProviderRecovery>,
+        ) -> Self {
+            self.missing_recoveries.borrow_mut().extend(recoveries);
+            self
         }
 
         #[cfg(test)]
@@ -1686,6 +1746,12 @@ pub(crate) mod fake {
             scope: SessionScope,
         ) -> Result<ProviderRecovery, ProviderError> {
             let Some(session) = self.sessions.get(provider_session_id) else {
+                #[cfg(test)]
+                if let Some(recovery) =
+                    self.missing_recoveries.borrow_mut().pop_front()
+                {
+                    return Ok(recovery);
+                }
                 return Ok(ProviderRecovery::Lost);
             };
             if session.scope != scope {
@@ -1746,21 +1812,23 @@ pub(crate) mod fake {
 mod tests {
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::rc::Rc;
     use std::thread;
     use std::time::{Duration, Instant};
 
     use super::fake::{FakeEvent, FakeProvider, FakeScript};
     use super::{
-        ActivityState, CodexProvider, JobEnvironment, LaunchMode,
-        LaunchSpecification, LifecycleState, ProbeCommandRunner, ProbeOutput,
-        Provider, ProviderCapability, ProviderCompatibility, ProviderError,
-        ProviderEventKind, SessionObservation,
+        ActivityState, CODEX_RUNTIME_ENVIRONMENT_VARIABLES, CodexProvider,
+        JobEnvironment, LaunchMode, LaunchSpecification, LifecycleState,
+        ProbeCommandRunner, ProbeOutput, Provider, ProviderCapability,
+        ProviderCompatibility, ProviderError, ProviderEventKind,
+        ProviderRecovery, SessionObservation,
     };
     use crate::auth::{AgentToken, SessionScope};
     use crate::config::PermissionProfile;
@@ -1806,6 +1874,8 @@ mod tests {
                 ProviderCapability::FilesystemSandbox,
                 ProviderCapability::NetworkSandbox,
                 ProviderCapability::ApprovalPolicy,
+                ProviderCapability::Interrupt,
+                ProviderCapability::Termination,
             ])
         );
         assert_eq!(
@@ -2100,7 +2170,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_job_command_uses_jsonl_and_only_the_scoped_environment() {
+    fn codex_job_command_uses_jsonl_and_a_trusted_runtime_environment() {
         let provider =
             CodexProvider::new(["codex-wrapper", "--provider", "codex"]);
         let specification = specification();
@@ -2152,19 +2222,14 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        assert!(variables.keys().all(|name| {
+            name.starts_with("COTERIE_")
+                || CODEX_RUNTIME_ENVIRONMENT_VARIABLES.contains(&name.as_str())
+        }));
         assert_eq!(
-            variables.keys().map(String::as_str).collect::<Vec<_>>(),
-            [
-                "COTERIE_AGENT_ID",
-                "COTERIE_PRIMARY_PROJECT_ROOT",
-                "COTERIE_PROJECT_ID",
-                "COTERIE_PROJECT_ROOT",
-                "COTERIE_ROLE",
-                "COTERIE_RUN_ID",
-                "COTERIE_SOCKET",
-                "COTERIE_TASK_ID",
-                "COTERIE_TOKEN",
-            ]
+            variables["PATH"],
+            std::env::var_os("PATH")
+                .map(|value| value.to_string_lossy().into_owned())
         );
         assert_eq!(variables["COTERIE_TASK_ID"], Some(TASK_ID.to_owned()));
         assert!(
@@ -2172,6 +2237,40 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.starts_with("cot1_"))
         );
+
+        let mut command = Command::new("codex-wrapper");
+        command.env_clear();
+        super::apply_codex_runtime_environment(
+            &mut command,
+            [
+                (OsString::from("PATH"), OsString::from("/project/bin")),
+                (OsString::from("HOME"), OsString::from("/home/operator")),
+                (OsString::from("CODEX_HOME"), OsString::from("/run/codex")),
+                (OsString::from("OPENAI_API_KEY"), OsString::from("test-key")),
+                (
+                    OsString::from("PROJECT_SECRET"),
+                    OsString::from("must-not-pass"),
+                ),
+            ],
+        );
+        let inherited = command
+            .get_envs()
+            .map(|(name, value)| (name.to_owned(), value.map(OsStr::to_owned)))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(inherited[OsStr::new("PATH")], Some("/project/bin".into()));
+        assert_eq!(
+            inherited[OsStr::new("HOME")],
+            Some("/home/operator".into())
+        );
+        assert_eq!(
+            inherited[OsStr::new("CODEX_HOME")],
+            Some("/run/codex".into())
+        );
+        assert_eq!(
+            inherited[OsStr::new("OPENAI_API_KEY")],
+            Some("test-key".into())
+        );
+        assert!(!inherited.contains_key(OsStr::new("PROJECT_SECRET")));
     }
 
     #[test]
@@ -2213,7 +2312,7 @@ mod tests {
         let executable = directory.executable(
             "codex-ok",
             "#!/bin/sh\n\
-             if [ \"${HOME+x}\" = x ]; then printf '%s\\n' '{\"type\":\"ambient.home\"}'; fi\n\
+             if [ \"${HOME+x}\" = x ]; then printf '%s\\n' '{\"type\":\"runtime.home\"}'; fi\n\
              printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n\
              printf '%s\\n' '{\"type\":\"item.completed\",\"future_field\":true}'\n\
              printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{}}'\n\
@@ -2242,6 +2341,7 @@ mod tests {
         assert_eq!(
             output,
             [
+                b"{\"type\":\"runtime.home\"}\n".as_slice(),
                 b"{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n"
                     .as_slice(),
                 b"{\"type\":\"item.completed\",\"future_field\":true}\n"
@@ -2261,6 +2361,37 @@ mod tests {
                 .map(|event| event.sequence)
                 .collect::<Vec<_>>(),
             (1..=events.len() as u64).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn codex_recovery_proves_only_that_a_process_is_absent() {
+        let provider = CodexProvider::new(["codex"]);
+        let scope = specification().scope;
+
+        assert_eq!(
+            provider
+                .recover(&format!("process:{}", std::process::id()), scope)
+                .expect("a live process should be observable conservatively"),
+            ProviderRecovery::Unknown
+        );
+        assert_eq!(
+            provider
+                .recover("process:2147483647", scope)
+                .expect("an absent process should be observable"),
+            ProviderRecovery::Lost
+        );
+        assert_eq!(
+            provider
+                .recover("opaque-session", scope)
+                .expect("an opaque identity should remain conservative"),
+            ProviderRecovery::Unknown
+        );
+        assert_eq!(
+            provider
+                .recover("fake-session-42", scope)
+                .expect("a legacy in-process fake cannot survive restart"),
+            ProviderRecovery::Lost
         );
     }
 
@@ -2322,6 +2453,8 @@ mod tests {
             ProviderCapability::FilesystemSandbox,
             ProviderCapability::NetworkSandbox,
             ProviderCapability::ApprovalPolicy,
+            ProviderCapability::Interrupt,
+            ProviderCapability::Termination,
         ] {
             assert!(
                 probe.capabilities.contains(&capability),
