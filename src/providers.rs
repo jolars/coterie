@@ -1,13 +1,18 @@
 //! Out-of-process agent harness adapters.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::env;
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fmt;
 use std::future::{Future, pending};
-use std::io::{self, IsTerminal};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::str::FromStr;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
@@ -27,7 +32,10 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 
 use crate::auth::{AgentToken, SessionScope};
-use crate::id::ProjectId;
+use crate::id::{ProjectId, TaskId};
+
+const MAXIMUM_CODEX_JSONL_FRAME_BYTES: u64 = 1024 * 1024;
+const MAXIMUM_PENDING_CODEX_FRAMES: usize = 64;
 
 /// A provider feature that Coterie must verify before depending on it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -96,11 +104,38 @@ pub(crate) struct InteractiveEnvironment {
     pub(crate) token: AgentToken,
 }
 
+/// The complete environment granted to one non-interactive provider process.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JobEnvironment {
+    pub(crate) project_id: ProjectId,
+    pub(crate) primary_project_root: PathBuf,
+    pub(crate) role: String,
+    pub(crate) task_id: TaskId,
+    pub(crate) socket_path: PathBuf,
+    pub(crate) token: AgentToken,
+}
+
 /// One foreground Codex process whose terminal is owned by the caller.
 pub(crate) struct CodexInteractiveProcess {
     child: tokio::process::Child,
     inherited_terminal: bool,
     signals: SignalMonitor,
+}
+
+struct CodexJobProcess {
+    child: Child,
+    scope: SessionScope,
+    frames: Receiver<JobStreamItem>,
+    pending: VecDeque<ProviderEventKind>,
+    observation: SessionObservation,
+    next_sequence: u64,
+    stdout_closed: bool,
+    exit_observed: bool,
+}
+
+enum JobStreamItem {
+    Frame(Vec<u8>),
+    ReadFailure(String),
 }
 
 impl CodexInteractiveProcess {
@@ -327,6 +362,17 @@ pub(crate) enum ExitReason {
     Terminated,
 }
 
+impl ExitReason {
+    #[must_use]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::Interrupted => "interrupted",
+            Self::Terminated => "terminated",
+        }
+    }
+}
+
 /// A provider exit observation without interpreting it as task success.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SessionExit {
@@ -354,11 +400,16 @@ impl SessionObservation {
 
     #[must_use]
     pub(crate) const fn exited(code: i32) -> Self {
+        Self::process_exit(Some(code))
+    }
+
+    #[must_use]
+    pub(crate) const fn process_exit(code: Option<i32>) -> Self {
         Self {
             lifecycle: LifecycleState::Exited,
             activity: ActivityState::Unknown,
             exit: Some(SessionExit {
-                code: Some(code),
+                code,
                 reason: ExitReason::Process,
             }),
         }
@@ -402,6 +453,9 @@ impl ProviderEvent {
         match self.kind {
             ProviderEventKind::Observation(observation) => Some(observation),
             ProviderEventKind::Output(_) => None,
+            ProviderEventKind::MalformedOutput { observation, .. } => {
+                Some(observation)
+            }
         }
     }
 }
@@ -411,6 +465,11 @@ impl ProviderEvent {
 pub(crate) enum ProviderEventKind {
     Observation(SessionObservation),
     Output(Vec<u8>),
+    MalformedOutput {
+        bytes: Vec<u8>,
+        diagnostic: String,
+        observation: SessionObservation,
+    },
 }
 
 /// What an adapter can prove about a durable provider execution identity.
@@ -437,6 +496,7 @@ pub(crate) trait Provider {
     fn launch_job(
         &mut self,
         specification: &LaunchSpecification,
+        environment: &JobEnvironment,
     ) -> Result<ProviderSessionHandle, ProviderError>;
 
     fn recover(
@@ -509,6 +569,38 @@ pub(crate) enum ProviderError {
         #[source]
         source: io::Error,
     },
+    #[error(
+        "could not start the background Codex process with `{executable}`: {source}"
+    )]
+    JobLaunch {
+        executable: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "could not resolve background Codex executable `{executable}` from its configured location or the trusted provider PATH"
+    )]
+    JobExecutableResolution { executable: String },
+    #[error("the background Codex process has no captured standard output")]
+    MissingJobStdout,
+    #[error("could not start the background Codex output-reader thread: {0}")]
+    JobReaderThread(#[source] io::Error),
+    #[error(
+        "could not inspect background Codex process `{provider_id}`: {source}"
+    )]
+    JobObservation {
+        provider_id: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error(
+        "could not control background Codex process `{provider_id}`: {source}"
+    )]
+    JobControl {
+        provider_id: String,
+        #[source]
+        source: io::Error,
+    },
     #[error("could not wait for the foreground Codex process: {0}")]
     InteractiveWait(#[source] io::Error),
     #[error("could not register foreground signal handling: {0}")]
@@ -538,6 +630,7 @@ pub(crate) struct CodexProvider {
     probe_runner: Box<dyn ProbeCommandRunner>,
     interactive_sessions:
         BTreeMap<String, (SessionScope, CodexInteractiveProcess)>,
+    job_sessions: BTreeMap<String, CodexJobProcess>,
 }
 
 impl CodexProvider {
@@ -548,6 +641,7 @@ impl CodexProvider {
             command: command.into_iter().map(Into::into).collect(),
             probe_runner: Box::new(ProcessProbeRunner),
             interactive_sessions: BTreeMap::new(),
+            job_sessions: BTreeMap::new(),
         }
     }
 
@@ -560,6 +654,7 @@ impl CodexProvider {
             command: command.into_iter().map(Into::into).collect(),
             probe_runner: Box::new(runner),
             interactive_sessions: BTreeMap::new(),
+            job_sessions: BTreeMap::new(),
         }
     }
 
@@ -634,6 +729,145 @@ impl CodexProvider {
         Ok(command)
     }
 
+    fn job_command(
+        &self,
+        specification: &LaunchSpecification,
+        environment: &JobEnvironment,
+    ) -> Result<Command, ProviderError> {
+        let (program, configured_arguments) = self
+            .command
+            .split_first()
+            .ok_or(ProviderError::EmptyCodexCommand)?;
+        Ok(Self::job_command_with_program(
+            program,
+            configured_arguments,
+            specification,
+            environment,
+        ))
+    }
+
+    fn job_command_with_program(
+        program: &OsStr,
+        configured_arguments: &[OsString],
+        specification: &LaunchSpecification,
+        environment: &JobEnvironment,
+    ) -> Command {
+        let bootstrap = serde_json::to_string(
+            &specification.bootstrap_instruction,
+        )
+        .expect("a Rust string is always representable as a TOML basic string");
+        let mut command = Command::new(program);
+        command
+            .args(configured_arguments)
+            .arg("exec")
+            .arg("--json")
+            .arg("--cd")
+            .arg(&specification.working_directory)
+            .arg("--config")
+            .arg(format!("developer_instructions={bootstrap}"))
+            .arg("Begin your assigned task.")
+            .current_dir(&specification.working_directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .env_clear()
+            .env("COTERIE_PROJECT_ROOT", &specification.working_directory)
+            .env("COTERIE_PROJECT_ID", environment.project_id.to_string())
+            .env(
+                "COTERIE_PRIMARY_PROJECT_ROOT",
+                &environment.primary_project_root,
+            )
+            .env("COTERIE_RUN_ID", specification.scope.run_id.to_string())
+            .env("COTERIE_AGENT_ID", specification.scope.agent_id.to_string())
+            .env("COTERIE_ROLE", &environment.role)
+            .env("COTERIE_TASK_ID", environment.task_id.to_string())
+            .env("COTERIE_SOCKET", &environment.socket_path)
+            .env("COTERIE_TOKEN", environment.token.expose_secret());
+        command
+    }
+
+    fn resolved_job_program(&self) -> Result<OsString, ProviderError> {
+        let program = self
+            .command
+            .first()
+            .ok_or(ProviderError::EmptyCodexCommand)?;
+        let path = Path::new(program);
+        if path.components().count() > 1 {
+            return path.canonicalize().map(PathBuf::into_os_string).map_err(
+                |_| ProviderError::JobExecutableResolution {
+                    executable: program.to_string_lossy().into_owned(),
+                },
+            );
+        }
+        let executable = program.to_string_lossy().into_owned();
+        env::var_os("PATH")
+            .into_iter()
+            .flat_map(|paths| env::split_paths(&paths).collect::<Vec<_>>())
+            .map(|directory| directory.join(path))
+            .find(|candidate| {
+                candidate.metadata().is_ok_and(|metadata| {
+                    metadata.is_file()
+                        && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+            .and_then(|candidate| candidate.canonicalize().ok())
+            .map(PathBuf::into_os_string)
+            .ok_or(ProviderError::JobExecutableResolution { executable })
+    }
+
+    fn launch_job_process(
+        &self,
+        specification: &LaunchSpecification,
+        environment: &JobEnvironment,
+    ) -> Result<CodexJobProcess, ProviderError> {
+        let (configured_program, configured_arguments) = self
+            .command
+            .split_first()
+            .ok_or(ProviderError::EmptyCodexCommand)?;
+        let resolved_program = self.resolved_job_program()?;
+        debug_assert!(
+            Path::new(configured_program).components().count() > 1
+                || Path::new(&resolved_program).is_absolute()
+        );
+        let mut command = Self::job_command_with_program(
+            &resolved_program,
+            configured_arguments,
+            specification,
+            environment,
+        );
+        let executable = command.get_program().to_string_lossy().into_owned();
+        let mut child = command.spawn().map_err(|source| {
+            ProviderError::JobLaunch { executable, source }
+        })?;
+        let Some(stdout) = child.stdout.take() else {
+            terminate_failed_job_launch(&mut child);
+            return Err(ProviderError::MissingJobStdout);
+        };
+        let frames = match stream_job_stdout(stdout) {
+            Ok(frames) => frames,
+            Err(error) => {
+                terminate_failed_job_launch(&mut child);
+                return Err(error);
+            }
+        };
+        Ok(CodexJobProcess {
+            child,
+            scope: specification.scope,
+            frames,
+            pending: VecDeque::from([ProviderEventKind::Observation(
+                SessionObservation {
+                    lifecycle: LifecycleState::Running,
+                    activity: ActivityState::Busy,
+                    exit: None,
+                },
+            )]),
+            observation: SessionObservation::starting(),
+            next_sequence: 1,
+            stdout_closed: false,
+            exit_observed: false,
+        })
+    }
+
     fn launch_foreground_process(
         &self,
         specification: &LaunchSpecification,
@@ -692,6 +926,30 @@ impl CodexProvider {
             })
     }
 
+    fn job_session(
+        &self,
+        session: &ProviderSessionHandle,
+    ) -> Result<&CodexJobProcess, ProviderError> {
+        self.job_sessions
+            .get(session.provider_id())
+            .filter(|process| process.scope == session.scope)
+            .ok_or_else(|| ProviderError::UnknownSession {
+                provider_id: session.provider_id().to_owned(),
+            })
+    }
+
+    fn job_session_mut(
+        &mut self,
+        session: &ProviderSessionHandle,
+    ) -> Result<&mut CodexJobProcess, ProviderError> {
+        self.job_sessions
+            .get_mut(session.provider_id())
+            .filter(|process| process.scope == session.scope)
+            .ok_or_else(|| ProviderError::UnknownSession {
+                provider_id: session.provider_id().to_owned(),
+            })
+    }
+
     fn probe_codex(&self) -> Result<ProviderProbe, ProviderError> {
         let version_output = self.command_output(&["--version"], "version")?;
         let version_text =
@@ -734,6 +992,182 @@ impl CodexProvider {
     }
 }
 
+fn stream_job_stdout(
+    stdout: ChildStdout,
+) -> Result<Receiver<JobStreamItem>, ProviderError> {
+    let (sender, receiver) =
+        std::sync::mpsc::sync_channel(MAXIMUM_PENDING_CODEX_FRAMES);
+    thread::Builder::new()
+        .name("coterie-codex-jsonl-reader".to_owned())
+        .spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let mut bytes = Vec::new();
+                let read = reader
+                    .by_ref()
+                    .take(MAXIMUM_CODEX_JSONL_FRAME_BYTES + 1)
+                    .read_until(b'\n', &mut bytes);
+                match read {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if sender.send(JobStreamItem::Frame(bytes)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _receiver_may_have_closed = sender.send(
+                            JobStreamItem::ReadFailure(error.to_string()),
+                        );
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(ProviderError::JobReaderThread)?;
+    Ok(receiver)
+}
+
+fn terminate_failed_job_launch(child: &mut Child) {
+    let _process_may_have_already_exited = child.kill();
+    let _process_may_not_be_waitable = child.wait();
+}
+
+fn parse_codex_jsonl_frame(
+    bytes: &[u8],
+) -> Result<Option<SessionObservation>, String> {
+    if bytes.len() as u64 > MAXIMUM_CODEX_JSONL_FRAME_BYTES {
+        return Err(format!(
+            "frame exceeds the {}-byte limit",
+            MAXIMUM_CODEX_JSONL_FRAME_BYTES
+        ));
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(bytes)
+        .map_err(|error| format!("invalid JSON: {error}"))?;
+    let event_type = value
+        .as_object()
+        .and_then(|object| object.get("type"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            "JSONL event must be an object with a string `type`".to_owned()
+        })?;
+    let activity = match event_type {
+        "thread.started" | "turn.started" => Some(ActivityState::Busy),
+        "turn.completed" | "turn.failed" | "error" => Some(ActivityState::Idle),
+        _ => None,
+    };
+    Ok(activity.map(|activity| SessionObservation {
+        lifecycle: LifecycleState::Running,
+        activity,
+        exit: None,
+    }))
+}
+
+impl CodexJobProcess {
+    fn next_event_kind(
+        &mut self,
+        provider_id: &str,
+    ) -> Result<Option<ProviderEventKind>, ProviderError> {
+        if let Some(kind) = self.pending.pop_front() {
+            if let ProviderEventKind::Observation(observation) = kind {
+                self.observation = observation;
+                return Ok(Some(ProviderEventKind::Observation(observation)));
+            }
+            return Ok(Some(kind));
+        }
+        if !self.stdout_closed {
+            match self.frames.try_recv() {
+                Ok(JobStreamItem::Frame(bytes)) => {
+                    return self.classify_frame(provider_id, bytes).map(Some);
+                }
+                Ok(JobStreamItem::ReadFailure(diagnostic)) => {
+                    return self
+                        .quarantine(provider_id, Vec::new(), diagnostic)
+                        .map(Some);
+                }
+                Err(TryRecvError::Empty) => return Ok(None),
+                Err(TryRecvError::Disconnected) => {
+                    self.stdout_closed = true;
+                }
+            }
+        }
+        if self.exit_observed || self.observation.lifecycle.is_terminal() {
+            return Ok(None);
+        }
+        let status = self.child.try_wait().map_err(|source| {
+            ProviderError::JobObservation {
+                provider_id: provider_id.to_owned(),
+                source,
+            }
+        })?;
+        let Some(status) = status else {
+            return Ok(None);
+        };
+        self.exit_observed = true;
+        let observation = SessionObservation::process_exit(status.code());
+        self.observation = observation;
+        Ok(Some(ProviderEventKind::Observation(observation)))
+    }
+
+    fn classify_frame(
+        &mut self,
+        provider_id: &str,
+        bytes: Vec<u8>,
+    ) -> Result<ProviderEventKind, ProviderError> {
+        match parse_codex_jsonl_frame(&bytes) {
+            Ok(observation) => {
+                if let Some(observation) = observation {
+                    self.pending
+                        .push_back(ProviderEventKind::Observation(observation));
+                }
+                Ok(ProviderEventKind::Output(bytes))
+            }
+            Err(diagnostic) => self.quarantine(provider_id, bytes, diagnostic),
+        }
+    }
+
+    fn quarantine(
+        &mut self,
+        provider_id: &str,
+        bytes: Vec<u8>,
+        diagnostic: String,
+    ) -> Result<ProviderEventKind, ProviderError> {
+        if self
+            .child
+            .try_wait()
+            .map_err(|source| ProviderError::JobObservation {
+                provider_id: provider_id.to_owned(),
+                source,
+            })?
+            .is_none()
+        {
+            self.child
+                .kill()
+                .map_err(|source| ProviderError::JobControl {
+                    provider_id: provider_id.to_owned(),
+                    source,
+                })?;
+            self.child
+                .wait()
+                .map_err(|source| ProviderError::JobControl {
+                    provider_id: provider_id.to_owned(),
+                    source,
+                })?;
+            self.exit_observed = true;
+        }
+        let observation = SessionObservation {
+            lifecycle: LifecycleState::Quarantined,
+            activity: ActivityState::Unknown,
+            exit: None,
+        };
+        self.observation = observation;
+        Ok(ProviderEventKind::MalformedOutput {
+            bytes,
+            diagnostic,
+            observation,
+        })
+    }
+}
+
 impl Provider for CodexProvider {
     fn probe(&self) -> Result<ProviderProbe, ProviderError> {
         self.probe_codex()
@@ -756,27 +1190,45 @@ impl Provider for CodexProvider {
 
     fn launch_job(
         &mut self,
-        _specification: &LaunchSpecification,
+        specification: &LaunchSpecification,
+        environment: &JobEnvironment,
     ) -> Result<ProviderSessionHandle, ProviderError> {
-        Err(ProviderError::UnsupportedCodexOperation {
-            operation: "job launch",
-        })
+        let process = self.launch_job_process(specification, environment)?;
+        let provider_id = format!("process:{}", process.child.id());
+        self.job_sessions.insert(provider_id.clone(), process);
+        Ok(ProviderSessionHandle::new(provider_id, specification.scope))
     }
 
     fn recover(
         &self,
-        _provider_session_id: &str,
-        _scope: SessionScope,
+        provider_session_id: &str,
+        scope: SessionScope,
     ) -> Result<ProviderRecovery, ProviderError> {
-        Err(ProviderError::UnsupportedCodexOperation {
-            operation: "session recovery",
-        })
+        Ok(self.job_sessions.get(provider_session_id).map_or(
+            ProviderRecovery::Unknown,
+            |process| {
+                if process.scope == scope {
+                    ProviderRecovery::Observed {
+                        handle: ProviderSessionHandle::new(
+                            provider_session_id,
+                            scope,
+                        ),
+                        observation: process.observation,
+                    }
+                } else {
+                    ProviderRecovery::Unknown
+                }
+            },
+        ))
     }
 
     fn observe(
         &self,
         session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError> {
+        if let Ok(process) = self.job_session(session) {
+            return Ok(process.observation);
+        }
         self.interactive_session(session)?;
         Ok(SessionObservation {
             lifecycle: LifecycleState::Running,
@@ -787,17 +1239,26 @@ impl Provider for CodexProvider {
 
     fn next_event(
         &mut self,
-        _session: &ProviderSessionHandle,
+        session: &ProviderSessionHandle,
     ) -> Result<Option<ProviderEvent>, ProviderError> {
-        Err(ProviderError::UnsupportedCodexOperation {
-            operation: "event streaming",
-        })
+        let provider_id = session.provider_id().to_owned();
+        let process = self.job_session_mut(session)?;
+        let Some(kind) = process.next_event_kind(&provider_id)? else {
+            return Ok(None);
+        };
+        let sequence = process.next_sequence;
+        process.next_sequence += 1;
+        Ok(Some(ProviderEvent { sequence, kind }))
     }
 
     fn interrupt(
         &mut self,
         session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError> {
+        if let Ok(process) = self.job_session(session) {
+            forward_signal(process.child.id(), SIGINT)?;
+            return Ok(process.observation);
+        }
         forward_signal(
             self.interactive_session(session)?.process_id(),
             SIGINT,
@@ -813,6 +1274,10 @@ impl Provider for CodexProvider {
         &mut self,
         session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError> {
+        if let Ok(process) = self.job_session(session) {
+            forward_signal(process.child.id(), SIGTERM)?;
+            return Ok(process.observation);
+        }
         self.interactive_session(session)?.terminate()?;
         Ok(SessionObservation {
             lifecycle: LifecycleState::Running,
@@ -971,6 +1436,19 @@ pub(crate) mod fake {
 
         pub(crate) fn output(output: &[u8]) -> Self {
             Self(ProviderEventKind::Output(output.to_vec()))
+        }
+
+        #[cfg(test)]
+        pub(crate) fn malformed(output: &[u8], diagnostic: &str) -> Self {
+            Self(ProviderEventKind::MalformedOutput {
+                bytes: output.to_vec(),
+                diagnostic: diagnostic.to_owned(),
+                observation: SessionObservation {
+                    lifecycle: super::LifecycleState::Quarantined,
+                    activity: super::ActivityState::Unknown,
+                    exit: None,
+                },
+            })
         }
     }
 
@@ -1138,6 +1616,7 @@ pub(crate) mod fake {
         fn launch_job(
             &mut self,
             specification: &LaunchSpecification,
+            _environment: &super::JobEnvironment,
         ) -> Result<ProviderSessionHandle, ProviderError> {
             self.launch(LaunchMode::Job, specification)
         }
@@ -1176,7 +1655,10 @@ pub(crate) mod fake {
             };
             let sequence = session.next_sequence;
             session.next_sequence += 1;
-            if let ProviderEventKind::Observation(observation) = event.0 {
+            if let ProviderEventKind::Observation(observation)
+            | ProviderEventKind::MalformedOutput { observation, .. } =
+                event.0
+            {
                 session.observation = observation;
             }
             Ok(Some(ProviderEvent {
@@ -1204,25 +1686,31 @@ pub(crate) mod fake {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::{BTreeSet, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::ffi::OsString;
+    use std::fs;
     use std::io;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::fake::{FakeEvent, FakeProvider, FakeScript};
     use super::{
-        ActivityState, CodexProvider, LaunchMode, LaunchSpecification,
-        LifecycleState, ProbeCommandRunner, ProbeOutput, Provider,
-        ProviderCapability, ProviderCompatibility, ProviderError,
+        ActivityState, CodexProvider, JobEnvironment, LaunchMode,
+        LaunchSpecification, LifecycleState, ProbeCommandRunner, ProbeOutput,
+        Provider, ProviderCapability, ProviderCompatibility, ProviderError,
         ProviderEventKind, SessionObservation,
     };
     use crate::auth::{AgentToken, SessionScope};
-    use crate::id::{AgentId, ProjectId, RunId, SessionId};
+    use crate::id::{AgentId, ProjectId, RunId, SessionId, TaskId};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const AGENT_ID: &str = "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX";
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+    const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
+    const TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAZ";
 
     #[test]
     fn codex_probe_discovers_the_supported_command_surface() {
@@ -1493,6 +1981,170 @@ mod tests {
     }
 
     #[test]
+    fn codex_job_command_uses_jsonl_and_only_the_scoped_environment() {
+        let provider =
+            CodexProvider::new(["codex-wrapper", "--provider", "codex"]);
+        let specification = specification();
+        let environment = job_environment();
+
+        let command = provider
+            .job_command(&specification, &environment)
+            .expect("the job command should be valid");
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), "codex-wrapper");
+        assert_eq!(
+            command.get_current_dir(),
+            Some(PathBuf::from("/tmp/project").as_path())
+        );
+        assert_eq!(
+            &arguments[..6],
+            [
+                "--provider",
+                "codex",
+                "exec",
+                "--json",
+                "--cd",
+                "/tmp/project",
+            ]
+        );
+        assert_eq!(arguments[6], "--config");
+        assert!(arguments[7].starts_with("developer_instructions=\""));
+        assert!(arguments[7].contains("Run `coterie prime`"));
+        assert_eq!(arguments[8], "Begin your assigned task.");
+
+        let variables = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            variables.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "COTERIE_AGENT_ID",
+                "COTERIE_PRIMARY_PROJECT_ROOT",
+                "COTERIE_PROJECT_ID",
+                "COTERIE_PROJECT_ROOT",
+                "COTERIE_ROLE",
+                "COTERIE_RUN_ID",
+                "COTERIE_SOCKET",
+                "COTERIE_TASK_ID",
+                "COTERIE_TOKEN",
+            ]
+        );
+        assert_eq!(variables["COTERIE_TASK_ID"], Some(TASK_ID.to_owned()));
+        assert!(
+            variables["COTERIE_TOKEN"]
+                .as_deref()
+                .is_some_and(|value| value.starts_with("cot1_"))
+        );
+    }
+
+    #[test]
+    fn codex_job_stream_preserves_jsonl_and_classifies_process_exit() {
+        let directory = TestDirectory::new();
+        let executable = directory.executable(
+            "codex-ok",
+            "#!/bin/sh\n\
+             if [ \"${HOME+x}\" = x ]; then printf '%s\\n' '{\"type\":\"ambient.home\"}'; fi\n\
+             printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n\
+             printf '%s\\n' '{\"type\":\"item.completed\",\"future_field\":true}'\n\
+             printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{}}'\n\
+             exit 23\n",
+        );
+        let mut provider = CodexProvider::new([executable.as_os_str()]);
+        let specification = specification_in(&directory.0);
+        let environment = job_environment_in(&directory.0);
+
+        let handle = provider
+            .launch_job(&specification, &environment)
+            .expect("the Codex job should launch");
+        let events = collect_job_events(&mut provider, &handle);
+
+        assert_eq!(
+            events[0].observation().map(|event| event.lifecycle),
+            Some(LifecycleState::Running)
+        );
+        let output = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                ProviderEventKind::Output(bytes) => Some(bytes.as_slice()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            output,
+            [
+                b"{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n"
+                    .as_slice(),
+                b"{\"type\":\"item.completed\",\"future_field\":true}\n"
+                    .as_slice(),
+                b"{\"type\":\"turn.completed\",\"usage\":{}}\n".as_slice(),
+            ]
+        );
+        let exit = events
+            .last()
+            .and_then(super::ProviderEvent::observation)
+            .expect("the final event should classify process exit");
+        assert_eq!(exit.lifecycle, LifecycleState::Exited);
+        assert_eq!(exit.exit.and_then(|exit| exit.code), Some(23));
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            (1..=events.len() as u64).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn malformed_codex_jsonl_is_retained_and_quarantines_the_job() {
+        let directory = TestDirectory::new();
+        let executable = directory.executable(
+            "codex-malformed",
+            "#!/bin/sh\n\
+             printf 'not-json\\n'\n\
+             while :; do :; done\n",
+        );
+        let mut provider = CodexProvider::new([executable.as_os_str()]);
+        let specification = specification_in(&directory.0);
+        let environment = job_environment_in(&directory.0);
+
+        let handle = provider
+            .launch_job(&specification, &environment)
+            .expect("the Codex job should launch");
+        let events = collect_job_events(&mut provider, &handle);
+        let malformed = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                ProviderEventKind::MalformedOutput {
+                    bytes,
+                    diagnostic,
+                    observation,
+                } => Some((bytes, diagnostic, observation)),
+                _ => None,
+            })
+            .expect("the malformed frame should be classified");
+
+        assert_eq!(malformed.0, b"not-json\n");
+        assert!(malformed.1.contains("invalid JSON"));
+        assert_eq!(malformed.2.lifecycle, LifecycleState::Quarantined);
+        assert_eq!(
+            provider
+                .observe(&handle)
+                .expect("the job should remain known"),
+            *malformed.2
+        );
+    }
+
+    #[test]
     #[ignore = "requires an explicitly installed Codex CLI"]
     fn installed_codex_satisfies_the_probe_contract() {
         let probe = CodexProvider::new(["codex"])
@@ -1537,7 +2189,7 @@ mod tests {
         let mut provider = FakeProvider::new([script]);
 
         let handle = provider
-            .launch_job(&specification())
+            .launch_job(&specification(), &job_environment())
             .expect("the scripted session should launch");
         assert_eq!(handle.provider_id(), "fake-session-1");
         assert_eq!(
@@ -1583,7 +2235,7 @@ mod tests {
             .launch_interactive(&specification(), None)
             .expect("the first session should launch");
         let second = provider
-            .launch_job(&specification())
+            .launch_job(&specification(), &job_environment())
             .expect("the second session should launch");
 
         assert_eq!(first.provider_id(), "fake-session-1");
@@ -1626,6 +2278,91 @@ mod tests {
             },
             working_directory: PathBuf::from("/tmp/project"),
             bootstrap_instruction: "Run `coterie prime`.".to_owned(),
+        }
+    }
+
+    fn job_environment() -> JobEnvironment {
+        JobEnvironment {
+            project_id: PROJECT_ID
+                .parse::<ProjectId>()
+                .expect("valid project ID"),
+            primary_project_root: PathBuf::from("/tmp/project"),
+            role: "worker".to_owned(),
+            task_id: TASK_ID.parse::<TaskId>().expect("valid task ID"),
+            socket_path: PathBuf::from("/tmp/coterie.sock"),
+            token: AgentToken::generate()
+                .expect("token generation should succeed"),
+        }
+    }
+
+    fn specification_in(directory: &std::path::Path) -> LaunchSpecification {
+        LaunchSpecification {
+            working_directory: directory.to_path_buf(),
+            ..specification()
+        }
+    }
+
+    fn job_environment_in(directory: &std::path::Path) -> JobEnvironment {
+        JobEnvironment {
+            primary_project_root: directory.to_path_buf(),
+            socket_path: directory.join("coterie.sock"),
+            ..job_environment()
+        }
+    }
+
+    fn collect_job_events(
+        provider: &mut CodexProvider,
+        handle: &super::ProviderSessionHandle,
+    ) -> Vec<super::ProviderEvent> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut events = Vec::new();
+        loop {
+            if let Some(event) = provider
+                .next_event(handle)
+                .expect("the job event should be readable")
+            {
+                let terminal = event.observation().is_some_and(|observation| {
+                    observation.lifecycle.is_terminal()
+                });
+                events.push(event);
+                if terminal {
+                    return events;
+                }
+            } else {
+                assert!(
+                    Instant::now() < deadline,
+                    "Codex event stream timed out"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "coterie-provider-test-{}",
+                crate::id::RunId::generate()
+            ));
+            fs::create_dir(&path).expect("the test directory should be unique");
+            Self(path)
+        }
+
+        fn executable(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, contents).expect("the fixture should be writable");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                .expect("the fixture should be executable");
+            path
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0)
+                .expect("the test directory should be removable");
         }
     }
 

@@ -7,9 +7,9 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::auth::{AgentToken, SessionScope, TokenGenerationError};
-use crate::id::{AssignmentId, SessionId};
+use crate::id::{AssignmentId, ProjectId, SessionId, TaskId};
 use crate::providers::{
-    LaunchMode, LaunchSpecification, LifecycleState, Provider,
+    JobEnvironment, LaunchMode, LaunchSpecification, LifecycleState, Provider,
     ProviderCapability, ProviderError, ProviderEvent, ProviderEventKind,
     ProviderRecovery, ProviderSessionHandle, SessionObservation,
 };
@@ -27,6 +27,10 @@ pub(crate) struct AgentLaunch {
     pub(crate) role: String,
     pub(crate) mode: LaunchMode,
     pub(crate) working_directory: PathBuf,
+    pub(crate) project_id: ProjectId,
+    pub(crate) primary_project_root: PathBuf,
+    pub(crate) task_id: TaskId,
+    pub(crate) socket_path: PathBuf,
     pub(crate) bootstrap_instruction: String,
     pub(crate) created_at: i64,
 }
@@ -41,6 +45,7 @@ pub(crate) struct LaunchedAgent {
 pub(crate) struct AgentSessionSupervisor<P> {
     provider: P,
     sessions: BTreeMap<SessionId, ProviderSessionHandle>,
+    transcript_secrets: BTreeMap<SessionId, Vec<u8>>,
     transcripts: TranscriptStore,
     #[cfg(test)]
     credential_observer: Option<std::sync::mpsc::Sender<LaunchedAgent>>,
@@ -54,6 +59,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         Self {
             provider,
             sessions: BTreeMap::new(),
+            transcript_secrets: BTreeMap::new(),
             transcripts: TranscriptStore::new(run_state_directory),
             #[cfg(test)]
             credential_observer: None,
@@ -361,6 +367,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         launch: &AgentLaunch,
         token: AgentToken,
     ) -> Result<LaunchedAgent, AgentSessionError> {
+        let transcript_secret = token.expose_secret().as_bytes().to_vec();
         let specification = LaunchSpecification {
             scope: launch.scope,
             working_directory: launch.working_directory.clone(),
@@ -370,7 +377,17 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             LaunchMode::Interactive => {
                 self.provider.launch_interactive(&specification, None)?
             }
-            LaunchMode::Job => self.provider.launch_job(&specification)?,
+            LaunchMode::Job => self.provider.launch_job(
+                &specification,
+                &JobEnvironment {
+                    project_id: launch.project_id,
+                    primary_project_root: launch.primary_project_root.clone(),
+                    role: launch.role.clone(),
+                    task_id: launch.task_id,
+                    socket_path: launch.socket_path.clone(),
+                    token: token.clone(),
+                },
+            )?,
         };
         if handle.scope != launch.scope {
             return Err(AgentSessionError::ScopeMismatch {
@@ -379,6 +396,8 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             });
         }
         self.sessions.insert(launch.scope.session_id, handle);
+        self.transcript_secrets
+            .insert(launch.scope.session_id, transcript_secret);
         let launched = LaunchedAgent {
             scope: launch.scope,
             token,
@@ -645,10 +664,34 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 )?;
             }
             ProviderEventKind::Output(bytes) => {
-                self.transcripts.append(session_id, bytes)?;
+                self.append_transcript(session_id, bytes)?;
+            }
+            ProviderEventKind::MalformedOutput {
+                bytes, observation, ..
+            } => {
+                self.append_transcript(session_id, bytes)?;
+                self.record_observation(
+                    store,
+                    &handle,
+                    *observation,
+                    observed_at,
+                )?;
             }
         }
         Ok(Some(event))
+    }
+
+    fn append_transcript(
+        &self,
+        session_id: SessionId,
+        bytes: &[u8],
+    ) -> Result<(), TranscriptError> {
+        self.transcript_secrets.get(&session_id).map_or_else(
+            || self.transcripts.append(session_id, bytes),
+            |secret| {
+                self.transcripts.append_redacted(session_id, bytes, secret)
+            },
+        )
     }
 
     #[cfg_attr(
@@ -695,7 +738,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
     }
 
     fn record_observation(
-        &self,
+        &mut self,
         store: &mut Store,
         handle: &ProviderSessionHandle,
         observation: SessionObservation,
@@ -754,6 +797,12 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 observed_at,
             )?;
             if outcome == SessionTransitionOutcome::Applied {
+                let exit = observation.exit.map(|exit| {
+                    json!({
+                        "code": exit.code,
+                        "reason": exit.reason.as_str(),
+                    })
+                });
                 let session_event = repositories.append_event(&NewEvent {
                     run_id: handle.scope.run_id,
                     kind: EventKind::SessionLifecycleChanged,
@@ -770,6 +819,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                         "previous_state": session.state.as_str(),
                         "provider": session.provider,
                         "state": observation.lifecycle.as_str(),
+                        "exit": exit,
                     }),
                     summary: format!(
                         "Session {} changed from {} to {}.",
@@ -806,6 +856,9 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             }
             Ok(())
         })?;
+        if observation.lifecycle.is_terminal() {
+            self.transcript_secrets.remove(&handle.scope.session_id);
+        }
         Ok(())
     }
 
@@ -919,21 +972,26 @@ pub(crate) enum AgentSessionError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use super::{AgentLaunch, AgentSessionSupervisor};
     use crate::auth::SessionScope;
-    use crate::id::{AgentId, RunId, SessionId};
+    use crate::id::{AgentId, ProjectId, RunId, SessionId, TaskId};
     use crate::providers::fake::{FakeEvent, FakeProvider, FakeScript};
     use crate::providers::{
-        ActivityState, LaunchMode, LifecycleState, ProviderCapability,
-        ProviderCompatibility, SessionObservation,
+        ActivityState, CodexProvider, LaunchMode, LifecycleState,
+        ProviderCapability, ProviderCompatibility, SessionObservation,
     };
     use crate::state::{ExternalResourceState, RunRecord, Store};
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const AGENT_ID: &str = "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX";
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+    const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
+    const TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAZ";
 
     #[test]
     fn failed_launch_retains_durable_desired_state() {
@@ -1280,6 +1338,182 @@ mod tests {
     }
 
     #[test]
+    fn malformed_provider_frames_are_appended_before_quarantine() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let provider =
+            FakeProvider::new([FakeScript::new([FakeEvent::malformed(
+                b"not-json\n",
+                "invalid JSON",
+            )])]);
+        let mut supervisor =
+            AgentSessionSupervisor::new(provider, &directory.0);
+        let launch = launch(run_id);
+
+        supervisor
+            .launch(&mut store, &launch)
+            .expect("the fake worker should launch");
+        supervisor
+            .advance(&mut store, launch.scope.session_id, 11)
+            .expect("the malformed event should be durable")
+            .expect("the malformed event should exist");
+
+        assert_eq!(
+            fs::read(directory.0.join(
+                crate::transcript::TranscriptStore::relative_path(
+                    launch.scope.session_id,
+                ),
+            ))
+            .expect("the malformed transcript should be readable"),
+            b"not-json\n"
+        );
+        store
+            .transaction(|repositories| {
+                let session = repositories
+                    .session(launch.scope.session_id)?
+                    .expect("the quarantined session should remain durable");
+                assert_eq!(session.state, LifecycleState::Quarantined);
+                assert_eq!(session.ended_at, Some(11));
+                assert_eq!(
+                    repositories.active_session_credential(
+                        launch.scope.run_id,
+                        launch.scope.agent_id,
+                        launch.scope.session_id,
+                    )?,
+                    None
+                );
+                Ok(())
+            })
+            .expect("the quarantine should be durable");
+    }
+
+    #[test]
+    fn codex_worker_jsonl_and_identity_are_stored_without_the_token() {
+        let directory = TestDirectory::new();
+        let executable = directory.0.join("codex-worker-fixture");
+        fs::write(
+            &executable,
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then printf 'codex-cli 0.151.0\\n'; exit 0; fi\n\
+             if [ \"$1\" = \"--help\" ]; then printf 'Usage: codex [OPTIONS] [PROMPT]\\n  --config <key=value>\\n  --cd <DIR>\\n'; exit 0; fi\n\
+             if [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--help\" ]; then printf 'Usage: codex exec [OPTIONS] [PROMPT]\\n  --config <key=value>\\n  --cd <DIR>\\n  --json\\n'; exit 0; fi\n\
+             {\n\
+               printf 'project_id=%s\\n' \"$COTERIE_PROJECT_ID\"\n\
+               printf 'run_id=%s\\n' \"$COTERIE_RUN_ID\"\n\
+               printf 'agent_id=%s\\n' \"$COTERIE_AGENT_ID\"\n\
+               printf 'role=%s\\n' \"$COTERIE_ROLE\"\n\
+               printf 'task_id=%s\\n' \"$COTERIE_TASK_ID\"\n\
+               printf 'socket=%s\\n' \"$COTERIE_SOCKET\"\n\
+               case \"$COTERIE_TOKEN\" in cot1_*) printf 'token=scoped\\n';; esac\n\
+               if [ \"${HOME+x}\" = x ]; then printf 'ambient_home=present\\n'; fi\n\
+             } > \"$PWD/job-environment\"\n\
+             printf '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\\n'\n\
+             printf '{\"type\":\"item.completed\",\"token\":\"%s\"}\\n' \"$COTERIE_TOKEN\"\n\
+             printf '{\"type\":\"turn.completed\",\"usage\":{}}\\n'\n\
+             exit 17\n",
+        )
+        .expect("the fake Codex executable should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("the fake Codex executable should be private");
+        let mut store = store_with_run(&directory);
+        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let mut supervisor = AgentSessionSupervisor::new(
+            CodexProvider::new([executable.as_os_str()]),
+            &directory.0,
+        );
+        let mut launch = launch(run_id);
+        launch.working_directory = directory.0.clone();
+        launch.primary_project_root = directory.0.clone();
+        launch.socket_path = directory.0.join("coterie.sock");
+
+        supervisor
+            .launch(&mut store, &launch)
+            .expect("the Codex worker should launch");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match supervisor
+                .advance(&mut store, launch.scope.session_id, 11)
+                .expect("the Codex event should be applied")
+            {
+                Some(event)
+                    if event.observation().is_some_and(|observation| {
+                        observation.lifecycle.is_terminal()
+                    }) =>
+                {
+                    break;
+                }
+                Some(_) => {}
+                None => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "Codex worker event stream timed out"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        let transcript = fs::read(directory.0.join(
+            crate::transcript::TranscriptStore::relative_path(
+                launch.scope.session_id,
+            ),
+        ))
+        .expect("the worker transcript should be readable");
+        assert!(transcript.starts_with(b"{\"type\":\"thread.started\""));
+        assert!(
+            transcript
+                .windows(b"[REDACTED]".len())
+                .any(|bytes| bytes == b"[REDACTED]")
+        );
+        assert!(
+            !transcript
+                .windows(b"cot1_".len())
+                .any(|bytes| bytes == b"cot1_")
+        );
+
+        let environment =
+            fs::read_to_string(directory.0.join("job-environment"))
+                .expect("the worker environment should be captured");
+        for expected in [
+            format!("project_id={PROJECT_ID}"),
+            format!("run_id={RUN_ID}"),
+            format!("agent_id={AGENT_ID}"),
+            "role=worker".to_owned(),
+            format!("task_id={TASK_ID}"),
+            format!("socket={}", launch.socket_path.display()),
+            "token=scoped".to_owned(),
+        ] {
+            assert!(environment.lines().any(|line| line == expected));
+        }
+        assert!(!environment.contains("ambient_home=present"));
+
+        store
+            .transaction(|repositories| {
+                let session = repositories
+                    .session(launch.scope.session_id)?
+                    .expect("the worker session should remain durable");
+                assert_eq!(session.state, LifecycleState::Exited);
+                assert_eq!(session.ended_at, Some(11));
+                let exit_event = repositories
+                    .events_after(run_id, 0, 100)?
+                    .into_iter()
+                    .find(|event| {
+                        event.event_type == "session.lifecycle_changed"
+                            && event.payload["data"]["state"] == "exited"
+                    })
+                    .expect("the process exit should emit a lifecycle event");
+                assert_eq!(exit_event.payload["data"]["exit"]["code"], 17);
+                assert_eq!(
+                    exit_event.payload["data"]["exit"]["reason"],
+                    "process"
+                );
+                Ok(())
+            })
+            .expect("the classified exit should be durable");
+    }
+
+    #[test]
     fn lifecycle_control_is_explicit_and_idempotent() {
         let directory = TestDirectory::new();
         let mut store = Store::open(&directory.0.join("state.sqlite3"))
@@ -1411,6 +1645,12 @@ mod tests {
             role: "worker".to_owned(),
             mode: LaunchMode::Job,
             working_directory: PathBuf::from("/tmp/project"),
+            project_id: PROJECT_ID
+                .parse::<ProjectId>()
+                .expect("valid project ID"),
+            primary_project_root: PathBuf::from("/tmp/project"),
+            task_id: TASK_ID.parse::<TaskId>().expect("valid task ID"),
+            socket_path: PathBuf::from("/tmp/coterie.sock"),
             bootstrap_instruction: "Run `coterie prime`.".to_owned(),
             created_at: 10,
         }

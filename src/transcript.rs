@@ -43,6 +43,38 @@ impl TranscriptStore {
         session_id: SessionId,
         bytes: &[u8],
     ) -> Result<(), TranscriptError> {
+        self.append_bytes(session_id, bytes)
+    }
+
+    /// Appends provider bytes after replacing one known session credential.
+    pub(crate) fn append_redacted(
+        &self,
+        session_id: SessionId,
+        bytes: &[u8],
+        secret: &[u8],
+    ) -> Result<(), TranscriptError> {
+        if secret.is_empty() {
+            return self.append_bytes(session_id, bytes);
+        }
+        let mut redacted = Vec::with_capacity(bytes.len());
+        let mut remaining = bytes;
+        while let Some(offset) = remaining
+            .windows(secret.len())
+            .position(|candidate| candidate == secret)
+        {
+            redacted.extend_from_slice(&remaining[..offset]);
+            redacted.extend_from_slice(b"[REDACTED]");
+            remaining = &remaining[offset + secret.len()..];
+        }
+        redacted.extend_from_slice(remaining);
+        self.append_bytes(session_id, &redacted)
+    }
+
+    fn append_bytes(
+        &self,
+        session_id: SessionId,
+        bytes: &[u8],
+    ) -> Result<(), TranscriptError> {
         let directory = self.run_state_directory.join(TRANSCRIPT_DIRECTORY);
         fs::create_dir_all(&directory)?;
 
@@ -93,6 +125,30 @@ mod tests {
             fs::read(directory.0.join(relative_path))
                 .expect("the transcript should be readable"),
             b"{\"turn\":1}\n{\"turn\":2}\n"
+        );
+    }
+
+    #[test]
+    fn known_session_credentials_are_redacted_before_append() {
+        let directory = TestDirectory::new();
+        let store = TranscriptStore::new(&directory.0);
+        let session_id =
+            SESSION_ID.parse::<SessionId>().expect("valid session ID");
+
+        store
+            .append_redacted(
+                session_id,
+                b"{\"token\":\"cot1_secret\",\"copy\":\"cot1_secret\"}\n",
+                b"cot1_secret",
+            )
+            .expect("the redacted frame should append");
+
+        assert_eq!(
+            fs::read(
+                directory.0.join(TranscriptStore::relative_path(session_id))
+            )
+            .expect("the transcript should be readable"),
+            b"{\"token\":\"[REDACTED]\",\"copy\":\"[REDACTED]\"}\n"
         );
     }
 

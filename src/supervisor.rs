@@ -892,6 +892,7 @@ async fn serve(
         listener,
         active.clone(),
         &run_directories.state,
+        &socket_path,
         &mut store,
         &mut sessions,
         &mut workspaces,
@@ -915,6 +916,7 @@ async fn serve_listener(
     listener: UnixListener,
     active: ActiveRunEntry,
     run_state_directory: &Path,
+    socket_path: &Path,
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
     workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
@@ -951,7 +953,10 @@ async fn serve_listener(
                     store,
                     sessions,
                     workspaces,
-                    run_state_directory,
+                    RuntimePaths {
+                        run_state_directory,
+                        socket_path,
+                    },
                     active.run_id,
                     command,
                     &mut foreground,
@@ -1059,7 +1064,7 @@ fn handle_command(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
     workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
-    run_state_directory: &Path,
+    paths: RuntimePaths<'_>,
     run_id: RunId,
     command: SupervisorCommand,
     foreground: &mut ForegroundCoordination,
@@ -1110,13 +1115,7 @@ fn handle_command(
                 _ => None,
             };
             let result = execute_request(
-                store,
-                sessions,
-                workspaces,
-                run_state_directory,
-                run_id,
-                &caller,
-                request,
+                store, sessions, workspaces, paths, run_id, &caller, request,
             );
             let succeeded = result.is_ok();
             let _request_may_have_disconnected = response.send(result);
@@ -1354,14 +1353,21 @@ struct SpawnRuntime<'a> {
     sessions: &'a mut AgentSessionSupervisor<FakeProvider>,
     workspaces: &'a mut WorkspaceSupervisor<FakeWorkspace>,
     run_state_directory: &'a Path,
+    socket_path: &'a Path,
     run_id: RunId,
+}
+
+#[derive(Clone, Copy)]
+struct RuntimePaths<'a> {
+    run_state_directory: &'a Path,
+    socket_path: &'a Path,
 }
 
 fn execute_request(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
     workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
-    run_state_directory: &Path,
+    paths: RuntimePaths<'_>,
     run_id: RunId,
     caller: &AuthenticatedCaller,
     request: RpcRequest,
@@ -1444,7 +1450,8 @@ fn execute_request(
                 store,
                 sessions,
                 workspaces,
-                run_state_directory,
+                run_state_directory: paths.run_state_directory,
+                socket_path: paths.socket_path,
                 run_id,
             },
             caller,
@@ -1482,7 +1489,7 @@ fn execute_request(
             through,
         } => acknowledge_inbox(store, run_id, caller, operation_id, through),
         RpcRequest::Logs { agent } => {
-            logs(store, run_state_directory, run_id, caller, &agent)
+            logs(store, paths.run_state_directory, run_id, caller, &agent)
         }
         RpcRequest::Events { after, limit } => {
             events(store, run_id, caller, after, limit)
@@ -2334,6 +2341,7 @@ fn spawn_agent(
         sessions,
         workspaces,
         run_state_directory,
+        socket_path,
         run_id,
     } = runtime;
     require_capability(store, run_id, caller, "spawn", &role)?;
@@ -2515,17 +2523,28 @@ fn spawn_agent(
         })
         .map_err(rpc_state_failure)?;
     let intent = mutation_value(outcome);
-    let workspace = store
+    let (workspace, primary_project) = store
         .transaction(|repositories| {
-            repositories.workspace(intent.assignment_id)
+            let workspace = repositories.workspace(intent.assignment_id)?;
+            let primary_project = repositories
+                .projects(run_id)?
+                .into_iter()
+                .find(|project| project.is_primary);
+            Ok((workspace, primary_project))
         })
-        .map_err(rpc_state_failure)?
-        .ok_or_else(|| {
-            RpcFailure::new(
-                RpcFailureCode::Internal,
-                "the assignment workspace intent is missing",
-            )
-        })?;
+        .map_err(rpc_state_failure)?;
+    let workspace = workspace.ok_or_else(|| {
+        RpcFailure::new(
+            RpcFailureCode::Internal,
+            "the assignment workspace intent is missing",
+        )
+    })?;
+    let primary_project = primary_project.ok_or_else(|| {
+        RpcFailure::new(
+            RpcFailureCode::Internal,
+            "the run has no primary project",
+        )
+    })?;
     let workspace_state = workspaces
         .materialize(store, intent.assignment_id, now)
         .map_err(rpc_workspace_failure)?;
@@ -2545,6 +2564,10 @@ fn spawn_agent(
         role: role.clone(),
         mode: LaunchMode::Job,
         working_directory: workspace.path,
+        project_id: workspace.project_id,
+        primary_project_root: primary_project.canonical_path,
+        task_id: intent.task_id,
+        socket_path: socket_path.to_path_buf(),
         bootstrap_instruction: bootstrap_instruction(run_id, &role),
         created_at: now,
     };
@@ -4609,6 +4632,7 @@ mod tests {
             .expect("the active session should be inserted");
         let served_entry = active.clone();
         let run_state_directory = fixture.join("run");
+        let server_socket = socket.clone();
         let mut sessions = runtime_sessions(&run_state_directory);
         let mut workspaces = runtime_workspaces();
         let server = tokio::spawn(async move {
@@ -4616,6 +4640,7 @@ mod tests {
                 listener,
                 served_entry,
                 &run_state_directory,
+                &server_socket,
                 &mut store,
                 &mut sessions,
                 &mut workspaces,
@@ -4718,6 +4743,7 @@ mod tests {
             .expect("the run prerequisites should be inserted");
         let (credential_tx, credential_rx) = std::sync::mpsc::channel();
         let served_entry = active.clone();
+        let server_socket = socket.clone();
         let mut sessions = runtime_sessions(&run_state_directory)
             .with_credential_observer(credential_tx);
         let mut workspaces = runtime_workspaces();
@@ -4726,6 +4752,7 @@ mod tests {
                 listener,
                 served_entry,
                 &run_state_directory,
+                &server_socket,
                 &mut store,
                 &mut sessions,
                 &mut workspaces,

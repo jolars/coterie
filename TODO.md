@@ -120,7 +120,7 @@ later milestones build on.
   orchestration bootstrap through Codex's documented
   `developer_instructions` setting, leaving repository `AGENTS.md` discovery
   intact.
-- [ ] Launch workers through `codex exec --json`, parse its JSONL event stream,
+- [x] Launch workers through `codex exec --json`, parse its JSONL event stream,
   classify exits and malformed frames, store append-only transcripts, and
   pass only the identity-scoped environment.
 - [ ] Map the built-in permission profiles to enforceable Codex flags. Fail
