@@ -155,7 +155,7 @@ later milestones build on.
   session reattachment is unavailable.
 - [x] Interrupting the foreground reaches Codex but does not stop the run;
   `coterie stop` performs bounded shutdown and preserves recoverable work.
-- [ ] Unit, fake-provider, temporary-repository, and opt-in real-Codex contract
+- [x] Unit, fake-provider, temporary-repository, and opt-in real-Codex contract
   tests pass. CI never requires networked or account-authenticated Codex
   runs.
 - [ ] Merge the first Versionary release PR only after every MVP criterion is
