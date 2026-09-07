@@ -105,9 +105,9 @@ later milestones build on.
 
 ### M2 gate
 
-- [ ] An integration test launches a fake lead and worker, delegates and closes
+- [x] An integration test launches a fake lead and worker, delegates and closes
   a task, disconnects the foreground, and reconnects to the same run.
-- [ ] Restart tests preserve the task graph, transcript references, operations,
+- [x] Restart tests preserve the task graph, transcript references, operations,
   and workspace metadata. An unverifiable live process is classified as
   `lost` or `unknown`, never silently adopted or declared successful.
 

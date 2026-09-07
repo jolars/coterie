@@ -3300,27 +3300,22 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        AgentLaunch, SupervisorClient, SupervisorCommand, SupervisorError,
-        drain_fake_events, persist_shutdown, runtime_sessions,
-        runtime_workspaces, serve_connection, serve_listener,
+        SupervisorClient, SupervisorCommand, SupervisorError, persist_shutdown,
+        runtime_sessions, runtime_workspaces, serve_connection, serve_listener,
         validate_handshake, validate_socket_path,
     };
     use crate::auth::{AgentToken, SessionScope};
-    use crate::id::{
-        AgentId, AssignmentId, EventId, OperationId, ProjectId, RunId,
-        SessionId, TaskId,
-    };
+    use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
     use crate::project::{ActiveRunEntry, ProjectIdentity};
     use crate::protocol::{
         ClientMessage, ConnectionChannel, FinishStatus, HandshakeRequest,
         RequestAuthentication, RpcFailureCode, RpcRequest, RpcResponse,
         ServerMessage, VersionedRequest, read_frame, write_frame,
     };
-    use crate::providers::{LaunchMode, LifecycleState};
+    use crate::providers::LifecycleState;
     use crate::state::{
-        AgentRecord, ClaimTaskMutation, DependencyRecord, EventRecord,
-        ProjectRecord, RunRecord, SessionCredentialRecord, SessionRecord,
-        Store, StoreError, TaskRecord,
+        AgentRecord, ProjectRecord, RunRecord, SessionCredentialRecord,
+        SessionRecord, Store, StoreError,
     };
     use crate::tasks::TaskStatus;
 
@@ -3687,7 +3682,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_agent_reads_its_inbox_finishes_and_the_operator_closes()
+    async fn fake_lead_and_worker_complete_a_task_across_foreground_reconnection()
      {
         let fixture = TestDirectory::new();
         let socket = fixture.join("supervisor.sock");
@@ -3696,18 +3691,6 @@ mod tests {
         let active = entry(&project_path);
         let listener = UnixListener::bind(&socket)
             .expect("the fixture socket should bind");
-        let agent_id = AGENT_ID.parse::<AgentId>().expect("valid agent ID");
-        let session_id =
-            SESSION_ID.parse::<SessionId>().expect("valid session ID");
-        let task_id = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAZ"
-            .parse::<TaskId>()
-            .expect("valid task ID");
-        let assignment_id = "ca-01ARZ3NDEKTSV4RRFFQ69G5FB0"
-            .parse::<AssignmentId>()
-            .expect("valid assignment ID");
-        let downstream_id = "ct-01ARZ3NDEKTSV4RRFFQ69G5FB2"
-            .parse::<TaskId>()
-            .expect("valid downstream task ID");
         let run_state_directory = fixture.join("run");
         fs::create_dir(&run_state_directory)
             .expect("the run directory should be created");
@@ -3730,101 +3713,13 @@ mod tests {
                     identity: active.project_identity.clone(),
                     is_primary: true,
                     attached_at: 10,
-                })?;
-                repositories.insert_task(&TaskRecord {
-                    id: task_id,
-                    run_id: active.run_id,
-                    project_id: active.project_id,
-                    group_id: None,
-                    title: "Implement parser".to_owned(),
-                    description: "Add parsing tests first.".to_owned(),
-                    status: TaskStatus::Open,
-                    result: None,
-                    created_at: 11,
-                    updated_at: 11,
-                })?;
-                repositories.insert_task(&TaskRecord {
-                    id: downstream_id,
-                    run_id: active.run_id,
-                    project_id: active.project_id,
-                    group_id: None,
-                    title: "Document parser".to_owned(),
-                    description: "Document the accepted parser.".to_owned(),
-                    status: TaskStatus::Open,
-                    result: None,
-                    created_at: 11,
-                    updated_at: 11,
-                })?;
-                repositories.insert_dependency(&DependencyRecord {
-                    run_id: active.run_id,
-                    task_id: downstream_id,
-                    dependency_task_id: task_id,
-                    created_at: 11,
-                })?;
-                repositories.insert_event(&EventRecord {
-                    id: "ce-01ARZ3NDEKTSV4RRFFQ69G5FB3"
-                        .parse::<EventId>()
-                        .expect("valid event ID"),
-                    run_id: active.run_id,
-                    sequence: 1,
-                    event_type: "test.fixture".to_owned(),
-                    actor: "operator".to_owned(),
-                    subject: task_id.to_string(),
-                    project_id: Some(active.project_id),
-                    agent_id: None,
-                    task_id: Some(task_id),
-                    operation_id: None,
-                    correlation_id: None,
-                    causation_id: None,
-                    payload: serde_json::json!({
-                        "schema_version": 1,
-                        "data": {"fixture": true},
-                    }),
-                    summary: "Fixture event.".to_owned(),
-                    created_at: 11,
                 })
             })
             .expect("the run prerequisites should be inserted");
-        let mut sessions = runtime_sessions(&run_state_directory);
-        let launch = AgentLaunch {
-            scope: SessionScope {
-                run_id: active.run_id,
-                agent_id,
-                session_id,
-                generation: 0,
-            },
-            role: "worker".to_owned(),
-            mode: LaunchMode::Job,
-            working_directory: project_path,
-            bootstrap_instruction: "Run `coterie prime`.".to_owned(),
-            created_at: 12,
-        };
-        let launched = sessions
-            .launch(&mut store, &launch)
-            .expect("the fake worker should launch");
-        drain_fake_events(&mut sessions, &mut store, session_id, 12)
-            .expect("the fake worker should become running");
-        store
-            .claim_task(&ClaimTaskMutation {
-                operation_id: "co-01ARZ3NDEKTSV4RRFFQ69G5FB1"
-                    .parse()
-                    .expect("valid operation ID"),
-                run_id: active.run_id,
-                actor_agent_id: None,
-                task_id,
-                agent_id,
-                assignment_id,
-                claimed_at: 13,
-            })
-            .expect("the task should be claimed");
-        store
-            .transaction(|repositories| {
-                repositories
-                    .associate_assignment_session(assignment_id, session_id)
-            })
-            .expect("the assignment should own the session");
-
+        let (credential_tx, credential_rx) = std::sync::mpsc::channel();
         let served_entry = active.clone();
+        let mut sessions = runtime_sessions(&run_state_directory)
+            .with_credential_observer(credential_tx);
         let mut workspaces = runtime_workspaces();
         let server = tokio::spawn(async move {
             serve_listener(
@@ -3841,6 +3736,89 @@ mod tests {
             SupervisorClient::connect_operator_at(&socket, &active)
                 .await
                 .expect("the operator should connect");
+        let launch_operation = OperationId::generate();
+        let launch = operator
+            .request(RpcRequest::LaunchForeground {
+                operation_id: launch_operation,
+            })
+            .await
+            .expect("the fake lead should launch");
+        let (lead_id, lead_session_id) = match launch {
+            RpcResponse::ForegroundLaunched {
+                run_id,
+                agent,
+                session_id,
+            } => {
+                assert_eq!(run_id, active.run_id);
+                assert_eq!(agent.name, "lead");
+                (agent.id, session_id)
+            }
+            response => panic!("unexpected launch response: {response:?}"),
+        };
+        let lead_credential = credential_rx
+            .recv()
+            .expect("the fake lead should receive a credential");
+        assert_eq!(lead_credential.scope.agent_id, lead_id);
+        assert_eq!(lead_credential.scope.session_id, lead_session_id);
+
+        let task = operator
+            .request(RpcRequest::TaskCreate {
+                operation_id: OperationId::generate(),
+                title: "Implement parser".to_owned(),
+                description: "Add parsing tests first.".to_owned(),
+                project: "primary".to_owned(),
+                group: None,
+                dependencies: Vec::new(),
+            })
+            .await
+            .expect("the delegated task should be created");
+        let task_id = match task {
+            RpcResponse::TaskCreated { task, .. } => task.id,
+            response => panic!("unexpected task response: {response:?}"),
+        };
+        let downstream = operator
+            .request(RpcRequest::TaskCreate {
+                operation_id: OperationId::generate(),
+                title: "Document parser".to_owned(),
+                description: "Document the accepted parser.".to_owned(),
+                project: "primary".to_owned(),
+                group: None,
+                dependencies: vec![task_id],
+            })
+            .await
+            .expect("the dependent task should be created");
+        let downstream_id = match downstream {
+            RpcResponse::TaskCreated { task, .. } => task.id,
+            response => panic!("unexpected task response: {response:?}"),
+        };
+        let spawn = operator
+            .request(RpcRequest::Spawn {
+                operation_id: OperationId::generate(),
+                role: "worker".to_owned(),
+                task_id,
+            })
+            .await
+            .expect("the task should be delegated to a fake worker");
+        let (agent_id, session_id, assignment_id) = match spawn {
+            RpcResponse::Spawned {
+                agent,
+                session_id,
+                assignment_id,
+                task_id: spawned_task_id,
+                ..
+            } => {
+                assert_eq!(agent.name, "worker-1");
+                assert_eq!(spawned_task_id, task_id);
+                (agent.id, session_id, assignment_id)
+            }
+            response => panic!("unexpected spawn response: {response:?}"),
+        };
+        let launched = credential_rx
+            .recv()
+            .expect("the fake worker should receive a credential");
+        assert_eq!(launched.scope.agent_id, agent_id);
+        assert_eq!(launched.scope.session_id, session_id);
+
         let initial_events = operator
             .request(RpcRequest::Events {
                 after: 0,
@@ -3855,10 +3833,11 @@ mod tests {
         else {
             panic!("the event stream should be returned");
         };
-        assert!(events.iter().any(|event| {
-            event.event_type == "test.fixture"
-                && event.payload["data"] == serde_json::json!({"fixture": true})
-        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "task.claimed")
+        );
         let sent = operator
             .request(RpcRequest::Send {
                 operation_id: OperationId::generate(),
@@ -3979,8 +3958,12 @@ mod tests {
             .expect("the worker should finish its assignment");
         assert!(matches!(
             finished,
-            RpcResponse::AssignmentFinished { ref task, .. }
-                if task.status == TaskStatus::Submitted
+            RpcResponse::AssignmentFinished {
+                assignment_id: finished_assignment_id,
+                ref task,
+                ..
+            } if finished_assignment_id == assignment_id
+                && task.status == TaskStatus::Submitted
         ));
         assert_eq!(
             agent
@@ -4047,12 +4030,33 @@ mod tests {
             event.run_id == active.run_id
                 && event.payload["schema_version"] == 1
         }));
+        drop(agent);
+        drop(operator);
+
+        let mut reconnected =
+            SupervisorClient::connect_operator_at(&socket, &active)
+                .await
+                .expect("the foreground should reconnect to the same run");
         assert!(matches!(
-            operator.request(RpcRequest::TaskReady).await,
+            reconnected
+                .request(RpcRequest::LaunchForeground {
+                    operation_id: launch_operation,
+                })
+                .await,
+            Ok(RpcResponse::ForegroundLaunched {
+                run_id,
+                ref agent,
+                session_id,
+            }) if run_id == active.run_id
+                && agent.id == lead_id
+                && session_id == lead_session_id
+        ));
+        assert!(matches!(
+            reconnected.request(RpcRequest::TaskReady).await,
             Ok(RpcResponse::ReadyTasks { ref tasks })
                 if tasks.len() == 1 && tasks[0].id == downstream_id
         ));
-        let primed_tasks = match operator
+        let primed_tasks = match reconnected
             .request(RpcRequest::Prime)
             .await
             .expect("prime should reconstruct the closed task result")
@@ -4075,7 +4079,7 @@ mod tests {
                 "validation_summary": "Integrated and verified.",
             }))
         );
-        operator
+        reconnected
             .shutdown(OperationId::generate())
             .await
             .expect("the operator should stop the run");

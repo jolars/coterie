@@ -42,6 +42,8 @@ pub(crate) struct AgentSessionSupervisor<P> {
     provider: P,
     sessions: BTreeMap<SessionId, ProviderSessionHandle>,
     transcripts: TranscriptStore,
+    #[cfg(test)]
+    credential_observer: Option<std::sync::mpsc::Sender<LaunchedAgent>>,
 }
 
 impl<P: Provider> AgentSessionSupervisor<P> {
@@ -53,7 +55,18 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             provider,
             sessions: BTreeMap::new(),
             transcripts: TranscriptStore::new(run_state_directory),
+            #[cfg(test)]
+            credential_observer: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_credential_observer(
+        mut self,
+        observer: std::sync::mpsc::Sender<LaunchedAgent>,
+    ) -> Self {
+        self.credential_observer = Some(observer);
+        self
     }
 
     /// Persists the starting generation before crossing the provider boundary.
@@ -370,10 +383,18 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             });
         }
         self.sessions.insert(launch.scope.session_id, handle);
-        Ok(LaunchedAgent {
+        let launched = LaunchedAgent {
             scope: launch.scope,
             token,
-        })
+        };
+        #[cfg(test)]
+        if let Some(observer) = &self.credential_observer {
+            let _receiver_may_have_closed = observer.send(LaunchedAgent {
+                scope: launched.scope,
+                token: launched.token.clone(),
+            });
+        }
+        Ok(launched)
     }
 
     fn record_launch_observation(

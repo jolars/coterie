@@ -632,6 +632,75 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
         .as_str()
         .expect("launch should return a session ID")
         .to_owned();
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Implement parser",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FBA",
+        "--json",
+    ]);
+    let task_id = task["data"]["task"]["id"]
+        .as_str()
+        .expect("task creation should return an ID")
+        .to_owned();
+    let downstream = fixture.run_json(&[
+        "task",
+        "create",
+        "Document parser",
+        "--after",
+        &task_id,
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FBB",
+        "--json",
+    ]);
+    let downstream_id = downstream["data"]["task"]["id"]
+        .as_str()
+        .expect("dependent task creation should return an ID")
+        .to_owned();
+    let spawn = fixture.run_json(&[
+        "spawn",
+        "worker",
+        "--task",
+        &task_id,
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FBC",
+        "--json",
+    ]);
+    let worker_session_id = spawn["data"]["session_id"]
+        .as_str()
+        .expect("spawn should return a session ID")
+        .to_owned();
+    let tasks_before =
+        fixture.run_json(&["prime", "--json"])["data"]["tasks"].clone();
+    assert!(
+        tasks_before
+            .as_array()
+            .is_some_and(|tasks| tasks.len() == 2)
+    );
+    assert!(tasks_before.as_array().is_some_and(|tasks| {
+        tasks.iter().any(|task| {
+            task["id"] == downstream_id
+                && task["unresolved_dependencies"][0] == task_id
+        })
+    }));
+    let transcript_before =
+        fixture.run_json(&["logs", "worker-1", "--json"])["data"]["transcript"]
+            .clone();
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(RUN_ID)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database)
+        .expect("the active run database should open");
+    let durable_before = durable_restart_snapshot(&connection);
+    assert_eq!(durable_before.tasks.len(), 2);
+    assert_eq!(durable_before.dependencies.len(), 1);
+    assert_eq!(durable_before.transcript_references.len(), 2);
+    assert_eq!(durable_before.operations.len(), 4);
+    assert_eq!(durable_before.workspaces.len(), 1);
+    drop(connection);
 
     crashed
         .kill()
@@ -640,22 +709,27 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
     let restart = run(fixture.connect_command());
     assert!(restart.status.success(), "restart failed: {restart:?}");
 
-    let database = fixture
-        .state
-        .join("coterie/runs")
-        .join(RUN_ID)
-        .join("state.sqlite3");
-    let connection = rusqlite::Connection::open(database)
+    let connection = rusqlite::Connection::open(&database)
         .expect("the restarted run database should open");
-    let (lifecycle, reconciliation): (String, String) = connection
+    assert_eq!(durable_restart_snapshot(&connection), durable_before);
+    let lost_sessions: i64 = connection
         .query_row(
-            "SELECT state, reconciliation_state FROM sessions WHERE id = ?1",
-            [&session_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            "SELECT COUNT(*) FROM sessions \
+             WHERE id IN (?1, ?2) AND state = 'lost' \
+               AND reconciliation_state = 'lost'",
+            [&session_id, &worker_session_id],
+            |row| row.get(0),
         )
-        .expect("the reconciled session should remain durable");
-    assert_eq!(lifecycle, "lost");
-    assert_eq!(reconciliation, "lost");
+        .expect("the reconciled sessions should remain durable");
+    assert_eq!(lost_sessions, 2);
+    let lost_workspaces: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM workspaces WHERE state = 'lost'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the reconciled workspace should remain durable");
+    assert_eq!(lost_workspaces, 1);
     let lost_events: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM events \
@@ -665,8 +739,16 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
             |row| row.get(0),
         )
         .expect("the reconciliation event should be queryable");
-    assert_eq!(lost_events, 1);
+    assert_eq!(lost_events, 2);
     drop(connection);
+
+    let tasks_after =
+        fixture.run_json(&["prime", "--json"])["data"]["tasks"].clone();
+    assert_eq!(tasks_after, tasks_before);
+    let transcript_after =
+        fixture.run_json(&["logs", "worker-1", "--json"])["data"]["transcript"]
+            .clone();
+    assert_eq!(transcript_after, transcript_before);
 
     let mut replay = fixture.command();
     replay.args(["--operation-id", "co-01ARZ3NDEKTSV4RRFFQ69G5FB8", "--json"]);
@@ -688,6 +770,75 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
     wait_until("restarted supervisor retirement", || {
         fixture.index_entry_count() == 0
     });
+}
+
+#[derive(Debug, PartialEq)]
+struct DurableRestartSnapshot {
+    tasks: Vec<Vec<rusqlite::types::Value>>,
+    dependencies: Vec<Vec<rusqlite::types::Value>>,
+    transcript_references: Vec<Vec<rusqlite::types::Value>>,
+    operations: Vec<Vec<rusqlite::types::Value>>,
+    workspaces: Vec<Vec<rusqlite::types::Value>>,
+}
+
+fn durable_restart_snapshot(
+    connection: &rusqlite::Connection,
+) -> DurableRestartSnapshot {
+    DurableRestartSnapshot {
+        tasks: query_rows(
+            connection,
+            "SELECT id, run_id, project_id, group_id, title, description, \
+                    status, result_json, created_at, updated_at \
+             FROM tasks ORDER BY id",
+            10,
+        ),
+        dependencies: query_rows(
+            connection,
+            "SELECT run_id, task_id, dependency_task_id, created_at \
+             FROM task_dependencies ORDER BY task_id, dependency_task_id",
+            4,
+        ),
+        transcript_references: query_rows(
+            connection,
+            "SELECT id, run_id, agent_id, generation, provider, \
+                    provider_session_id, transcript_path, created_at \
+             FROM sessions ORDER BY id",
+            8,
+        ),
+        operations: query_rows(
+            connection,
+            "SELECT id, run_id, kind, actor_agent_id, status, request_json, \
+                    result_json, attempt_count, created_at, updated_at \
+             FROM operations ORDER BY id",
+            10,
+        ),
+        workspaces: query_rows(
+            connection,
+            "SELECT assignment_id, run_id, project_id, kind, path, \
+                    base_commit, result_commit, target_commit, created_at \
+             FROM workspaces ORDER BY assignment_id",
+            9,
+        ),
+    }
+}
+
+fn query_rows(
+    connection: &rusqlite::Connection,
+    sql: &str,
+    column_count: usize,
+) -> Vec<Vec<rusqlite::types::Value>> {
+    let mut statement = connection
+        .prepare(sql)
+        .expect("the durable snapshot query should prepare");
+    statement
+        .query_map([], |row| {
+            (0..column_count)
+                .map(|column| row.get(column))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .expect("the durable snapshot query should execute")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("the durable snapshot rows should decode")
 }
 
 fn run(mut command: Command) -> std::process::Output {
