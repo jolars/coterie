@@ -67,6 +67,18 @@ The crates.io `0.1.0` package is the earlier development-foundation release; it
 does not contain the operator loop documented below. macOS and Windows remain
 outside the current platform contract.
 
+To install the default Nix flake package:
+
+```console
+nix profile install github:jolars/coterie
+```
+
+Or run it without installing:
+
+```console
+nix run github:jolars/coterie
+```
+
 At runtime, `XDG_RUNTIME_DIR` must name an absolute, existing directory owned by
 the current user with mode 0700. Coterie stores durable data beneath
 `$XDG_STATE_HOME/coterie`, or `$HOME/.local/state/coterie` when

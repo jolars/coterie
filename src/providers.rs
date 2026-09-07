@@ -2657,9 +2657,16 @@ mod tests {
 
         fn executable(&self, name: &str, contents: &str) -> PathBuf {
             let path = self.0.join(name);
-            fs::write(&path, contents).expect("the fixture should be writable");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-                .expect("the fixture should be executable");
+            let staging_path = self.0.join(format!(".{name}.tmp"));
+            fs::write(&staging_path, contents)
+                .expect("the fixture should be writable");
+            fs::set_permissions(
+                &staging_path,
+                fs::Permissions::from_mode(0o700),
+            )
+            .expect("the fixture should be executable");
+            fs::rename(staging_path, &path)
+                .expect("the fixture should be installed atomically");
             path
         }
     }

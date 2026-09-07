@@ -82,3 +82,4 @@ tasks:
     internal: true
     cmds:
       - devenv info
+      - nix flake check --no-build
