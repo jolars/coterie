@@ -65,8 +65,11 @@ use crate::state::{
     WorkspaceRecord,
 };
 use crate::tasks::{TaskStatus, TaskTransition};
+#[cfg(not(test))]
+use crate::workspace::GitWorkspace;
+#[cfg(test)]
 use crate::workspace::fake::FakeWorkspace;
-use crate::workspace::{WorkspaceError, WorkspaceSupervisor};
+use crate::workspace::{WorkspaceBackend, WorkspaceError, WorkspaceSupervisor};
 
 use self::session::{
     AgentLaunch, AgentSessionError, AgentSessionSupervisor,
@@ -887,7 +890,7 @@ async fn serve(
     let index = ActiveRunIndex::new(&directories);
     index.publish(&active)?;
     let mut sessions = runtime_sessions(&run_directories.state);
-    let mut workspaces = runtime_workspaces();
+    let mut workspaces = runtime_workspaces(&run_directories.state);
     let reconciled_at = unix_timestamp()?;
     workspaces.reconcile_after_restart(
         &mut store,
@@ -923,14 +926,14 @@ async fn serve(
     Ok(())
 }
 
-async fn serve_listener(
+async fn serve_listener<B: WorkspaceBackend>(
     listener: UnixListener,
     active: ActiveRunEntry,
     run_state_directory: &Path,
     socket_path: &Path,
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
-    workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
+    workspaces: &mut WorkspaceSupervisor<B>,
 ) -> Result<(), SupervisorError> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(16);
@@ -1024,7 +1027,17 @@ fn runtime_sessions(
     AgentSessionSupervisor::new(FakeProvider::new(scripts), run_state_directory)
 }
 
-fn runtime_workspaces() -> WorkspaceSupervisor<FakeWorkspace> {
+#[cfg(not(test))]
+fn runtime_workspaces(
+    run_state_directory: &Path,
+) -> WorkspaceSupervisor<GitWorkspace> {
+    WorkspaceSupervisor::new(GitWorkspace::new(run_state_directory))
+}
+
+#[cfg(test)]
+fn runtime_workspaces(
+    _run_state_directory: &Path,
+) -> WorkspaceSupervisor<FakeWorkspace> {
     WorkspaceSupervisor::new(FakeWorkspace::new())
 }
 
@@ -1071,10 +1084,10 @@ async fn sleep_until_pending_shutdown(pending: &Option<PendingShutdown>) {
     tokio::time::sleep_until(deadline).await;
 }
 
-fn handle_command(
+fn handle_command<B: WorkspaceBackend>(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
-    workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
+    workspaces: &mut WorkspaceSupervisor<B>,
     paths: RuntimePaths<'_>,
     run_id: RunId,
     command: SupervisorCommand,
@@ -1359,10 +1372,10 @@ struct MessageIntent {
     sequence: i64,
 }
 
-struct SpawnRuntime<'a> {
+struct SpawnRuntime<'a, B> {
     store: &'a mut Store,
     sessions: &'a mut AgentSessionSupervisor<FakeProvider>,
-    workspaces: &'a mut WorkspaceSupervisor<FakeWorkspace>,
+    workspaces: &'a mut WorkspaceSupervisor<B>,
     run_state_directory: &'a Path,
     socket_path: &'a Path,
     run_id: RunId,
@@ -1374,10 +1387,10 @@ struct RuntimePaths<'a> {
     socket_path: &'a Path,
 }
 
-fn execute_request(
+fn execute_request<B: WorkspaceBackend>(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<FakeProvider>,
-    workspaces: &mut WorkspaceSupervisor<FakeWorkspace>,
+    workspaces: &mut WorkspaceSupervisor<B>,
     paths: RuntimePaths<'_>,
     run_id: RunId,
     caller: &AuthenticatedCaller,
@@ -1476,6 +1489,7 @@ fn execute_request(
             summary,
         } => finish_assignment(
             store,
+            workspaces,
             run_id,
             caller,
             operation_id,
@@ -2340,8 +2354,8 @@ fn close_task(
     })
 }
 
-fn spawn_agent(
-    runtime: SpawnRuntime<'_>,
+fn spawn_agent<B: WorkspaceBackend>(
+    runtime: SpawnRuntime<'_, B>,
     caller: &AuthenticatedCaller,
     operation_id: OperationId,
     role: String,
@@ -2381,18 +2395,33 @@ fn spawn_agent(
         .transaction(|repositories| repositories.operation(operation_id))
         .map_err(rpc_state_failure)?
         .is_some();
+    let workspace_kind = workspace_policy_name(role_definition.workspace);
+    let mut base_commit = None;
     if !replaying {
-        let (agents, task, readiness) = store
+        let (agents, task, project, readiness) = store
             .transaction(|repositories| {
+                let task = repositories.task(task_id)?;
+                let project = task
+                    .as_ref()
+                    .map(|task| repositories.project(task.project_id))
+                    .transpose()?
+                    .flatten();
                 Ok((
                     repositories.agents(run_id)?,
-                    repositories.task(task_id)?,
+                    task,
+                    project,
                     repositories.task_readiness(task_id)?,
                 ))
             })
             .map_err(rpc_state_failure)?;
         task.filter(|task| task.run_id == run_id).ok_or_else(|| {
             not_found(format!("task `{task_id}` does not exist"))
+        })?;
+        let project = project.ok_or_else(|| {
+            RpcFailure::new(
+                RpcFailureCode::Internal,
+                format!("the target project for task `{task_id}` is missing"),
+            )
         })?;
         if !readiness.is_some_and(|readiness| readiness.is_ready()) {
             return Err(conflict(format!("task `{task_id}` is not ready")));
@@ -2419,6 +2448,9 @@ fn spawn_agent(
         {
             return Err(conflict("the run has reached its agent limit"));
         }
+        base_commit = workspaces
+            .base_commit(workspace_kind, &project)
+            .map_err(rpc_workspace_failure)?;
     }
     let now = rpc_timestamp()?;
     let agent_id = AgentId::generate();
@@ -2490,8 +2522,7 @@ fn spawn_agent(
                         assignment_id,
                         run_id,
                         project_id: task.project_id,
-                        kind: workspace_policy_name(role_definition.workspace)
-                            .to_owned(),
+                        kind: workspace_kind.to_owned(),
                         path: assignment_workspace_path(
                             run_state_directory,
                             role_definition.workspace,
@@ -2499,7 +2530,7 @@ fn spawn_agent(
                             assignment_id,
                         ),
                         state: ExternalResourceState::Desired,
-                        base_commit: None,
+                        base_commit: base_commit.clone(),
                         result_commit: None,
                         target_commit: None,
                         created_at: now,
@@ -2521,6 +2552,7 @@ fn spawn_agent(
                             "kind": workspace.kind,
                             "path": workspace.path,
                             "state": workspace.state.as_str(),
+                            "base_commit": workspace.base_commit,
                         }),
                         summary: format!(
                             "Recorded desired workspace for assignment {assignment_id}."
@@ -2612,8 +2644,9 @@ fn spawn_agent(
     })
 }
 
-fn finish_assignment(
+fn finish_assignment<B: WorkspaceBackend>(
     store: &mut Store,
+    workspaces: &WorkspaceSupervisor<B>,
     run_id: RunId,
     caller: &AuthenticatedCaller,
     operation_id: OperationId,
@@ -2629,7 +2662,7 @@ fn finish_assignment(
     if summary.trim().is_empty() {
         return Err(invalid_argument("finish summary cannot be empty"));
     }
-    let assignment = store
+    let (assignment, replaying) = store
         .transaction(|repositories| {
             let existing = repositories.operation(operation_id)?;
             if let Some(existing) = existing {
@@ -2645,23 +2678,50 @@ fn finish_assignment(
                         )
                     })
                     .transpose()
-                    .map(Option::flatten);
+                    .map(|assignment| (assignment.flatten(), true));
             }
-            repositories.active_assignment_for_agent(run_id, agent_id)
+            repositories
+                .active_assignment_for_agent(run_id, agent_id)
+                .map(|assignment| (assignment, false))
         })
-        .map_err(rpc_state_failure)?
+        .map_err(rpc_state_failure)?;
+    let assignment = assignment
         .ok_or_else(|| conflict("the caller has no active assignment"))?;
+    if status == FinishStatus::Completed && !replaying {
+        workspaces
+            .record_result_commit(store, assignment.id)
+            .map_err(rpc_workspace_failure)?;
+    }
+    let workspace = store
+        .transaction(|repositories| repositories.workspace(assignment.id))
+        .map_err(rpc_state_failure)?;
     let transition = match status {
         FinishStatus::Completed => TaskTransition::Submit,
         FinishStatus::Failed => TaskTransition::Reopen,
     };
+    let mut assignment_result = json!({
+        "status": status,
+        "summary": summary,
+    });
+    if let Some(base_commit) = workspace
+        .as_ref()
+        .and_then(|workspace| workspace.base_commit.as_deref())
+    {
+        assignment_result["base_commit"] = json!(base_commit);
+    }
+    if let Some(result_commit) = workspace
+        .as_ref()
+        .and_then(|workspace| workspace.result_commit.as_deref())
+    {
+        assignment_result["result_commit"] = json!(result_commit);
+    }
     let task_transition = TaskTransitionMutation {
         operation_id,
         run_id,
         actor_agent_id: Some(agent_id),
         task_id: assignment.task_id,
         transition,
-        result: Some(json!({"status": status, "summary": summary})),
+        result: Some(assignment_result),
         summary: Some(summary),
         transitioned_at: rpc_timestamp()?,
     };
@@ -3366,6 +3426,9 @@ fn rpc_workspace_failure(error: WorkspaceError) -> RpcFailure {
         WorkspaceError::MissingIntent { .. } => {
             RpcFailure::new(RpcFailureCode::Internal, error.to_string())
         }
+        WorkspaceError::MissingProject { .. } => {
+            RpcFailure::new(RpcFailureCode::Internal, error.to_string())
+        }
     }
 }
 
@@ -3373,7 +3436,10 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
     let code = match error {
         StoreError::OperationConflict { .. }
         | StoreError::OperationIncomplete { .. }
-        | StoreError::RunNotActive { .. } => RpcFailureCode::Conflict,
+        | StoreError::RunNotActive { .. }
+        | StoreError::WorkspaceResultConflict { .. } => {
+            RpcFailureCode::Conflict
+        }
         StoreError::Database(_)
         | StoreError::EncodeJson(_)
         | StoreError::ModifiedMigration { .. }
@@ -4271,7 +4337,8 @@ impl SupervisorError {
             Self::State(
                 StoreError::OperationConflict { .. }
                 | StoreError::OperationIncomplete { .. }
-                | StoreError::RunNotActive { .. },
+                | StoreError::RunNotActive { .. }
+                | StoreError::WorkspaceResultConflict { .. },
             ) => crate::cli::ErrorCode::Conflict,
             Self::State(_) | Self::RunStateMismatch { .. } => {
                 crate::cli::ErrorCode::CorruptState
@@ -4357,6 +4424,8 @@ mod tests {
         SessionProcessOwner, SessionRecord, Store, StoreError,
     };
     use crate::tasks::TaskStatus;
+    use crate::workspace::WorkspaceSupervisor;
+    use crate::workspace::fake::FakeWorkspace;
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -4658,7 +4727,7 @@ mod tests {
         let run_state_directory = fixture.join("run");
         let server_socket = socket.clone();
         let mut sessions = runtime_sessions(&run_state_directory);
-        let mut workspaces = runtime_workspaces();
+        let mut workspaces = runtime_workspaces(&run_state_directory);
         let server = tokio::spawn(async move {
             serve_listener(
                 listener,
@@ -4770,7 +4839,11 @@ mod tests {
         let server_socket = socket.clone();
         let mut sessions = runtime_sessions(&run_state_directory)
             .with_credential_observer(credential_tx);
-        let mut workspaces = runtime_workspaces();
+        let mut workspaces =
+            WorkspaceSupervisor::new(FakeWorkspace::with_commits(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ));
         let server = tokio::spawn(async move {
             serve_listener(
                 listener,
@@ -5131,6 +5204,8 @@ mod tests {
             closed_task.result,
             Some(serde_json::json!({
                 "assignment_result": {
+                    "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "result_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     "status": "completed",
                     "summary": "Parser and tests implemented.",
                 },

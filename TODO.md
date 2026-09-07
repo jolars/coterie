@@ -126,7 +126,7 @@ later milestones build on.
 - [x] Map the built-in permission profiles to enforceable Codex flags. Fail
   closed when a requested filesystem, network, approval, bootstrap, or
   working directory capability cannot be enforced.
-- [ ] Implement the workspace trait with `git2`: record a base commit, create a
+- [x] Implement the workspace trait with `git2`: record a base commit, create a
   task-owned worktree and reference below Coterie's state directory, and
   record the resulting commit without invoking the Git CLI.
 - [ ] Implement explicit guarded integration. Refuse dirty targets, unexpected

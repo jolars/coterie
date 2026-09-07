@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use git2::{Repository, Signature};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde_json::Value;
@@ -683,23 +684,57 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
         .expect("the session observation should be durable");
     assert_eq!(provider_session_id.as_deref(), Some("fake-session-1"));
     assert_eq!(session_reconciliation, "observed");
-    let (workspace_kind, workspace_path, workspace_reconciliation): (
+    let (workspace_kind, workspace_path, workspace_reconciliation, base_commit): (
         String,
         Vec<u8>,
         String,
+        String,
     ) = connection
         .query_row(
-            "SELECT kind, path, state FROM workspaces WHERE assignment_id = ?1",
+            "SELECT kind, path, state, base_commit FROM workspaces WHERE assignment_id = ?1",
             [assignment_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .expect("the workspace observation should be durable");
     assert_eq!(workspace_kind, "worktree");
     assert_eq!(workspace_reconciliation, "observed");
+    let workspace_path =
+        Path::new(std::ffi::OsStr::from_bytes(&workspace_path));
     assert!(
-        Path::new(std::ffi::OsStr::from_bytes(&workspace_path))
+        workspace_path
             .starts_with(fixture.state.join("coterie/runs").join(&run_id)),
         "the assignment workspace should be rooted in private run state"
+    );
+    let project_repository = Repository::open(&fixture.project)
+        .expect("the target repository should open");
+    assert_eq!(
+        project_repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("the target HEAD should resolve")
+            .id()
+            .to_string(),
+        base_commit
+    );
+    let reference_name = format!("refs/heads/coterie/{run_id}/{assignment_id}");
+    assert_eq!(
+        project_repository
+            .find_reference(&reference_name)
+            .expect("the assignment reference should exist")
+            .target()
+            .map(|oid| oid.to_string())
+            .as_deref(),
+        Some(base_commit.as_str())
+    );
+    let workspace_repository = Repository::open(workspace_path)
+        .expect("the assignment worktree should open");
+    assert_eq!(
+        workspace_repository
+            .head()
+            .expect("the assignment HEAD should resolve")
+            .name()
+            .expect("the assignment HEAD should be UTF-8"),
+        reference_name
     );
     let retried_spawn = fixture.run_json(&[
         "spawn",
@@ -795,6 +830,50 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
     let stopped = fixture.run_json(&["stop", "--json"]);
     assert_eq!(stopped["data"]["run_id"], run_id);
     assert_eq!(stopped["data"]["status"], "stopped");
+}
+
+#[test]
+fn worktree_workers_fail_closed_for_non_git_projects() {
+    let fixture = TestEnvironment::new_plain();
+    fixture.launch(&[]);
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Git-only work",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FBA",
+        "--json",
+    ]);
+    let task_id = task["data"]["task"]["id"]
+        .as_str()
+        .expect("the task ID should be returned");
+    let mut spawn = fixture.command();
+    spawn.args([
+        "spawn",
+        "worker",
+        "--task",
+        task_id,
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FBB",
+        "--json",
+    ]);
+
+    let output = run(spawn);
+
+    assert_eq!(output.status.code(), Some(7));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the workspace rejection should be JSON");
+    assert_eq!(error["error"]["code"], "unavailable");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not Git-backed"))
+    );
+    let status = fixture.run_json(&["status", "--json"]);
+    assert_eq!(status["data"]["tasks"]["open"], 1);
+    assert_eq!(status["data"]["agents"].as_array().map(Vec::len), Some(1));
+    fixture.run_json(&["stop", "--json"]);
 }
 
 #[test]
@@ -1086,14 +1165,14 @@ fn restart_marks_an_unrecoverable_observed_fake_session_lost() {
         )
         .expect("the reconciled sessions should remain durable");
     assert_eq!(lost_sessions, 1);
-    let lost_workspaces: i64 = connection
+    let observed_workspaces: i64 = connection
         .query_row(
-            "SELECT COUNT(*) FROM workspaces WHERE state = 'lost'",
+            "SELECT COUNT(*) FROM workspaces WHERE state = 'observed'",
             [],
             |row| row.get(0),
         )
         .expect("the reconciled workspace should remain durable");
-    assert_eq!(lost_workspaces, 1);
+    assert_eq!(observed_workspaces, 1);
     let lost_events: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM events \
@@ -1228,6 +1307,14 @@ struct TestEnvironment {
 
 impl TestEnvironment {
     fn new() -> Self {
+        Self::new_with_repository(true)
+    }
+
+    fn new_plain() -> Self {
+        Self::new_with_repository(false)
+    }
+
+    fn new_with_repository(initialize_repository: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "ct-{}-{}",
             std::process::id(),
@@ -1244,6 +1331,38 @@ impl TestEnvironment {
             .expect("the runtime directory should be created");
         fs::create_dir_all(&project)
             .expect("the project directory should be created");
+        if initialize_repository {
+            let repository = Repository::init(&project)
+                .expect("the fixture repository should initialize");
+            fs::write(project.join("README.md"), "fixture\n")
+                .expect("the fixture file should be written");
+            let mut index = repository.index().expect("the index should open");
+            index
+                .add_path(Path::new("README.md"))
+                .expect("the fixture file should enter the index");
+            index.write().expect("the index should be persisted");
+            let tree_id =
+                index.write_tree().expect("the tree should be written");
+            let tree = repository
+                .find_tree(tree_id)
+                .expect("the fixture tree should resolve");
+            let signature =
+                Signature::now("Coterie Test", "test@example.invalid")
+                    .expect("the fixture signature should be valid");
+            repository
+                .commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    "initial",
+                    &tree,
+                    &[],
+                )
+                .expect("the initial fixture commit should be created");
+            drop(tree);
+            drop(index);
+            drop(repository);
+        }
         fs::create_dir(&bin).expect("the fixture bin directory should exist");
         let codex = bin.join("codex");
         fs::write(&codex, FAKE_CODEX)

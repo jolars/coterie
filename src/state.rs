@@ -116,6 +116,16 @@ pub(crate) enum StoreError {
     #[error("assignment `{id}` has corrupt lifecycle state: {reason}")]
     CorruptAssignmentState { id: AssignmentId, reason: String },
 
+    /// A completed workspace observation conflicts with its durable result.
+    #[error(
+        "workspace `{assignment_id}` already records result commit `{recorded}`, not `{observed}`"
+    )]
+    WorkspaceResultConflict {
+        assignment_id: AssignmentId,
+        recorded: String,
+        observed: String,
+    },
+
     /// Orderly shutdown did not find the expected active run.
     #[error("run `{id}` is not active during orderly shutdown")]
     RunNotActive { id: RunId },
@@ -2959,6 +2969,33 @@ impl Repositories<'_, '_> {
             params![assignment_id, state.as_str(), reconciled_at],
         )?;
         Ok(ResourceTransitionOutcome::Applied)
+    }
+
+    pub(crate) fn record_workspace_result_commit(
+        &self,
+        assignment_id: AssignmentId,
+        result_commit: &str,
+    ) -> Result<ResourceTransitionOutcome, StoreError> {
+        let Some(workspace) = self.workspace(assignment_id)? else {
+            return Ok(ResourceTransitionOutcome::Stale);
+        };
+        match workspace.result_commit {
+            Some(recorded) if recorded == result_commit => {
+                Ok(ResourceTransitionOutcome::Unchanged)
+            }
+            Some(recorded) => Err(StoreError::WorkspaceResultConflict {
+                assignment_id,
+                recorded,
+                observed: result_commit.to_owned(),
+            }),
+            None => {
+                self.transaction.execute(
+                    "UPDATE workspaces SET result_commit = ?2 WHERE assignment_id = ?1",
+                    params![assignment_id, result_commit],
+                )?;
+                Ok(ResourceTransitionOutcome::Applied)
+            }
+        }
     }
 
     pub(crate) fn insert_event(

@@ -7,7 +7,7 @@
 > [!WARNING]
 > Coterie is under active development. The foreground now launches an
 > interactive Codex session, but background workers still use the deterministic
-> fake provider, and Git worktree integration remains under development.
+> fake provider, and guarded Git integration remains under development.
 
 Coterie is a project-native Rust CLI for coordinating coding agents. It will
 keep orchestration mechanics, durable state, workspaces, and policy enforcement
