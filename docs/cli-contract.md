@@ -1,8 +1,44 @@
 # CLI contract
 
-This document defines version 1 of Coterie's programmatic output and process
-exit codes. The binary remains behavior-free until later milestones implement
-commands, but those commands must use this contract.
+This document defines version 1 of Coterie's command surface, programmatic
+output, retry behavior, authentication, and process exit codes.
+
+## Commands
+
+Running `coterie` without a subcommand starts a supervisor when necessary and
+launches or reconnects to the foreground agent. During M2, foreground and
+background sessions use the deterministic fake provider; this exercises the
+complete command and persistence boundary without model access.
+
+The minimum delegation commands are:
+
+| Command | Purpose |
+| --- | --- |
+| `coterie` | Launch or reconnect to the foreground agent and active run. |
+| `coterie status` | Summarize the active run, attached projects, agents, and task states. |
+| `coterie whoami` | Report the authenticated operator or agent identity. |
+| `coterie prime` | Reconstruct identity, projects, peers, ready work, the active assignment, and available commands. |
+| `coterie task create <title>` | Create a durable task in the primary project or the alias selected with `--project`. |
+| `coterie task ready` | List open, unblocked, unclaimed tasks. |
+| `coterie task close <task-id> --summary <text>` | Close a submitted task after explicit validation. |
+| `coterie spawn <role> --task <task-id>` | Instantiate an authorized configured job role and atomically claim a ready task. |
+| `coterie finish --status <completed\|failed> --summary <text>` | Submit or release the authenticated agent's active assignment. |
+| `coterie send <agent> <message>` | Persist a message for an agent ID or run-local name. |
+| `coterie inbox [--after <cursor>]` | Read the authenticated agent's messages after a monotonic cursor. |
+| `coterie logs <agent>` | Read the latest provider transcript visible to the caller. |
+| `coterie events [--after <cursor>] [--limit <n>]` | Read typed run events after a monotonic cursor. |
+| `coterie stop` | Stop the active run and wait for its index and socket to retire. |
+
+`task create` also accepts `--description`, `--group`, and repeated `--after`
+task IDs. Generated help is authoritative for argument spelling and defaults.
+Commands other than the foreground launch require an active run and never
+create one as a side effect.
+
+The operator connects through the local operator channel. An agent invocation
+must carry all of `COTERIE_AGENT_ID`, `COTERIE_SESSION_ID`, and `COTERIE_TOKEN`;
+`COTERIE_RUN_ID`, when present, must match the active run. A partial or invalid
+agent environment is an authentication error and never falls back to operator
+authority. Agent names do not affect authentication.
 
 ## JSON output
 

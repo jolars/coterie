@@ -93,7 +93,7 @@ later milestones build on.
   representation is a verifier; keep the operator path distinct.
 - [x] Implement a deterministic fake provider and use it to drive agent and
   session lifecycles without model access.
-- [ ] Implement the minimum delegation commands: foreground launch, `status`,
+- [x] Implement the minimum delegation commands: foreground launch, `status`,
   `whoami`, `prime`, `task create`, `task ready`, `task close`, `spawn`,
   `finish`, `send`, `inbox`, `logs`, `events`, and `stop`.
 - [ ] Persist messages before delivery, use monotonic inbox cursors and explicit

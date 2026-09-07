@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 use crate::auth::{AgentToken, SessionScope, TokenGenerationError};
-use crate::id::SessionId;
+use crate::id::{AssignmentId, SessionId};
 use crate::providers::{
     LaunchMode, LaunchSpecification, LifecycleState, Provider,
     ProviderCapability, ProviderError, ProviderEvent, ProviderEventKind,
@@ -54,10 +54,43 @@ impl<P: Provider> AgentSessionSupervisor<P> {
     }
 
     /// Persists the starting generation before crossing the provider boundary.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by provider conformance tests")
+    )]
     pub(crate) fn launch(
         &mut self,
         store: &mut Store,
         launch: &AgentLaunch,
+    ) -> Result<LaunchedAgent, AgentSessionError> {
+        self.launch_session(store, launch, false, None)
+    }
+
+    /// Launches the first session for a separately persisted agent intent.
+    pub(crate) fn launch_existing(
+        &mut self,
+        store: &mut Store,
+        launch: &AgentLaunch,
+    ) -> Result<LaunchedAgent, AgentSessionError> {
+        self.launch_session(store, launch, true, None)
+    }
+
+    /// Launches a session for an agent already claimed into an assignment.
+    pub(crate) fn launch_claimed(
+        &mut self,
+        store: &mut Store,
+        launch: &AgentLaunch,
+        assignment_id: AssignmentId,
+    ) -> Result<LaunchedAgent, AgentSessionError> {
+        self.launch_session(store, launch, true, Some(assignment_id))
+    }
+
+    fn launch_session(
+        &mut self,
+        store: &mut Store,
+        launch: &AgentLaunch,
+        agent_exists: bool,
+        assignment_id: Option<AssignmentId>,
     ) -> Result<LaunchedAgent, AgentSessionError> {
         let probe = self.provider.probe();
         for capability in required_capabilities(launch) {
@@ -73,14 +106,43 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         let transcript_path =
             TranscriptStore::relative_path(launch.scope.session_id);
         store.transaction(|repositories| {
-            repositories.insert_agent(&AgentRecord {
-                id: launch.scope.agent_id,
-                run_id: launch.scope.run_id,
-                role: launch.role.clone(),
-                generation: launch.scope.generation,
-                state: LifecycleState::Starting,
-                created_at: launch.created_at,
-            })?;
+            if agent_exists {
+                let agent = repositories.agent(launch.scope.agent_id)?;
+                if !matches!(
+                    agent,
+                    Some(AgentRecord {
+                        run_id,
+                        generation,
+                        state: LifecycleState::Starting,
+                        ref role,
+                        ..
+                    }) if run_id == launch.scope.run_id
+                        && generation == launch.scope.generation
+                        && role == &launch.role
+                ) {
+                    return Err(assignment_id.map_or_else(
+                        || StoreError::InconsistentSessionLifecycle {
+                            session_id: launch.scope.session_id,
+                            agent_id: launch.scope.agent_id,
+                        },
+                        |id| StoreError::CorruptAssignmentState {
+                            id,
+                            reason:
+                                "the claimed agent launch intent does not match"
+                                    .to_owned(),
+                        },
+                    ));
+                }
+            } else {
+                repositories.insert_agent(&AgentRecord {
+                    id: launch.scope.agent_id,
+                    run_id: launch.scope.run_id,
+                    role: launch.role.clone(),
+                    generation: launch.scope.generation,
+                    state: LifecycleState::Starting,
+                    created_at: launch.created_at,
+                })?;
+            }
             repositories.insert_session(&SessionRecord {
                 id: launch.scope.session_id,
                 run_id: launch.scope.run_id,
@@ -92,15 +154,24 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 created_at: launch.created_at,
                 ended_at: None,
             })?;
-            repositories.activate_session_credential(&SessionCredentialRecord {
-                session_id: launch.scope.session_id,
-                run_id: launch.scope.run_id,
-                agent_id: launch.scope.agent_id,
-                generation: launch.scope.generation,
-                token_verifier: token.verifier(launch.scope),
-                created_at: launch.created_at,
-                revoked_at: None,
-            })
+            repositories.activate_session_credential(
+                &SessionCredentialRecord {
+                    session_id: launch.scope.session_id,
+                    run_id: launch.scope.run_id,
+                    agent_id: launch.scope.agent_id,
+                    generation: launch.scope.generation,
+                    token_verifier: token.verifier(launch.scope),
+                    created_at: launch.created_at,
+                    revoked_at: None,
+                },
+            )?;
+            if let Some(assignment_id) = assignment_id {
+                repositories.associate_assignment_session(
+                    assignment_id,
+                    launch.scope.session_id,
+                )?;
+            }
+            Ok(())
         })?;
 
         let specification = LaunchSpecification {
@@ -156,6 +227,10 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         Ok(Some(event))
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by provider conformance tests")
+    )]
     pub(crate) fn observe(
         &self,
         session_id: SessionId,
@@ -163,6 +238,10 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         Ok(self.provider.observe(self.handle(session_id)?)?)
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by provider conformance tests")
+    )]
     pub(crate) fn interrupt(
         &mut self,
         store: &mut Store,
@@ -175,6 +254,10 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         Ok(observation)
     }
 
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by provider conformance tests")
+    )]
     pub(crate) fn terminate(
         &mut self,
         store: &mut Store,

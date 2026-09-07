@@ -5,8 +5,8 @@
 [![docs.rs](https://img.shields.io/docsrs/coterie)](https://docs.rs/coterie)
 
 > [!WARNING]
-> Coterie is at the design and foundation stage. The binary does not yet expose
-> orchestration behavior.
+> Coterie is under active development. The M2 command loop currently uses a
+> deterministic fake provider; Codex and Git worktree integration arrive in M3.
 
 Coterie is a project-native Rust CLI for coordinating coding agents. It will
 keep orchestration mechanics, durable state, workspaces, and policy enforcement
@@ -14,6 +14,12 @@ in one foreground program while agent harnesses remain out-of-process
 providers.
 
 The current platform target is Linux, developed on NixOS and tested on Ubuntu.
+
+The current command slice can launch or reconnect to a durable local run,
+inspect its state, create and close tasks, spawn fake workers, finish
+assignments, exchange durable messages, read transcripts and events, and stop
+the run. Run `coterie --help` for the generated command reference; see the
+[CLI contract](docs/cli-contract.md) for programmatic output and retry rules.
 
 ## Development
 
@@ -53,8 +59,8 @@ crates.io without a long-lived registry token.
 - [`TODO.md`](TODO.md) defines implementation order and milestone gates.
 - [`AGENTS.md`](AGENTS.md) records the operational rules for contributors and
   coding agents.
-- [`docs/cli-contract.md`](docs/cli-contract.md) defines versioned JSON output
-  and process exit codes for future commands.
+- [`docs/cli-contract.md`](docs/cli-contract.md) defines commands, versioned
+  JSON output, operation retries, authentication, and process exit codes.
 
 ## License
 

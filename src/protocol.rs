@@ -7,8 +7,12 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::auth::AgentToken;
-use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
+use crate::id::{
+    AgentId, AssignmentId, EventId, MessageId, OperationId, ProjectId, RunId,
+    SessionId, TaskId,
+};
 use crate::project::ProjectKey;
+use crate::tasks::TaskStatus;
 
 pub(crate) const PROTOCOL_VERSION: u16 = 1;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
@@ -66,7 +70,62 @@ pub(crate) enum RequestAuthentication {
 #[serde(tag = "method", content = "parameters", rename_all = "snake_case")]
 pub(crate) enum RpcRequest {
     Ping,
-    Shutdown { operation_id: OperationId },
+    LaunchForeground {
+        operation_id: OperationId,
+    },
+    Status,
+    Whoami,
+    Prime,
+    TaskCreate {
+        operation_id: OperationId,
+        title: String,
+        description: String,
+        project: String,
+        group: Option<String>,
+        dependencies: Vec<TaskId>,
+    },
+    TaskReady,
+    TaskClose {
+        operation_id: OperationId,
+        task_id: TaskId,
+        summary: String,
+    },
+    Spawn {
+        operation_id: OperationId,
+        role: String,
+        task_id: TaskId,
+    },
+    Finish {
+        operation_id: OperationId,
+        status: FinishStatus,
+        summary: String,
+    },
+    Send {
+        operation_id: OperationId,
+        recipient: String,
+        message: String,
+    },
+    Inbox {
+        after: u64,
+    },
+    Logs {
+        agent: String,
+    },
+    Events {
+        after: u64,
+        limit: u16,
+    },
+    Shutdown {
+        operation_id: OperationId,
+    },
+}
+
+/// The durable task outcome reported by an assigned agent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FinishStatus {
+    Completed,
+    Failed,
 }
 
 /// A supervisor-to-client message on the local versioned transport.
@@ -101,7 +160,7 @@ pub(crate) struct VersionedResponse {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", content = "value", rename_all = "snake_case")]
 pub(crate) enum RpcResult {
-    Ok(RpcResponse),
+    Ok(Box<RpcResponse>),
     Err(RpcFailure),
 }
 
@@ -112,10 +171,162 @@ pub(crate) enum RpcResponse {
     Pong {
         run_id: RunId,
     },
+    ForegroundLaunched {
+        run_id: RunId,
+        agent: AgentSummary,
+        session_id: SessionId,
+    },
+    Status {
+        run_id: RunId,
+        status: String,
+        projects: Vec<ProjectSummary>,
+        agents: Vec<AgentSummary>,
+        tasks: TaskCounts,
+    },
+    Identity {
+        run_id: RunId,
+        channel: CallerChannel,
+        agent: Option<AgentSummary>,
+    },
+    Prime {
+        identity: CallerSummary,
+        projects: Vec<ProjectSummary>,
+        peers: Vec<AgentSummary>,
+        tasks: Vec<TaskSummary>,
+        ready_tasks: Vec<TaskSummary>,
+        active_task: Option<Box<TaskSummary>>,
+        commands: Vec<String>,
+    },
+    TaskCreated {
+        operation_id: OperationId,
+        task: TaskSummary,
+    },
+    ReadyTasks {
+        tasks: Vec<TaskSummary>,
+    },
+    TaskClosed {
+        operation_id: OperationId,
+        task: TaskSummary,
+    },
+    Spawned {
+        operation_id: OperationId,
+        agent: AgentSummary,
+        session_id: SessionId,
+        assignment_id: AssignmentId,
+        task_id: TaskId,
+    },
+    AssignmentFinished {
+        operation_id: OperationId,
+        assignment_id: AssignmentId,
+        task: TaskSummary,
+    },
+    MessageSent {
+        operation_id: OperationId,
+        message_id: MessageId,
+        recipient: AgentSummary,
+        sequence: u64,
+    },
+    Inbox {
+        messages: Vec<MessageSummary>,
+        next_cursor: u64,
+    },
+    Logs {
+        agent: AgentSummary,
+        session_id: SessionId,
+        transcript: String,
+    },
+    Events {
+        events: Vec<EventSummary>,
+        next_cursor: u64,
+    },
     ShuttingDown {
         run_id: RunId,
         operation_id: OperationId,
     },
+}
+
+/// Whether a response describes the local operator or an authenticated agent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CallerChannel {
+    Operator,
+    Agent,
+}
+
+/// Caller identity included in dynamic bootstrap context.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct CallerSummary {
+    pub(crate) run_id: RunId,
+    pub(crate) channel: CallerChannel,
+    pub(crate) agent: Option<AgentSummary>,
+}
+
+/// A run-local agent name and its durable identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AgentSummary {
+    pub(crate) id: AgentId,
+    pub(crate) name: String,
+    pub(crate) role: String,
+    pub(crate) state: String,
+}
+
+/// An attached project visible to the caller.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ProjectSummary {
+    pub(crate) id: ProjectId,
+    pub(crate) alias: String,
+    pub(crate) root: String,
+    pub(crate) access: String,
+}
+
+/// A task's command-facing representation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct TaskSummary {
+    pub(crate) id: TaskId,
+    pub(crate) project_id: ProjectId,
+    pub(crate) project: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) status: TaskStatus,
+    pub(crate) ready: bool,
+    pub(crate) unresolved_dependencies: Vec<TaskId>,
+    pub(crate) result: Option<serde_json::Value>,
+}
+
+/// Counts of tasks in each durable lifecycle state.
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize,
+)]
+pub(crate) struct TaskCounts {
+    pub(crate) open: u64,
+    pub(crate) in_progress: u64,
+    pub(crate) submitted: u64,
+    pub(crate) closed: u64,
+    pub(crate) canceled: u64,
+}
+
+/// One message read from the caller's durable inbox.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct MessageSummary {
+    pub(crate) id: MessageId,
+    pub(crate) sequence: u64,
+    pub(crate) sender: Option<AgentSummary>,
+    pub(crate) body: String,
+    pub(crate) created_at: i64,
+    pub(crate) acknowledged: bool,
+}
+
+/// One immutable run event returned after a sequence cursor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct EventSummary {
+    pub(crate) id: EventId,
+    pub(crate) sequence: u64,
+    pub(crate) event_type: String,
+    pub(crate) actor: String,
+    pub(crate) subject: String,
+    pub(crate) payload: serde_json::Value,
+    pub(crate) summary: String,
+    pub(crate) created_at: i64,
 }
 
 /// A stable local-protocol failure.
@@ -150,6 +361,10 @@ pub(crate) enum RpcFailureCode {
     InvalidRequestSequence,
     Unauthenticated,
     PermissionDenied,
+    InvalidArgument,
+    NotFound,
+    Conflict,
+    Unavailable,
     Internal,
 }
 

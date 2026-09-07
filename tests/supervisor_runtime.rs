@@ -11,6 +11,340 @@ const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
 
 #[test]
+fn public_help_lists_the_minimum_delegation_commands() {
+    let fixture = TestEnvironment::new();
+    let mut command = fixture.command();
+    command.arg("--help");
+
+    let output = run(command);
+
+    assert!(output.status.success(), "help failed: {output:?}");
+    let stdout =
+        String::from_utf8(output.stdout).expect("help should be UTF-8");
+    for command in [
+        "status", "whoami", "prime", "task", "spawn", "finish", "send",
+        "inbox", "logs", "events", "stop",
+    ] {
+        assert!(
+            stdout.contains(command),
+            "help should list `{command}`:\n{stdout}"
+        );
+    }
+    assert!(!stdout.contains("__supervisor"));
+
+    let mut command = fixture.command();
+    command.args(["task", "--help"]);
+    let output = run(command);
+    assert!(output.status.success(), "task help failed: {output:?}");
+    let stdout =
+        String::from_utf8(output.stdout).expect("task help should be UTF-8");
+    for command in ["create", "ready", "close"] {
+        assert!(
+            stdout.contains(command),
+            "task help should list `{command}`:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn invalid_programmatic_arguments_use_the_versioned_error_contract() {
+    let fixture = TestEnvironment::new();
+    let mut command = fixture.command();
+    command.args(["status", "--unknown", "--json"]);
+
+    let output = run(command);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the diagnostic should be one JSON response");
+    assert_eq!(error["schema_version"], 1);
+    assert_eq!(error["error"]["code"], "invalid_argument");
+    assert!(error.get("operation_id").is_none());
+}
+
+#[test]
+fn mutation_connection_failures_preserve_the_allocated_operation_id() {
+    let fixture = TestEnvironment::new();
+    let mut command = fixture.command();
+    command.args([
+        "task",
+        "create",
+        "Unreachable mutation",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB4",
+        "--json",
+    ]);
+
+    let output = run(command);
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the diagnostic should be one JSON response");
+    assert_eq!(error["operation_id"], "co-01ARZ3NDEKTSV4RRFFQ69G5FB4");
+    assert_eq!(error["error"]["code"], "not_found");
+}
+
+#[test]
+fn status_does_not_create_a_run_and_partial_agent_identity_never_becomes_operator()
+ {
+    let fixture = TestEnvironment::new();
+    let mut status = fixture.command();
+    status.args(["status", "--json"]);
+
+    let output = run(status);
+
+    assert_eq!(output.status.code(), Some(4));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the missing-run diagnostic should be JSON");
+    assert_eq!(error["error"]["code"], "not_found");
+    assert_eq!(fixture.index_entry_count(), 0);
+
+    fixture.run_json(&["--json"]);
+    let mut inbox = fixture.command();
+    inbox.args(["inbox", "--json"]);
+    let output = run(inbox);
+    assert_eq!(output.status.code(), Some(6));
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the operator inbox rejection should be JSON");
+    assert_eq!(error["error"]["code"], "permission_denied");
+
+    let mut finish = fixture.command();
+    finish.args([
+        "finish",
+        "--status",
+        "completed",
+        "--summary",
+        "No operator assignment.",
+        "--json",
+    ]);
+    let output = run(finish);
+    assert_eq!(output.status.code(), Some(6));
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the operator finish rejection should be JSON");
+    assert_eq!(error["error"]["code"], "permission_denied");
+    assert!(error["operation_id"].as_str().is_some());
+
+    let mut whoami = fixture.command();
+    whoami
+        .args(["whoami", "--json"])
+        .env("COTERIE_AGENT_ID", "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX");
+    let output = run(whoami);
+    assert_eq!(output.status.code(), Some(6));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the authentication diagnostic should be JSON");
+    assert_eq!(error["error"]["code"], "unauthenticated");
+
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn human_success_and_diagnostics_use_separate_streams() {
+    let fixture = TestEnvironment::new();
+    let launch = run(fixture.command());
+    assert!(launch.status.success(), "launch failed: {launch:?}");
+    assert!(!launch.stdout.is_empty());
+    assert!(launch.stderr.is_empty());
+    let data: Value = serde_json::from_slice(&launch.stdout)
+        .expect("human output should be readable structured text");
+    assert_eq!(data["agent"]["name"], "lead");
+    assert!(data.get("schema_version").is_none());
+
+    let mut invalid = fixture.command();
+    invalid.args(["task", "close", "not-a-task"]);
+    let invalid = run(invalid);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+    assert!(!invalid.stderr.is_empty());
+
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn operator_commands_drive_the_minimum_delegation_flow() {
+    let fixture = TestEnvironment::new();
+
+    let launch = fixture.run_json(&[
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "--json",
+    ]);
+    let run_id = launch["data"]["run_id"]
+        .as_str()
+        .expect("launch should identify the run")
+        .to_owned();
+    assert_eq!(launch["data"]["agent"]["name"], "lead");
+    assert_eq!(launch["data"]["agent"]["state"], "running");
+    assert_eq!(launch["operation_id"], "co-01ARZ3NDEKTSV4RRFFQ69G5FB0");
+    let reconnect = fixture.run_json(&[
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "--json",
+    ]);
+    assert_eq!(reconnect["data"]["run_id"], run_id);
+    assert_eq!(reconnect["data"]["agent"], launch["data"]["agent"]);
+    assert_eq!(
+        reconnect["data"]["session_id"],
+        launch["data"]["session_id"]
+    );
+
+    let identity = fixture.run_json(&["whoami", "--json"]);
+    assert_eq!(identity["data"]["run_id"], run_id);
+    assert_eq!(identity["data"]["channel"], "operator");
+    assert!(identity["data"]["agent"].is_null());
+
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Implement parser",
+        "--description",
+        "Add parsing tests first.",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        "--json",
+    ]);
+    let task_id = task["data"]["task"]["id"]
+        .as_str()
+        .expect("task creation should return an ID")
+        .to_owned();
+    assert!(task["operation_id"].as_str().is_some());
+    let retried_task = fixture.run_json(&[
+        "task",
+        "create",
+        "Implement parser",
+        "--description",
+        "Add parsing tests first.",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB1",
+        "--json",
+    ]);
+    assert_eq!(retried_task, task);
+
+    let ready = fixture.run_json(&["task", "ready", "--json"]);
+    assert_eq!(ready["data"]["tasks"][0]["id"], task_id);
+    assert_eq!(ready["data"]["tasks"][0]["project"], "primary");
+
+    let downstream = fixture.run_json(&[
+        "task",
+        "create",
+        "Document parser",
+        "--after",
+        &task_id,
+        "--json",
+    ]);
+    let downstream_id = downstream["data"]["task"]["id"]
+        .as_str()
+        .expect("downstream task creation should return an ID");
+    let ready = fixture.run_json(&["task", "ready", "--json"]);
+    assert_eq!(ready["data"]["tasks"].as_array().map(Vec::len), Some(1));
+    assert_eq!(ready["data"]["tasks"][0]["id"], task_id);
+    assert_ne!(ready["data"]["tasks"][0]["id"], downstream_id);
+
+    let mut premature_close = fixture.command();
+    premature_close.args([
+        "task",
+        "close",
+        &task_id,
+        "--summary",
+        "Not submitted yet.",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB5",
+        "--json",
+    ]);
+    let output = run(premature_close);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)
+        .expect("the lifecycle rejection should be JSON");
+    assert_eq!(error["operation_id"], "co-01ARZ3NDEKTSV4RRFFQ69G5FB5");
+    assert_eq!(error["error"]["code"], "conflict");
+
+    let spawn = fixture.run_json(&[
+        "spawn",
+        "worker",
+        "--task",
+        &task_id,
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB2",
+        "--json",
+    ]);
+    assert_eq!(spawn["data"]["agent"]["name"], "worker-1");
+    assert_eq!(spawn["data"]["agent"]["state"], "running");
+    assert_eq!(spawn["data"]["task_id"], task_id);
+    assert!(spawn["data"]["assignment_id"].as_str().is_some());
+    let retried_spawn = fixture.run_json(&[
+        "spawn",
+        "worker",
+        "--task",
+        &task_id,
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB2",
+        "--json",
+    ]);
+    assert_eq!(retried_spawn, spawn);
+
+    let status = fixture.run_json(&["status", "--json"]);
+    assert_eq!(status["data"]["run_id"], run_id);
+    assert_eq!(status["data"]["status"], "active");
+    assert_eq!(status["data"]["agents"].as_array().map(Vec::len), Some(2));
+    assert_eq!(status["data"]["tasks"]["in_progress"], 1);
+
+    let prime = fixture.run_json(&["prime", "--json"]);
+    assert_eq!(prime["data"]["identity"]["channel"], "operator");
+    assert_eq!(prime["data"]["projects"][0]["alias"], "primary");
+    assert_eq!(prime["data"]["peers"].as_array().map(Vec::len), Some(2));
+    let tasks = prime["data"]["tasks"]
+        .as_array()
+        .expect("prime should include durable tasks");
+    assert_eq!(tasks.len(), 2);
+    let downstream = tasks
+        .iter()
+        .find(|task| task["id"] == downstream_id)
+        .expect("prime should include the blocked downstream task");
+    assert_eq!(downstream["ready"], false);
+    assert_eq!(downstream["unresolved_dependencies"][0], task_id);
+
+    let sent = fixture.run_json(&[
+        "send",
+        "worker-1",
+        "Check the parser edge cases.",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB3",
+        "--json",
+    ]);
+    assert_eq!(sent["data"]["recipient"]["name"], "worker-1");
+    assert_eq!(sent["data"]["sequence"], 1);
+    let retried_send = fixture.run_json(&[
+        "send",
+        "worker-1",
+        "Check the parser edge cases.",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB3",
+        "--json",
+    ]);
+    assert_eq!(retried_send, sent);
+
+    let logs = fixture.run_json(&["logs", "worker-1", "--json"]);
+    assert_eq!(logs["data"]["agent"]["name"], "worker-1");
+    assert!(
+        logs["data"]["transcript"]
+            .as_str()
+            .is_some_and(|transcript| transcript.contains("session.ready"))
+    );
+
+    let events = fixture.run_json(&["events", "--json"]);
+    assert!(events["data"]["events"].is_array());
+    assert!(events["data"]["next_cursor"].is_number());
+
+    let stopped = fixture.run_json(&["stop", "--json"]);
+    assert_eq!(stopped["data"]["run_id"], run_id);
+    assert_eq!(stopped["data"]["status"], "stopped");
+}
+
+#[test]
 fn private_supervisor_entrypoint_publishes_a_reachable_run() {
     let fixture = TestEnvironment::new();
     let log_path = fixture.root.join("supervisor.log");
@@ -248,6 +582,22 @@ impl TestEnvironment {
         let mut command = self.command();
         command.arg("__supervisor-connect");
         command
+    }
+
+    fn run_json(&self, arguments: &[&str]) -> Value {
+        let mut command = self.command();
+        command.args(arguments);
+        let output = run(command);
+        assert!(
+            output.status.success(),
+            "command {arguments:?} failed: {output:?}"
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "successful JSON should not write diagnostics: {output:?}"
+        );
+        serde_json::from_slice(&output.stdout)
+            .expect("the command should return one JSON response")
     }
 
     fn only_index_entry(&self) -> PathBuf {

@@ -1,8 +1,4 @@
 mod auth;
-#[allow(
-    dead_code,
-    reason = "M1 defines CLI contracts before later milestones dispatch commands"
-)]
 mod cli;
 #[allow(
     dead_code,
@@ -43,13 +39,65 @@ mod tasks;
 mod transcript;
 mod workspace;
 
+use clap::Parser;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::process::ExitCode {
-    match supervisor::run_from_environment().await {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+    let raw_arguments = std::env::args_os().collect::<Vec<_>>();
+    let json_requested = raw_arguments
+        .iter()
+        .skip(1)
+        .any(|argument| argument == "--json");
+    let arguments = match cli::Arguments::try_parse_from(raw_arguments) {
+        Ok(arguments) => arguments,
+        Err(error) if error.exit_code() == 0 => {
+            let _ = error.print();
+            return std::process::ExitCode::SUCCESS;
+        }
+        Err(error) if json_requested => {
+            let diagnostic = cli::Diagnostic::new(
+                cli::ErrorCode::InvalidArgument,
+                error.to_string().trim().to_owned(),
+            );
+            let mut stdout = std::io::stdout().lock();
+            let mut stderr = std::io::stderr().lock();
+            return match cli::render_json_error(
+                &mut stdout,
+                &mut stderr,
+                &diagnostic,
+            ) {
+                Ok(category) => category.into(),
+                Err(render_error) => {
+                    eprintln!("coterie: {render_error}");
+                    std::process::ExitCode::FAILURE
+                }
+            };
+        }
         Err(error) => {
-            eprintln!("coterie: {error}");
-            std::process::ExitCode::FAILURE
+            let exit_code = u8::try_from(error.exit_code()).unwrap_or(2);
+            let _ = error.print();
+            return std::process::ExitCode::from(exit_code);
+        }
+    };
+    let json_output = arguments.json;
+    match supervisor::run(arguments).await {
+        Ok(category) => category.into(),
+        Err(error) => {
+            let diagnostic = error.diagnostic();
+            let mut stdout = std::io::stdout().lock();
+            let mut stderr = std::io::stderr().lock();
+            let rendered = if json_output {
+                cli::render_json_error(&mut stdout, &mut stderr, &diagnostic)
+            } else {
+                cli::render_human_error(&mut stdout, &mut stderr, &diagnostic)
+            };
+            match rendered {
+                Ok(category) => category.into(),
+                Err(render_error) => {
+                    eprintln!("coterie: {render_error}");
+                    std::process::ExitCode::FAILURE
+                }
+            }
         }
     }
 }

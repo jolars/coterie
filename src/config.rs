@@ -183,6 +183,7 @@ const LEAD_CAPABILITIES: &[CapabilityGrant] = &[
     CapabilityGrant::exact("spawn", "reviewer"),
     CapabilityGrant::namespace("send"),
     CapabilityGrant::namespace("task"),
+    CapabilityGrant::namespace("logs"),
     CapabilityGrant::exact("project", "attach"),
     CapabilityGrant::exact("workspace", "integrate"),
 ];
@@ -363,7 +364,7 @@ mod tests {
         assert_eq!(lead.max_instances, None);
         assert_eq!(lead.workspace, WorkspacePolicy::Project);
         assert_eq!(lead.permission_profile, "interactive");
-        assert_eq!(lead.capabilities.len(), 6);
+        assert_eq!(lead.capabilities.len(), 7);
         assert_eq!(
             lead.instructions,
             Some(
@@ -407,6 +408,7 @@ mod tests {
             ("lead", Capability::new("send", "unknown-role"), true),
             ("lead", Capability::new("task", "create"), true),
             ("lead", Capability::new("task", "close"), true),
+            ("lead", Capability::new("logs", "worker"), true),
             ("lead", Capability::new("project", "attach"), true),
             ("lead", Capability::new("project", "detach"), false),
             ("lead", Capability::new("workspace", "integrate"), true),

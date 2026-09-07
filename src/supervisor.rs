@@ -1,22 +1,20 @@
 //! Desired-state reconciliation and process ownership.
 
-#[allow(
-    dead_code,
-    reason = "M2 defines session supervision before delegation commands dispatch launches"
-)]
 mod session;
 
-use std::ffi::OsString;
+use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
 use tokio::net::{UnixListener, UnixStream};
@@ -25,37 +23,58 @@ use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep};
 
 use crate::auth::{AgentToken, SessionScope};
-use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
+use crate::cli::{
+    Arguments, Command as CliCommand, FinishStatus as CliFinishStatus,
+    TaskCommand,
+};
+use crate::config::{
+    AuthorizationDecision, Capability, RoleMode, builtin_standard,
+    compiled_defaults,
+};
+use crate::id::{
+    AgentId, AssignmentId, MessageId, OperationId, ProjectId, RunId, SessionId,
+    TaskId,
+};
 use crate::project::{
     ActiveRunEntry, ActiveRunIndex, CoterieDirectories, DiscoveredProject,
     LeaseAttempt, ProjectError, ProjectLease,
 };
 use crate::protocol::{
-    ClientMessage, ConnectionChannel, FrameError, HandshakeRequest,
-    HandshakeResponse, PROTOCOL_VERSION, RequestAuthentication, RpcFailure,
-    RpcFailureCode, RpcRequest, RpcResponse, RpcResult, ServerMessage,
+    AgentSummary, CallerChannel, CallerSummary, ClientMessage,
+    ConnectionChannel, EventSummary, FinishStatus, FrameError,
+    HandshakeRequest, HandshakeResponse, MessageSummary, PROTOCOL_VERSION,
+    ProjectSummary, RequestAuthentication, RpcFailure, RpcFailureCode,
+    RpcRequest, RpcResponse, RpcResult, ServerMessage, TaskCounts, TaskSummary,
     VersionedRequest, VersionedResponse, read_frame, write_frame,
 };
-use crate::state::{
-    Mutation, MutationOutcome, ProjectRecord, RunRecord, Store, StoreError,
+use crate::providers::fake::{FakeEvent, FakeProvider, FakeScript};
+use crate::providers::{
+    ActivityState, LaunchMode, LifecycleState, SessionObservation,
 };
+use crate::state::{
+    AgentRecord, ClaimTaskMutation, ClaimTaskResult, DependencyRecord,
+    EventRecord, MessageRecord, Mutation, MutationOutcome, ProjectRecord,
+    RunRecord, Store, StoreError, TaskRecord, TaskTransitionMutation,
+    TaskTransitionRejection, TaskTransitionResult,
+};
+use crate::tasks::{TaskStatus, TaskTransition};
+
+use self::session::{AgentLaunch, AgentSessionError, AgentSessionSupervisor};
 
 const INTERNAL_SUPERVISOR_ARGUMENT: &str = "__supervisor";
-const INTERNAL_CONNECT_ARGUMENT: &str = "__supervisor-connect";
-const INTERNAL_SHUTDOWN_ARGUMENT: &str = "__supervisor-shutdown";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 const DATABASE_FILE: &str = "state.sqlite3";
 const MAXIMUM_LINUX_SOCKET_PATH_LENGTH: usize = 107;
 
-/// Runs the foreground connector or the private supervisor process entrypoint.
-pub(crate) async fn run_from_environment() -> Result<(), SupervisorError> {
-    let mut arguments = std::env::args_os();
-    let _executable = arguments.next();
-    match arguments.next() {
-        None => Ok(()),
-        Some(argument) if argument == INTERNAL_CONNECT_ARGUMENT => {
-            require_no_more_arguments(arguments)?;
+/// Runs one parsed public command or private supervisor entrypoint.
+pub(crate) async fn run(
+    arguments: Arguments,
+) -> Result<crate::cli::ExitCategory, SupervisorError> {
+    let json_output = arguments.json;
+    let foreground_operation_id = arguments.operation_id;
+    match arguments.command {
+        Some(CliCommand::SupervisorConnect) => {
             let project = discover_current_project()?;
             let directories = CoterieDirectories::from_environment()?;
             let mut client = connect_or_start(&project, &directories).await?;
@@ -67,30 +86,20 @@ pub(crate) async fn run_from_environment() -> Result<(), SupervisorError> {
             {
                 return Err(SupervisorError::InvalidProof);
             }
-            Ok(())
+            Ok(crate::cli::ExitCategory::Success)
         }
-        Some(argument) if argument == INTERNAL_SUPERVISOR_ARGUMENT => {
-            let run_id =
-                parse_id_argument::<RunId>(arguments.next(), "run ID")?;
-            let project_id =
-                parse_id_argument::<ProjectId>(arguments.next(), "project ID")?;
-            let project_path = arguments.next().map(PathBuf::from).ok_or(
-                SupervisorError::InvalidInternalArguments {
-                    reason: "missing project path",
-                },
-            )?;
-            require_no_more_arguments(arguments)?;
-            let project = DiscoveredProject::discover(project_path)?;
+        Some(CliCommand::Supervisor(arguments)) => {
+            let project = DiscoveredProject::discover(arguments.project_path)?;
             let entry = ActiveRunEntry::new(
-                run_id,
-                project_id,
+                arguments.run_id,
+                arguments.project_id,
                 project.identity.clone(),
             );
             let directories = CoterieDirectories::from_environment()?;
-            serve(entry, project, directories).await
+            serve(entry, project, directories).await?;
+            Ok(crate::cli::ExitCategory::Success)
         }
-        Some(argument) if argument == INTERNAL_SHUTDOWN_ARGUMENT => {
-            require_no_more_arguments(arguments)?;
+        Some(CliCommand::SupervisorShutdown) => {
             let project = discover_current_project()?;
             let directories = CoterieDirectories::from_environment()?;
             directories.prepare()?;
@@ -112,10 +121,293 @@ pub(crate) async fn run_from_environment() -> Result<(), SupervisorError> {
                 return Err(SupervisorError::InvalidProof);
             }
             await_retirement(&directories, &project, &entry).await?;
-            Ok(())
+            Ok(crate::cli::ExitCategory::Success)
         }
-        Some(_) => Ok(()),
+        None => {
+            let operation_id =
+                foreground_operation_id.unwrap_or_else(OperationId::generate);
+            let project = discover_current_project()
+                .map_err(|error| error.for_operation(operation_id))?;
+            let directories = CoterieDirectories::from_environment()
+                .map_err(SupervisorError::from)
+                .map_err(|error| error.for_operation(operation_id))?;
+            let mut client = connect_or_start(&project, &directories)
+                .await
+                .map_err(|error| error.for_operation(operation_id))?;
+            let response = client
+                .request(RpcRequest::LaunchForeground { operation_id })
+                .await
+                .map_err(|error| error.for_operation(operation_id))?;
+            render_public_response(json_output, Some(operation_id), &response)
+        }
+        Some(command) => {
+            if foreground_operation_id.is_some() {
+                return Err(SupervisorError::ForegroundOperationIdWithCommand);
+            }
+            let (request, operation_id, stopping) = public_request(command);
+            let project = discover_current_project()
+                .map_err(|error| command_error(error, operation_id))?;
+            let directories = CoterieDirectories::from_environment()
+                .map_err(SupervisorError::from)
+                .map_err(|error| command_error(error, operation_id))?;
+            let entry = active_entry(&project, &directories)
+                .map_err(|error| command_error(error, operation_id))?;
+            let mut client = connect_for_environment(&directories, &entry)
+                .await
+                .map_err(|error| command_error(error, operation_id))?;
+            let response = client
+                .request(request)
+                .await
+                .map_err(|error| command_error(error, operation_id))?;
+            if stopping {
+                await_retirement(&directories, &project, &entry)
+                    .await
+                    .map_err(|error| {
+                        error.for_operation(
+                            operation_id.expect("stop has an operation ID"),
+                        )
+                    })?;
+            }
+            render_public_response(json_output, operation_id, &response)
+        }
     }
+}
+
+fn command_error(
+    error: SupervisorError,
+    operation_id: Option<OperationId>,
+) -> SupervisorError {
+    match operation_id {
+        Some(operation_id) => error.for_operation(operation_id),
+        None => error,
+    }
+}
+
+fn active_entry(
+    project: &DiscoveredProject,
+    directories: &CoterieDirectories,
+) -> Result<ActiveRunEntry, SupervisorError> {
+    directories.prepare()?;
+    ActiveRunIndex::new(directories)
+        .lookup(&project.identity)?
+        .ok_or(SupervisorError::NoActiveRun)
+}
+
+async fn connect_for_environment(
+    directories: &CoterieDirectories,
+    entry: &ActiveRunEntry,
+) -> Result<SupervisorClient, SupervisorError> {
+    let agent_id = env::var_os("COTERIE_AGENT_ID");
+    let session_id = env::var_os("COTERIE_SESSION_ID");
+    let token = env::var_os("COTERIE_TOKEN");
+    let socket = checked_socket_path(directories, entry.run_id)?;
+    match (agent_id, session_id, token) {
+        (None, None, None) => {
+            SupervisorClient::connect_operator_at(&socket, entry).await
+        }
+        (Some(agent_id), Some(session_id), Some(token)) => {
+            let agent_id =
+                parse_agent_environment(agent_id, "COTERIE_AGENT_ID")?;
+            let session_id =
+                parse_agent_environment(session_id, "COTERIE_SESSION_ID")?;
+            let token = parse_agent_environment(token, "COTERIE_TOKEN")?;
+            if let Some(run_id) = env::var_os("COTERIE_RUN_ID") {
+                let run_id: RunId =
+                    parse_agent_environment(run_id, "COTERIE_RUN_ID")?;
+                if run_id != entry.run_id {
+                    return Err(SupervisorError::AgentEnvironmentRunMismatch {
+                        expected: entry.run_id,
+                        found: run_id,
+                    });
+                }
+            }
+            SupervisorClient::connect_agent_at(
+                &socket, entry, agent_id, session_id, token,
+            )
+            .await
+        }
+        _ => Err(SupervisorError::IncompleteAgentEnvironment),
+    }
+}
+
+fn parse_agent_environment<T>(
+    value: std::ffi::OsString,
+    variable: &'static str,
+) -> Result<T, SupervisorError>
+where
+    T: std::str::FromStr,
+{
+    value
+        .into_string()
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .ok_or(SupervisorError::InvalidAgentEnvironment { variable })
+}
+
+fn public_request(
+    command: CliCommand,
+) -> (RpcRequest, Option<OperationId>, bool) {
+    match command {
+        CliCommand::Status => (RpcRequest::Status, None, false),
+        CliCommand::Whoami => (RpcRequest::Whoami, None, false),
+        CliCommand::Prime => (RpcRequest::Prime, None, false),
+        CliCommand::Task(arguments) => match arguments.command {
+            TaskCommand::Create(arguments) => {
+                let operation_id = arguments
+                    .mutation
+                    .operation_id
+                    .unwrap_or_else(OperationId::generate);
+                (
+                    RpcRequest::TaskCreate {
+                        operation_id,
+                        description: arguments
+                            .description
+                            .unwrap_or_else(|| arguments.title.clone()),
+                        title: arguments.title,
+                        project: arguments.project,
+                        group: arguments.group,
+                        dependencies: arguments.dependencies,
+                    },
+                    Some(operation_id),
+                    false,
+                )
+            }
+            TaskCommand::Ready => (RpcRequest::TaskReady, None, false),
+            TaskCommand::Close(arguments) => {
+                let operation_id = arguments
+                    .mutation
+                    .operation_id
+                    .unwrap_or_else(OperationId::generate);
+                (
+                    RpcRequest::TaskClose {
+                        operation_id,
+                        task_id: arguments.task_id,
+                        summary: arguments.summary,
+                    },
+                    Some(operation_id),
+                    false,
+                )
+            }
+        },
+        CliCommand::Spawn(arguments) => {
+            let operation_id = arguments
+                .mutation
+                .operation_id
+                .unwrap_or_else(OperationId::generate);
+            (
+                RpcRequest::Spawn {
+                    operation_id,
+                    role: arguments.role,
+                    task_id: arguments.task,
+                },
+                Some(operation_id),
+                false,
+            )
+        }
+        CliCommand::Finish(arguments) => {
+            let operation_id = arguments
+                .mutation
+                .operation_id
+                .unwrap_or_else(OperationId::generate);
+            let status = match arguments.status {
+                CliFinishStatus::Completed => FinishStatus::Completed,
+                CliFinishStatus::Failed => FinishStatus::Failed,
+            };
+            (
+                RpcRequest::Finish {
+                    operation_id,
+                    status,
+                    summary: arguments.summary,
+                },
+                Some(operation_id),
+                false,
+            )
+        }
+        CliCommand::Send(arguments) => {
+            let operation_id = arguments
+                .mutation
+                .operation_id
+                .unwrap_or_else(OperationId::generate);
+            (
+                RpcRequest::Send {
+                    operation_id,
+                    recipient: arguments.recipient,
+                    message: arguments.message,
+                },
+                Some(operation_id),
+                false,
+            )
+        }
+        CliCommand::Inbox(arguments) => (
+            RpcRequest::Inbox {
+                after: arguments.after,
+            },
+            None,
+            false,
+        ),
+        CliCommand::Logs(arguments) => (
+            RpcRequest::Logs {
+                agent: arguments.agent,
+            },
+            None,
+            false,
+        ),
+        CliCommand::Events(arguments) => (
+            RpcRequest::Events {
+                after: arguments.after,
+                limit: arguments.limit,
+            },
+            None,
+            false,
+        ),
+        CliCommand::Stop(arguments) => {
+            let operation_id =
+                arguments.operation_id.unwrap_or_else(OperationId::generate);
+            (
+                RpcRequest::Shutdown { operation_id },
+                Some(operation_id),
+                true,
+            )
+        }
+        CliCommand::Supervisor(_)
+        | CliCommand::SupervisorConnect
+        | CliCommand::SupervisorShutdown => unreachable!(
+            "private commands are dispatched before public request conversion"
+        ),
+    }
+}
+
+fn render_public_response(
+    json_output: bool,
+    operation_id: Option<OperationId>,
+    response: &RpcResponse,
+) -> Result<crate::cli::ExitCategory, SupervisorError> {
+    let mut data = serde_json::to_value(response)?;
+    if let Some(object) = data.as_object_mut() {
+        object.remove("result");
+        object.remove("operation_id");
+        if matches!(response, RpcResponse::ShuttingDown { .. }) {
+            object.insert("status".to_owned(), json!("stopped"));
+        }
+    }
+    let mut stdout = io::stdout().lock();
+    let mut stderr = io::stderr().lock();
+    if json_output {
+        match operation_id {
+            Some(operation_id) => crate::cli::render_json_mutation_success(
+                &mut stdout,
+                &mut stderr,
+                operation_id,
+                &data,
+            ),
+            None => {
+                crate::cli::render_json_success(&mut stdout, &mut stderr, &data)
+            }
+        }
+    } else {
+        crate::cli::render_human_success(&mut stdout, &mut stderr, &data)
+    }
+    .map_err(Into::into)
 }
 
 async fn await_retirement(
@@ -145,31 +437,6 @@ fn discover_current_project() -> Result<DiscoveredProject, SupervisorError> {
     let current =
         std::env::current_dir().map_err(SupervisorError::CurrentDirectory)?;
     DiscoveredProject::discover(current).map_err(Into::into)
-}
-
-fn parse_id_argument<T>(
-    argument: Option<OsString>,
-    name: &'static str,
-) -> Result<T, SupervisorError>
-where
-    T: std::str::FromStr,
-{
-    argument
-        .and_then(|argument| argument.into_string().ok())
-        .and_then(|argument| argument.parse().ok())
-        .ok_or(SupervisorError::InvalidIdArgument { name })
-}
-
-fn require_no_more_arguments(
-    mut arguments: impl Iterator<Item = OsString>,
-) -> Result<(), SupervisorError> {
-    if arguments.next().is_some() {
-        Err(SupervisorError::InvalidInternalArguments {
-            reason: "unexpected trailing arguments",
-        })
-    } else {
-        Ok(())
-    }
 }
 
 /// Connects to the indexed run or starts exactly one supervisor for the project.
@@ -341,8 +608,15 @@ async fn serve(
 
     let index = ActiveRunIndex::new(&directories);
     index.publish(&active)?;
-    let serve_result =
-        serve_listener(listener, active.clone(), &mut store).await;
+    let mut sessions = runtime_sessions(&run_directories.state);
+    let serve_result = serve_listener(
+        listener,
+        active.clone(),
+        &run_directories.state,
+        &mut store,
+        &mut sessions,
+    )
+    .await;
     let index_result = if serve_result.is_ok() {
         index.retire(&project.identity, active.run_id)
     } else {
@@ -360,7 +634,9 @@ async fn serve(
 async fn serve_listener(
     listener: UnixListener,
     active: ActiveRunEntry,
+    run_state_directory: &Path,
     store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<FakeProvider>,
 ) -> Result<(), SupervisorError> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(16);
@@ -389,7 +665,13 @@ async fn serve_listener(
                 ));
             }
             Some(command) = command_rx.recv() => {
-                handle_command(store, active.run_id, command);
+                handle_command(
+                    store,
+                    sessions,
+                    run_state_directory,
+                    active.run_id,
+                    command,
+                );
             }
             Some(completed) = connections.join_next(), if !connections.is_empty() => {
                 match completed {
@@ -403,6 +685,24 @@ async fn serve_listener(
     Ok(())
 }
 
+fn runtime_sessions(
+    run_state_directory: &Path,
+) -> AgentSessionSupervisor<FakeProvider> {
+    let running = SessionObservation {
+        lifecycle: LifecycleState::Running,
+        activity: ActivityState::Idle,
+        exit: None,
+    };
+    let scripts =
+        (0..compiled_defaults().limits.max_agents_per_run).map(|_| {
+            FakeScript::new([
+                FakeEvent::observation(running),
+                FakeEvent::output(b"{\"type\":\"session.ready\"}\n"),
+            ])
+        });
+    AgentSessionSupervisor::new(FakeProvider::new(scripts), run_state_directory)
+}
+
 enum SupervisorCommand {
     AuthenticateAgent {
         agent_id: AgentId,
@@ -414,10 +714,17 @@ enum SupervisorCommand {
         operation_id: OperationId,
         response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
     },
+    Dispatch {
+        caller: AuthenticatedCaller,
+        request: RpcRequest,
+        response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
+    },
 }
 
 fn handle_command(
     store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    run_state_directory: &Path,
     run_id: RunId,
     command: SupervisorCommand,
 ) {
@@ -449,7 +756,1329 @@ fn handle_command(
             );
             let _request_may_have_disconnected = response.send(result);
         }
+        SupervisorCommand::Dispatch {
+            caller,
+            request,
+            response,
+        } => {
+            let result = execute_request(
+                store,
+                sessions,
+                run_state_directory,
+                run_id,
+                &caller,
+                request,
+            );
+            let _request_may_have_disconnected = response.send(result);
+        }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct LaunchIntent {
+    agent_id: AgentId,
+    session_id: SessionId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct SpawnIntent {
+    agent_id: AgentId,
+    session_id: SessionId,
+    assignment_id: AssignmentId,
+    task_id: TaskId,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct MessageIntent {
+    message_id: MessageId,
+    sequence: i64,
+}
+
+fn execute_request(
+    store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    run_state_directory: &Path,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    request: RpcRequest,
+) -> Result<RpcResponse, RpcFailure> {
+    match request {
+        RpcRequest::Ping => Ok(RpcResponse::Pong { run_id }),
+        RpcRequest::LaunchForeground { operation_id } => {
+            launch_foreground(store, sessions, run_id, caller, operation_id)
+        }
+        RpcRequest::Status => status(store, run_id, caller),
+        RpcRequest::Whoami => whoami(store, run_id, caller),
+        RpcRequest::Prime => prime(store, run_id, caller),
+        RpcRequest::TaskCreate {
+            operation_id,
+            title,
+            description,
+            project,
+            group,
+            dependencies,
+        } => create_task(
+            store,
+            run_id,
+            caller,
+            operation_id,
+            title,
+            description,
+            project,
+            group,
+            dependencies,
+        ),
+        RpcRequest::TaskReady => ready_tasks(store, run_id, caller),
+        RpcRequest::TaskClose {
+            operation_id,
+            task_id,
+            summary,
+        } => close_task(store, run_id, caller, operation_id, task_id, summary),
+        RpcRequest::Spawn {
+            operation_id,
+            role,
+            task_id,
+        } => spawn_agent(
+            store,
+            sessions,
+            run_id,
+            caller,
+            operation_id,
+            role,
+            task_id,
+        ),
+        RpcRequest::Finish {
+            operation_id,
+            status,
+            summary,
+        } => finish_assignment(
+            store,
+            run_id,
+            caller,
+            operation_id,
+            status,
+            summary,
+        ),
+        RpcRequest::Send {
+            operation_id,
+            recipient,
+            message,
+        } => send_message(
+            store,
+            run_id,
+            caller,
+            operation_id,
+            recipient,
+            message,
+        ),
+        RpcRequest::Inbox { after } => inbox(store, run_id, caller, after),
+        RpcRequest::Logs { agent } => {
+            logs(store, run_state_directory, run_id, caller, &agent)
+        }
+        RpcRequest::Events { after, limit } => {
+            events(store, run_id, caller, after, limit)
+        }
+        RpcRequest::Shutdown { .. } => Err(RpcFailure::new(
+            RpcFailureCode::Internal,
+            "shutdown was routed through the wrong command path",
+        )),
+    }
+}
+
+fn launch_foreground(
+    store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    operation_id: OperationId,
+) -> Result<RpcResponse, RpcFailure> {
+    require_operator(
+        caller,
+        "only the operator can launch the foreground agent",
+    )?;
+    let archetype = builtin_standard();
+    let role = archetype.lead.to_owned();
+    let role_definition = archetype.role(&role).ok_or_else(|| {
+        RpcFailure::new(
+            RpcFailureCode::Internal,
+            "the active archetype has no designated foreground role",
+        )
+    })?;
+    let now = rpc_timestamp()?;
+    let agent_id = AgentId::generate();
+    let session_id = SessionId::generate();
+    let mutation = Mutation {
+        id: operation_id,
+        run_id,
+        kind: "agent.launch_foreground".to_owned(),
+        actor_agent_id: None,
+        request: json!({"role": role}),
+        created_at: now,
+    };
+    let outcome = store
+        .mutate(&mutation, |repositories| {
+            let existing = repositories
+                .agents(run_id)?
+                .into_iter()
+                .find(|agent| agent.role == role);
+            if let Some(agent) = existing {
+                return Ok(LaunchIntent {
+                    agent_id: agent.id,
+                    session_id: repositories
+                        .latest_session_for_agent(run_id, agent.id)?
+                        .map_or(session_id, |session| session.id),
+                });
+            }
+            repositories.insert_agent(&AgentRecord {
+                id: agent_id,
+                run_id,
+                role: role.clone(),
+                generation: 0,
+                state: LifecycleState::Starting,
+                created_at: now,
+            })?;
+            Ok(LaunchIntent {
+                agent_id,
+                session_id,
+            })
+        })
+        .map_err(rpc_state_failure)?;
+    let intent = mutation_value(outcome);
+    let session_exists = store
+        .transaction(|repositories| repositories.session(intent.session_id))
+        .map_err(rpc_state_failure)?
+        .is_some();
+    if !session_exists {
+        let project = primary_project(store, run_id)?;
+        let launch = AgentLaunch {
+            scope: SessionScope {
+                run_id,
+                agent_id: intent.agent_id,
+                session_id: intent.session_id,
+                generation: 0,
+            },
+            role: role.clone(),
+            mode: role_launch_mode(role_definition.mode),
+            working_directory: project.canonical_path,
+            bootstrap_instruction: bootstrap_instruction(run_id, &role),
+            created_at: now,
+        };
+        let launched = sessions
+            .launch_existing(store, &launch)
+            .map_err(rpc_session_failure)?;
+        debug_assert_eq!(launched.scope, launch.scope);
+        let _provider_token = launched.token;
+        drain_fake_events(sessions, store, intent.session_id, now)?;
+    }
+    Ok(RpcResponse::ForegroundLaunched {
+        run_id,
+        agent: summary_for_agent(store, run_id, intent.agent_id)?,
+        session_id: intent.session_id,
+    })
+}
+
+fn status(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+) -> Result<RpcResponse, RpcFailure> {
+    require_operator(caller, "only the operator can inspect full run status")?;
+    let (run, projects, agents, tasks) = store
+        .transaction(|repositories| {
+            Ok((
+                repositories.run(run_id)?,
+                repositories.projects(run_id)?,
+                repositories.agents(run_id)?,
+                repositories.tasks(run_id)?,
+            ))
+        })
+        .map_err(rpc_state_failure)?;
+    let run = run.ok_or_else(|| not_found("the active run does not exist"))?;
+    Ok(RpcResponse::Status {
+        run_id,
+        status: run.status,
+        projects: projects.into_iter().map(project_summary).collect(),
+        agents: summarize_agents(&agents),
+        tasks: task_counts(&tasks),
+    })
+}
+
+fn whoami(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+) -> Result<RpcResponse, RpcFailure> {
+    let identity = caller_summary(store, run_id, caller)?;
+    Ok(RpcResponse::Identity {
+        run_id,
+        channel: identity.channel,
+        agent: identity.agent,
+    })
+}
+
+fn prime(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+) -> Result<RpcResponse, RpcFailure> {
+    let identity = caller_summary(store, run_id, caller)?;
+    let (projects, agents, tasks, ready, active_task) = store
+        .transaction(|repositories| {
+            let active_task = match caller.agent_id() {
+                Some(agent_id) => repositories
+                    .active_assignment_for_agent(run_id, agent_id)?
+                    .and_then(|assignment| {
+                        repositories.task(assignment.task_id).transpose()
+                    })
+                    .transpose()?,
+                None => None,
+            };
+            Ok((
+                repositories.projects(run_id)?,
+                repositories.agents(run_id)?,
+                repositories.tasks(run_id)?,
+                repositories.ready_tasks(run_id)?,
+                active_task,
+            ))
+        })
+        .map_err(rpc_state_failure)?;
+    let project_map = project_aliases(&projects);
+    let peers = summarize_agents(&agents)
+        .into_iter()
+        .filter(|agent| Some(agent.id) != caller.agent_id())
+        .collect();
+    let ready_tasks = summarize_tasks(store, &project_map, ready)?;
+    let tasks = summarize_tasks(store, &project_map, tasks)?;
+    let active_task = active_task
+        .map(|task| summarize_task(store, &project_map, task))
+        .transpose()?;
+    Ok(RpcResponse::Prime {
+        identity,
+        projects: projects.into_iter().map(project_summary).collect(),
+        peers,
+        tasks,
+        ready_tasks,
+        active_task: active_task.map(Box::new),
+        commands: available_commands(store, run_id, caller)?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_task(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    operation_id: OperationId,
+    title: String,
+    description: String,
+    project_alias: String,
+    group: Option<String>,
+    dependencies: Vec<TaskId>,
+) -> Result<RpcResponse, RpcFailure> {
+    require_capability(store, run_id, caller, "task", "create")?;
+    if title.trim().is_empty() {
+        return Err(invalid_argument("task title cannot be empty"));
+    }
+    if description.trim().is_empty() {
+        return Err(invalid_argument("task description cannot be empty"));
+    }
+    if group.as_ref().is_some_and(|name| name.trim().is_empty()) {
+        return Err(invalid_argument("task group cannot be empty"));
+    }
+    let project = store
+        .transaction(|repositories| {
+            repositories.project_by_alias(run_id, &project_alias)
+        })
+        .map_err(rpc_state_failure)?
+        .ok_or_else(|| {
+            not_found(format!("project `{project_alias}` is not attached"))
+        })?;
+    let task_id = TaskId::generate();
+    let now = rpc_timestamp()?;
+    let actor_agent_id = caller.agent_id();
+    let mutation = Mutation {
+        id: operation_id,
+        run_id,
+        kind: "task.create".to_owned(),
+        actor_agent_id,
+        request: json!({
+            "title": title,
+            "description": description,
+            "project": project_alias,
+            "group": group,
+            "dependencies": dependencies,
+        }),
+        created_at: now,
+    };
+    let outcome = store
+        .mutate(&mutation, |repositories| {
+            for dependency_id in &dependencies {
+                let dependency = repositories.task(*dependency_id)?;
+                if !dependency.is_some_and(|task| task.run_id == run_id) {
+                    return Err(StoreError::CorruptTaskState {
+                        id: *dependency_id,
+                        reason: "a requested dependency is not in this run"
+                            .to_owned(),
+                    });
+                }
+            }
+            let group_id = if let Some(name) = group.as_deref() {
+                Some(
+                    repositories
+                        .task_group_by_name(run_id, name)?
+                        .map_or_else(
+                            || {
+                                repositories
+                                    .insert_named_task_group(run_id, name, now)
+                            },
+                            |group| Ok(group.id),
+                        )?,
+                )
+            } else {
+                None
+            };
+            repositories.insert_task(&TaskRecord {
+                id: task_id,
+                run_id,
+                project_id: project.id,
+                group_id,
+                title: title.clone(),
+                description: description.clone(),
+                status: TaskStatus::Open,
+                result: None,
+                created_at: now,
+                updated_at: now,
+            })?;
+            for dependency_task_id in &dependencies {
+                repositories.insert_dependency(&DependencyRecord {
+                    run_id,
+                    task_id,
+                    dependency_task_id: *dependency_task_id,
+                    created_at: now,
+                })?;
+            }
+            Ok(task_id)
+        })
+        .map_err(|error| match error {
+            StoreError::CorruptTaskState { id, .. }
+                if dependencies.contains(&id) =>
+            {
+                not_found(format!("dependency task `{id}` does not exist"))
+            }
+            error => rpc_state_failure(error),
+        })?;
+    let task_id = mutation_value(outcome);
+    Ok(RpcResponse::TaskCreated {
+        operation_id,
+        task: task_by_id(store, run_id, task_id)?,
+    })
+}
+
+fn ready_tasks(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+) -> Result<RpcResponse, RpcFailure> {
+    require_capability(store, run_id, caller, "task", "read")?;
+    let (projects, tasks) = store
+        .transaction(|repositories| {
+            Ok((
+                repositories.projects(run_id)?,
+                repositories.ready_tasks(run_id)?,
+            ))
+        })
+        .map_err(rpc_state_failure)?;
+    Ok(RpcResponse::ReadyTasks {
+        tasks: summarize_tasks(store, &project_aliases(&projects), tasks)?,
+    })
+}
+
+fn close_task(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    operation_id: OperationId,
+    task_id: TaskId,
+    summary: String,
+) -> Result<RpcResponse, RpcFailure> {
+    require_capability(store, run_id, caller, "task", "close")?;
+    if summary.trim().is_empty() {
+        return Err(invalid_argument("closure summary cannot be empty"));
+    }
+    let result = store
+        .transaction(|repositories| {
+            if let Some(operation) = repositories.operation(operation_id)? {
+                return Ok(operation
+                    .request
+                    .get("result")
+                    .cloned()
+                    .filter(|result| !result.is_null()));
+            }
+            let assignment_result =
+                repositories.task(task_id)?.and_then(|task| task.result);
+            Ok(Some(json!({
+                "assignment_result": assignment_result,
+                "validation_summary": summary,
+            })))
+        })
+        .map_err(rpc_state_failure)?;
+    let transition = TaskTransitionMutation {
+        operation_id,
+        run_id,
+        actor_agent_id: caller.agent_id(),
+        task_id,
+        transition: TaskTransition::Close,
+        result,
+        summary: Some(summary),
+        transitioned_at: rpc_timestamp()?,
+    };
+    let result = mutation_value(
+        store
+            .transition_task(&transition)
+            .map_err(rpc_state_failure)?,
+    );
+    require_transition(result, task_id, "close")?;
+    Ok(RpcResponse::TaskClosed {
+        operation_id,
+        task: task_by_id(store, run_id, task_id)?,
+    })
+}
+
+fn spawn_agent(
+    store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    operation_id: OperationId,
+    role: String,
+    task_id: TaskId,
+) -> Result<RpcResponse, RpcFailure> {
+    require_capability(store, run_id, caller, "spawn", &role)?;
+    let archetype = builtin_standard();
+    let role_definition = archetype
+        .role(&role)
+        .ok_or_else(|| not_found(format!("role `{role}` is not configured")))?;
+    if role_definition.mode != RoleMode::Job {
+        return Err(conflict(format!(
+            "role `{role}` is not a background job role"
+        )));
+    }
+    let replaying = store
+        .transaction(|repositories| repositories.operation(operation_id))
+        .map_err(rpc_state_failure)?
+        .is_some();
+    if !replaying {
+        let (agents, task, readiness) = store
+            .transaction(|repositories| {
+                Ok((
+                    repositories.agents(run_id)?,
+                    repositories.task(task_id)?,
+                    repositories.task_readiness(task_id)?,
+                ))
+            })
+            .map_err(rpc_state_failure)?;
+        task.filter(|task| task.run_id == run_id).ok_or_else(|| {
+            not_found(format!("task `{task_id}` does not exist"))
+        })?;
+        if !readiness.is_some_and(|readiness| readiness.is_ready()) {
+            return Err(conflict(format!("task `{task_id}` is not ready")));
+        }
+        let active_role_instances = agents
+            .iter()
+            .filter(|agent| agent.role == role && !agent.state.is_terminal())
+            .count();
+        if role_definition
+            .max_instances
+            .is_some_and(|limit| active_role_instances >= usize::from(limit))
+        {
+            return Err(conflict(format!(
+                "role `{role}` has reached its active instance limit"
+            )));
+        }
+        let limits = compiled_defaults().limits;
+        if agents.len() >= usize::from(limits.max_agents_per_run)
+            || agents
+                .iter()
+                .filter(|agent| !agent.state.is_terminal())
+                .count()
+                >= usize::from(limits.max_concurrent_agents)
+        {
+            return Err(conflict("the run has reached its agent limit"));
+        }
+    }
+    let now = rpc_timestamp()?;
+    let agent_id = AgentId::generate();
+    let session_id = SessionId::generate();
+    let assignment_id = AssignmentId::generate();
+    let claim = ClaimTaskMutation {
+        operation_id,
+        run_id,
+        actor_agent_id: caller.agent_id(),
+        task_id,
+        agent_id,
+        assignment_id,
+        claimed_at: now,
+    };
+    let mutation = Mutation {
+        id: operation_id,
+        run_id,
+        kind: "agent.spawn".to_owned(),
+        actor_agent_id: caller.agent_id(),
+        request: json!({"role": role, "task_id": task_id}),
+        created_at: now,
+    };
+    let outcome = store
+        .mutate(&mutation, |repositories| {
+            repositories.insert_agent(&AgentRecord {
+                id: agent_id,
+                run_id,
+                role: role.clone(),
+                generation: 0,
+                state: LifecycleState::Starting,
+                created_at: now,
+            })?;
+            match repositories.compare_and_set_claim(&claim)? {
+                ClaimTaskResult::Claimed { assignment_id, .. } => {
+                    Ok(SpawnIntent {
+                        agent_id,
+                        session_id,
+                        assignment_id,
+                        task_id,
+                    })
+                }
+                ClaimTaskResult::Rejected(reason) => {
+                    Err(StoreError::CorruptTaskState {
+                        id: task_id,
+                        reason: format!(
+                            "ready task claim was unexpectedly rejected: {reason:?}"
+                        ),
+                    })
+                }
+            }
+        })
+        .map_err(rpc_state_failure)?;
+    let intent = mutation_value(outcome);
+    let project = store
+        .transaction(|repositories| {
+            let task = repositories.task(intent.task_id)?;
+            task.map(|task| repositories.project(task.project_id))
+                .transpose()
+                .map(Option::flatten)
+        })
+        .map_err(rpc_state_failure)?
+        .ok_or_else(|| {
+            RpcFailure::new(
+                RpcFailureCode::Internal,
+                "the task target project is missing",
+            )
+        })?;
+    let session_exists = store
+        .transaction(|repositories| repositories.session(intent.session_id))
+        .map_err(rpc_state_failure)?
+        .is_some();
+    if !session_exists {
+        let launch = AgentLaunch {
+            scope: SessionScope {
+                run_id,
+                agent_id: intent.agent_id,
+                session_id: intent.session_id,
+                generation: 0,
+            },
+            role: role.clone(),
+            mode: LaunchMode::Job,
+            working_directory: project.canonical_path,
+            bootstrap_instruction: bootstrap_instruction(run_id, &role),
+            created_at: now,
+        };
+        let launched = sessions
+            .launch_claimed(store, &launch, intent.assignment_id)
+            .map_err(rpc_session_failure)?;
+        debug_assert_eq!(launched.scope, launch.scope);
+        let _provider_token = launched.token;
+        drain_fake_events(sessions, store, intent.session_id, now)?;
+    }
+    Ok(RpcResponse::Spawned {
+        operation_id,
+        agent: summary_for_agent(store, run_id, intent.agent_id)?,
+        session_id: intent.session_id,
+        assignment_id: intent.assignment_id,
+        task_id: intent.task_id,
+    })
+}
+
+fn finish_assignment(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    operation_id: OperationId,
+    status: FinishStatus,
+    summary: String,
+) -> Result<RpcResponse, RpcFailure> {
+    let agent_id = caller.agent_id().ok_or_else(|| {
+        RpcFailure::new(
+            RpcFailureCode::PermissionDenied,
+            "only an assigned agent can finish its work",
+        )
+    })?;
+    if summary.trim().is_empty() {
+        return Err(invalid_argument("finish summary cannot be empty"));
+    }
+    let assignment = store
+        .transaction(|repositories| {
+            let existing = repositories.operation(operation_id)?;
+            if let Some(existing) = existing {
+                let task_id = existing
+                    .request
+                    .get("task_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|task_id| task_id.parse::<TaskId>().ok());
+                return task_id
+                    .map(|task_id| {
+                        repositories.assignment_for_agent_task(
+                            run_id, agent_id, task_id,
+                        )
+                    })
+                    .transpose()
+                    .map(Option::flatten);
+            }
+            repositories.active_assignment_for_agent(run_id, agent_id)
+        })
+        .map_err(rpc_state_failure)?
+        .ok_or_else(|| conflict("the caller has no active assignment"))?;
+    let transition = match status {
+        FinishStatus::Completed => TaskTransition::Submit,
+        FinishStatus::Failed => TaskTransition::Reopen,
+    };
+    let task_transition = TaskTransitionMutation {
+        operation_id,
+        run_id,
+        actor_agent_id: Some(agent_id),
+        task_id: assignment.task_id,
+        transition,
+        result: Some(json!({"status": status, "summary": summary})),
+        summary: Some(summary),
+        transitioned_at: rpc_timestamp()?,
+    };
+    let result = mutation_value(
+        store
+            .transition_task(&task_transition)
+            .map_err(rpc_state_failure)?,
+    );
+    require_transition(result, assignment.task_id, "finish")?;
+    Ok(RpcResponse::AssignmentFinished {
+        operation_id,
+        assignment_id: assignment.id,
+        task: task_by_id(store, run_id, assignment.task_id)?,
+    })
+}
+
+fn send_message(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    operation_id: OperationId,
+    recipient: String,
+    message: String,
+) -> Result<RpcResponse, RpcFailure> {
+    if message.trim().is_empty() {
+        return Err(invalid_argument("message cannot be empty"));
+    }
+    let recipient = resolve_agent(store, run_id, &recipient)?;
+    if let Some(sender_id) = caller.agent_id() {
+        if sender_id == recipient.id {
+            return Err(invalid_argument(
+                "an agent cannot send a message to itself",
+            ));
+        }
+        let sender = agent_record(store, run_id, sender_id)?;
+        let archetype = builtin_standard();
+        let action = if recipient.role == archetype.lead {
+            "lead"
+        } else if recipient.role == sender.role {
+            "peer"
+        } else {
+            recipient.role.as_str()
+        };
+        require_capability(store, run_id, caller, "send", action)?;
+    }
+    let now = rpc_timestamp()?;
+    let message_id = MessageId::generate();
+    let mutation = Mutation {
+        id: operation_id,
+        run_id,
+        kind: "message.send".to_owned(),
+        actor_agent_id: caller.agent_id(),
+        request: json!({"recipient_agent_id": recipient.id, "message": message}),
+        created_at: now,
+    };
+    let outcome = store
+        .mutate(&mutation, |repositories| {
+            let sequence =
+                repositories.next_message_sequence(run_id, recipient.id)?;
+            repositories.insert_message(&MessageRecord {
+                id: message_id,
+                run_id,
+                sender_agent_id: caller.agent_id(),
+                recipient_agent_id: recipient.id,
+                sequence,
+                body: message.clone(),
+                created_at: now,
+                acknowledged_at: None,
+            })?;
+            Ok(MessageIntent {
+                message_id,
+                sequence,
+            })
+        })
+        .map_err(rpc_state_failure)?;
+    let intent = mutation_value(outcome);
+    Ok(RpcResponse::MessageSent {
+        operation_id,
+        message_id: intent.message_id,
+        recipient,
+        sequence: u64::try_from(intent.sequence).map_err(|_| {
+            RpcFailure::new(
+                RpcFailureCode::Internal,
+                "message sequence is not positive",
+            )
+        })?,
+    })
+}
+
+fn inbox(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    after: u64,
+) -> Result<RpcResponse, RpcFailure> {
+    let agent_id = caller.agent_id().ok_or_else(|| {
+        RpcFailure::new(
+            RpcFailureCode::PermissionDenied,
+            "the operator does not have an agent inbox",
+        )
+    })?;
+    let after = i64::try_from(after)
+        .map_err(|_| invalid_argument("inbox cursor is too large"))?;
+    let messages = store
+        .transaction(|repositories| {
+            repositories.messages_after(run_id, agent_id, after)
+        })
+        .map_err(rpc_state_failure)?;
+    let next_cursor = messages.last().map_or(after, |message| message.sequence);
+    let mut summaries = Vec::with_capacity(messages.len());
+    for message in messages {
+        let sender = message
+            .sender_agent_id
+            .map(|id| summary_for_agent(store, run_id, id))
+            .transpose()?;
+        summaries.push(MessageSummary {
+            id: message.id,
+            sequence: u64::try_from(message.sequence).map_err(|_| {
+                RpcFailure::new(
+                    RpcFailureCode::Internal,
+                    "message sequence is not positive",
+                )
+            })?,
+            sender,
+            body: message.body,
+            created_at: message.created_at,
+            acknowledged: message.acknowledged_at.is_some(),
+        });
+    }
+    Ok(RpcResponse::Inbox {
+        messages: summaries,
+        next_cursor: u64::try_from(next_cursor).map_err(|_| {
+            RpcFailure::new(RpcFailureCode::Internal, "invalid inbox cursor")
+        })?,
+    })
+}
+
+fn logs(
+    store: &mut Store,
+    run_state_directory: &Path,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    agent_name: &str,
+) -> Result<RpcResponse, RpcFailure> {
+    let agent = resolve_agent(store, run_id, agent_name)?;
+    if caller.agent_id() != Some(agent.id) {
+        require_capability(store, run_id, caller, "logs", &agent.role)?;
+    }
+    let session = store
+        .transaction(|repositories| {
+            repositories.latest_session_for_agent(run_id, agent.id)
+        })
+        .map_err(rpc_state_failure)?
+        .ok_or_else(|| {
+            not_found(format!("agent `{}` has no session", agent.name))
+        })?;
+    if !safe_relative_path(&session.transcript_path) {
+        return Err(RpcFailure::new(
+            RpcFailureCode::Internal,
+            "stored transcript path is not a safe run-relative path",
+        ));
+    }
+    let path = run_state_directory.join(&session.transcript_path);
+    let transcript = match fs::read(&path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(RpcFailure::new(
+                RpcFailureCode::Internal,
+                format!("could not read provider transcript: {error}"),
+            ));
+        }
+    };
+    Ok(RpcResponse::Logs {
+        agent,
+        session_id: session.id,
+        transcript,
+    })
+}
+
+fn events(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    after: u64,
+    limit: u16,
+) -> Result<RpcResponse, RpcFailure> {
+    require_operator(
+        caller,
+        "only the operator can inspect the full event stream",
+    )?;
+    let after = i64::try_from(after)
+        .map_err(|_| invalid_argument("event cursor is too large"))?;
+    let events = store
+        .transaction(|repositories| {
+            repositories.events_after(run_id, after, limit)
+        })
+        .map_err(rpc_state_failure)?;
+    let next_cursor = events.last().map_or(after, |event| event.sequence);
+    let events = events
+        .into_iter()
+        .map(event_summary)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RpcResponse::Events {
+        events,
+        next_cursor: u64::try_from(next_cursor).map_err(|_| {
+            RpcFailure::new(RpcFailureCode::Internal, "invalid event cursor")
+        })?,
+    })
+}
+
+fn caller_summary(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+) -> Result<CallerSummary, RpcFailure> {
+    match caller {
+        AuthenticatedCaller::Operator => Ok(CallerSummary {
+            run_id,
+            channel: CallerChannel::Operator,
+            agent: None,
+        }),
+        AuthenticatedCaller::Agent(scope) => Ok(CallerSummary {
+            run_id,
+            channel: CallerChannel::Agent,
+            agent: Some(summary_for_agent(store, run_id, scope.agent_id)?),
+        }),
+    }
+}
+
+fn require_capability(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    namespace: &str,
+    action: &str,
+) -> Result<(), RpcFailure> {
+    let Some(agent_id) = caller.agent_id() else {
+        return Ok(());
+    };
+    let agent = agent_record(store, run_id, agent_id)?;
+    if builtin_standard()
+        .authorize(&agent.role, Capability::new(namespace, action))
+        == AuthorizationDecision::Allowed
+    {
+        Ok(())
+    } else {
+        Err(RpcFailure::new(
+            RpcFailureCode::PermissionDenied,
+            format!(
+                "role `{}` is not authorized for `{namespace}:{action}`",
+                agent.role
+            ),
+        ))
+    }
+}
+
+fn require_operator(
+    caller: &AuthenticatedCaller,
+    message: &'static str,
+) -> Result<(), RpcFailure> {
+    if caller.is_operator() {
+        Ok(())
+    } else {
+        Err(RpcFailure::new(RpcFailureCode::PermissionDenied, message))
+    }
+}
+
+fn agent_record(
+    store: &mut Store,
+    run_id: RunId,
+    agent_id: AgentId,
+) -> Result<AgentRecord, RpcFailure> {
+    store
+        .transaction(|repositories| repositories.agent(agent_id))
+        .map_err(rpc_state_failure)?
+        .filter(|agent| agent.run_id == run_id)
+        .ok_or_else(|| not_found(format!("agent `{agent_id}` does not exist")))
+}
+
+fn summary_for_agent(
+    store: &mut Store,
+    run_id: RunId,
+    agent_id: AgentId,
+) -> Result<AgentSummary, RpcFailure> {
+    let agents = store
+        .transaction(|repositories| repositories.agents(run_id))
+        .map_err(rpc_state_failure)?;
+    summarize_agents(&agents)
+        .into_iter()
+        .find(|agent| agent.id == agent_id)
+        .ok_or_else(|| not_found(format!("agent `{agent_id}` does not exist")))
+}
+
+fn resolve_agent(
+    store: &mut Store,
+    run_id: RunId,
+    name_or_id: &str,
+) -> Result<AgentSummary, RpcFailure> {
+    let agents = store
+        .transaction(|repositories| repositories.agents(run_id))
+        .map_err(rpc_state_failure)?;
+    let summaries = summarize_agents(&agents);
+    if let Ok(agent_id) = name_or_id.parse::<AgentId>() {
+        summaries
+            .into_iter()
+            .find(|agent| agent.id == agent_id)
+            .ok_or_else(|| {
+                not_found(format!("agent `{name_or_id}` does not exist"))
+            })
+    } else {
+        summaries
+            .into_iter()
+            .find(|agent| agent.name == name_or_id)
+            .ok_or_else(|| {
+                not_found(format!("agent `{name_or_id}` does not exist"))
+            })
+    }
+}
+
+fn summarize_agents(agents: &[AgentRecord]) -> Vec<AgentSummary> {
+    let lead_role = builtin_standard().lead;
+    let mut role_counts = BTreeMap::<&str, usize>::new();
+    agents
+        .iter()
+        .map(|agent| {
+            let ordinal = role_counts.entry(&agent.role).or_default();
+            *ordinal += 1;
+            let name = if agent.role == lead_role && *ordinal == 1 {
+                agent.role.clone()
+            } else {
+                format!("{}-{ordinal}", agent.role)
+            };
+            AgentSummary {
+                id: agent.id,
+                name,
+                role: agent.role.clone(),
+                state: agent.state.to_string(),
+            }
+        })
+        .collect()
+}
+
+fn project_summary(project: ProjectRecord) -> ProjectSummary {
+    ProjectSummary {
+        id: project.id,
+        alias: project.alias,
+        root: project.canonical_path.to_string_lossy().into_owned(),
+        access: "read_write".to_owned(),
+    }
+}
+
+fn project_aliases(projects: &[ProjectRecord]) -> BTreeMap<ProjectId, String> {
+    projects
+        .iter()
+        .map(|project| (project.id, project.alias.clone()))
+        .collect()
+}
+
+fn task_by_id(
+    store: &mut Store,
+    run_id: RunId,
+    task_id: TaskId,
+) -> Result<TaskSummary, RpcFailure> {
+    let (projects, task) = store
+        .transaction(|repositories| {
+            Ok((repositories.projects(run_id)?, repositories.task(task_id)?))
+        })
+        .map_err(rpc_state_failure)?;
+    let task = task
+        .filter(|task| task.run_id == run_id)
+        .ok_or_else(|| not_found(format!("task `{task_id}` does not exist")))?;
+    summarize_task(store, &project_aliases(&projects), task)
+}
+
+fn summarize_tasks(
+    store: &mut Store,
+    projects: &BTreeMap<ProjectId, String>,
+    tasks: Vec<TaskRecord>,
+) -> Result<Vec<TaskSummary>, RpcFailure> {
+    tasks
+        .into_iter()
+        .map(|task| summarize_task(store, projects, task))
+        .collect()
+}
+
+fn summarize_task(
+    store: &mut Store,
+    projects: &BTreeMap<ProjectId, String>,
+    task: TaskRecord,
+) -> Result<TaskSummary, RpcFailure> {
+    let readiness = store
+        .transaction(|repositories| repositories.task_readiness(task.id))
+        .map_err(rpc_state_failure)?;
+    let ready = readiness
+        .as_ref()
+        .is_some_and(crate::tasks::TaskReadiness::is_ready);
+    let unresolved_dependencies = readiness
+        .map(|readiness| readiness.unresolved_dependencies)
+        .unwrap_or_default();
+    let project = projects.get(&task.project_id).cloned().ok_or_else(|| {
+        RpcFailure::new(
+            RpcFailureCode::Internal,
+            format!("task `{}` has no attached target project", task.id),
+        )
+    })?;
+    Ok(TaskSummary {
+        id: task.id,
+        project_id: task.project_id,
+        project,
+        title: task.title,
+        description: task.description,
+        status: task.status,
+        ready,
+        unresolved_dependencies,
+        result: task.result,
+    })
+}
+
+fn task_counts(tasks: &[TaskRecord]) -> TaskCounts {
+    let mut counts = TaskCounts::default();
+    for task in tasks {
+        match task.status {
+            TaskStatus::Open => counts.open += 1,
+            TaskStatus::InProgress => counts.in_progress += 1,
+            TaskStatus::Submitted => counts.submitted += 1,
+            TaskStatus::Closed => counts.closed += 1,
+            TaskStatus::Canceled => counts.canceled += 1,
+        }
+    }
+    counts
+}
+
+fn primary_project(
+    store: &mut Store,
+    run_id: RunId,
+) -> Result<ProjectRecord, RpcFailure> {
+    store
+        .transaction(|repositories| {
+            repositories.project_by_alias(run_id, "primary")
+        })
+        .map_err(rpc_state_failure)?
+        .ok_or_else(|| {
+            RpcFailure::new(
+                RpcFailureCode::Internal,
+                "the run has no primary project",
+            )
+        })
+}
+
+fn available_commands(
+    store: &mut Store,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+) -> Result<Vec<String>, RpcFailure> {
+    let mut commands = vec!["whoami", "prime"];
+    if caller.is_operator() {
+        commands.extend([
+            "status",
+            "task create",
+            "task ready",
+            "task close",
+            "spawn",
+            "send",
+            "logs",
+            "events",
+            "stop",
+        ]);
+    } else {
+        commands.extend(["task ready", "send", "inbox", "finish"]);
+        let agent = agent_record(
+            store,
+            run_id,
+            caller.agent_id().expect("agent caller has an ID"),
+        )?;
+        for (namespace, action, command) in [
+            ("task", "create", "task create"),
+            ("task", "close", "task close"),
+            ("logs", "*", "logs"),
+        ] {
+            if builtin_standard()
+                .authorize(&agent.role, Capability::new(namespace, action))
+                == AuthorizationDecision::Allowed
+            {
+                commands.push(command);
+            }
+        }
+    }
+    Ok(commands.into_iter().map(str::to_owned).collect())
+}
+
+fn event_summary(event: EventRecord) -> Result<EventSummary, RpcFailure> {
+    Ok(EventSummary {
+        id: event.id,
+        sequence: u64::try_from(event.sequence).map_err(|_| {
+            RpcFailure::new(
+                RpcFailureCode::Internal,
+                "event sequence is not positive",
+            )
+        })?,
+        event_type: event.event_type,
+        actor: event.actor,
+        subject: event.subject,
+        payload: event.payload,
+        summary: event.summary,
+        created_at: event.created_at,
+    })
+}
+
+fn safe_relative_path(path: &Path) -> bool {
+    !path.as_os_str().is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn require_transition(
+    result: TaskTransitionResult,
+    task_id: TaskId,
+    action: &str,
+) -> Result<(), RpcFailure> {
+    match result {
+        TaskTransitionResult::Transitioned { .. } => Ok(()),
+        TaskTransitionResult::Rejected(
+            TaskTransitionRejection::TaskNotFound,
+        ) => Err(not_found(format!("task `{task_id}` does not exist"))),
+        TaskTransitionResult::Rejected(
+            TaskTransitionRejection::InvalidStatus { status },
+        ) => Err(conflict(format!(
+            "task `{task_id}` cannot {action} from `{status}`"
+        ))),
+    }
+}
+
+fn drain_fake_events(
+    sessions: &mut AgentSessionSupervisor<FakeProvider>,
+    store: &mut Store,
+    session_id: SessionId,
+    observed_at: i64,
+) -> Result<(), RpcFailure> {
+    while sessions
+        .advance(store, session_id, observed_at)
+        .map_err(rpc_session_failure)?
+        .is_some()
+    {}
+    Ok(())
+}
+
+fn role_launch_mode(mode: RoleMode) -> LaunchMode {
+    match mode {
+        RoleMode::Interactive => LaunchMode::Interactive,
+        RoleMode::Job => LaunchMode::Job,
+    }
+}
+
+fn bootstrap_instruction(run_id: RunId, role: &str) -> String {
+    format!(
+        "You are a {role} agent for Coterie run {run_id}. Run `coterie prime` now for current orchestration context. Follow the repository's AGENTS.md instructions."
+    )
+}
+
+fn mutation_value<T>(outcome: MutationOutcome<T>) -> T {
+    match outcome {
+        MutationOutcome::Applied(value) | MutationOutcome::Replayed(value) => {
+            value
+        }
+    }
+}
+
+fn rpc_timestamp() -> Result<i64, RpcFailure> {
+    unix_timestamp().map_err(|error| {
+        RpcFailure::new(RpcFailureCode::Internal, error.to_string())
+    })
+}
+
+fn rpc_session_failure(error: AgentSessionError) -> RpcFailure {
+    match error {
+        AgentSessionError::MissingCapability { .. }
+        | AgentSessionError::Provider(_) => {
+            RpcFailure::new(RpcFailureCode::Unavailable, error.to_string())
+        }
+        AgentSessionError::State(error) => rpc_state_failure(error),
+        AgentSessionError::Transcript(_)
+        | AgentSessionError::Token(_)
+        | AgentSessionError::ScopeMismatch { .. }
+        | AgentSessionError::UnknownSession { .. } => {
+            RpcFailure::new(RpcFailureCode::Internal, error.to_string())
+        }
+    }
+}
+
+fn rpc_state_failure(error: StoreError) -> RpcFailure {
+    let code = match error {
+        StoreError::OperationConflict { .. }
+        | StoreError::OperationIncomplete { .. }
+        | StoreError::RunNotActive { .. } => RpcFailureCode::Conflict,
+        StoreError::Database(_)
+        | StoreError::EncodeJson(_)
+        | StoreError::ModifiedMigration { .. }
+        | StoreError::UnsupportedSchema { .. }
+        | StoreError::MissingOperationResult { .. }
+        | StoreError::CorruptTaskState { .. }
+        | StoreError::CorruptAssignmentState { .. }
+        | StoreError::CredentialAlreadyRevoked { .. }
+        | StoreError::InvalidSessionTransition { .. }
+        | StoreError::InconsistentSessionLifecycle { .. } => {
+            RpcFailureCode::Internal
+        }
+    };
+    RpcFailure::new(code, error.to_string())
+}
+
+fn invalid_argument(message: impl Into<String>) -> RpcFailure {
+    RpcFailure::new(RpcFailureCode::InvalidArgument, message)
+}
+
+fn not_found(message: impl Into<String>) -> RpcFailure {
+    RpcFailure::new(RpcFailureCode::NotFound, message)
+}
+
+fn conflict(message: impl Into<String>) -> RpcFailure {
+    RpcFailure::new(RpcFailureCode::Conflict, message)
 }
 
 fn authenticate_agent(
@@ -737,7 +2366,7 @@ impl SupervisorClient {
         self.request(RpcRequest::Shutdown { operation_id }).await
     }
 
-    async fn request(
+    pub(crate) async fn request(
         &mut self,
         request: RpcRequest,
     ) -> Result<RpcResponse, SupervisorError> {
@@ -769,7 +2398,7 @@ impl SupervisorClient {
             return Err(SupervisorError::InvalidResponseCorrelation);
         }
         match response.result {
-            RpcResult::Ok(response) => Ok(response),
+            RpcResult::Ok(response) => Ok(*response),
             RpcResult::Err(failure) => Err(failure.into()),
         }
     }
@@ -861,12 +2490,6 @@ async fn serve_connection(
             .await?
             {
                 Ok(caller) => match request.request {
-                    RpcRequest::Ping => (
-                        RpcResult::Ok(RpcResponse::Pong {
-                            run_id: active.run_id,
-                        }),
-                        false,
-                    ),
                     RpcRequest::Shutdown { operation_id } => {
                         if caller.is_operator() {
                             let result =
@@ -874,7 +2497,11 @@ async fn serve_connection(
                                     .await?;
                             let shutting_down = matches!(
                                 result,
-                                RpcResult::Ok(RpcResponse::ShuttingDown { .. })
+                                RpcResult::Ok(ref response)
+                                    if matches!(
+                                        response.as_ref(),
+                                        RpcResponse::ShuttingDown { .. }
+                                    )
                             );
                             (result, shutting_down)
                         } else {
@@ -887,6 +2514,10 @@ async fn serve_connection(
                             )
                         }
                     }
+                    request => (
+                        request_dispatch(&commands, caller, request).await?,
+                        false,
+                    ),
                 },
                 Err(failure) => (RpcResult::Err(failure), false),
             }
@@ -923,6 +2554,13 @@ impl AuthenticatedCaller {
                 let _authenticated_identity = scope;
                 false
             }
+        }
+    }
+
+    fn agent_id(&self) -> Option<AgentId> {
+        match self {
+            Self::Operator => None,
+            Self::Agent(scope) => Some(scope.agent_id),
         }
     }
 }
@@ -987,7 +2625,28 @@ async fn request_shutdown(
         .await
         .map_err(|_| SupervisorError::CommandChannelClosed)?;
     Ok(match receiver.await {
-        Ok(Ok(response)) => RpcResult::Ok(response),
+        Ok(Ok(response)) => RpcResult::Ok(Box::new(response)),
+        Ok(Err(failure)) => RpcResult::Err(failure),
+        Err(_) => return Err(SupervisorError::CommandChannelClosed),
+    })
+}
+
+async fn request_dispatch(
+    commands: &mpsc::Sender<SupervisorCommand>,
+    caller: AuthenticatedCaller,
+    request: RpcRequest,
+) -> Result<RpcResult, SupervisorError> {
+    let (response, receiver) = oneshot::channel();
+    commands
+        .send(SupervisorCommand::Dispatch {
+            caller,
+            request,
+            response,
+        })
+        .await
+        .map_err(|_| SupervisorError::CommandChannelClosed)?;
+    Ok(match receiver.await {
+        Ok(Ok(response)) => RpcResult::Ok(Box::new(response)),
         Ok(Err(failure)) => RpcResult::Err(failure),
         Err(_) => return Err(SupervisorError::CommandChannelClosed),
     })
@@ -1047,10 +2706,20 @@ pub(crate) enum SupervisorError {
     },
     #[error(transparent)]
     Frame(#[from] FrameError),
+    #[error(transparent)]
+    Render(#[from] crate::cli::RenderError),
+    #[error("could not encode a command response: {0}")]
+    StructuredOutput(#[from] serde_json::Error),
     #[error("supervisor rejected the request ({code:?}): {message}")]
     Rejected {
         code: RpcFailureCode,
         message: String,
+    },
+    #[error("operation `{operation_id}` failed: {source}")]
+    Operation {
+        operation_id: OperationId,
+        #[source]
+        source: Box<SupervisorError>,
     },
     #[error("supervisor returned an invalid ownership proof")]
     InvalidProof,
@@ -1084,10 +2753,20 @@ pub(crate) enum SupervisorError {
     },
     #[error("no active run is indexed for this project")]
     NoActiveRun,
-    #[error("invalid private supervisor arguments: {reason}")]
-    InvalidInternalArguments { reason: &'static str },
-    #[error("invalid private supervisor {name} argument")]
-    InvalidIdArgument { name: &'static str },
+    #[error(
+        "the root `--operation-id` option applies only to foreground launch"
+    )]
+    ForegroundOperationIdWithCommand,
+    #[error(
+        "agent identity requires `COTERIE_AGENT_ID`, `COTERIE_SESSION_ID`, and `COTERIE_TOKEN`"
+    )]
+    IncompleteAgentEnvironment,
+    #[error("agent environment variable `{variable}` is invalid")]
+    InvalidAgentEnvironment { variable: &'static str },
+    #[error(
+        "agent environment belongs to run {found}, but this project is attached to {expected}"
+    )]
+    AgentEnvironmentRunMismatch { expected: RunId, found: RunId },
     #[error("run {run_id} and project {project_id} do not match durable state")]
     RunStateMismatch {
         run_id: RunId,
@@ -1142,6 +2821,98 @@ impl SupervisorError {
             _ => false,
         }
     }
+
+    fn for_operation(self, operation_id: OperationId) -> Self {
+        Self::Operation {
+            operation_id,
+            source: Box::new(self),
+        }
+    }
+
+    pub(crate) fn diagnostic(&self) -> crate::cli::Diagnostic {
+        let (error, operation_id) = match self {
+            Self::Operation {
+                operation_id,
+                source,
+            } => (source.as_ref(), Some(*operation_id)),
+            error => (error, None),
+        };
+        let code = match error {
+            Self::Rejected { code, .. } => match code {
+                RpcFailureCode::Unauthenticated => {
+                    crate::cli::ErrorCode::Unauthenticated
+                }
+                RpcFailureCode::PermissionDenied => {
+                    crate::cli::ErrorCode::PermissionDenied
+                }
+                RpcFailureCode::InvalidArgument => {
+                    crate::cli::ErrorCode::InvalidArgument
+                }
+                RpcFailureCode::NotFound => crate::cli::ErrorCode::NotFound,
+                RpcFailureCode::Conflict
+                | RpcFailureCode::RunMismatch
+                | RpcFailureCode::ProjectMismatch => {
+                    crate::cli::ErrorCode::Conflict
+                }
+                RpcFailureCode::Unavailable
+                | RpcFailureCode::ProtocolVersionMismatch => {
+                    crate::cli::ErrorCode::Unavailable
+                }
+                RpcFailureCode::HandshakeRequired
+                | RpcFailureCode::InvalidRequestSequence
+                | RpcFailureCode::Internal => crate::cli::ErrorCode::Internal,
+            },
+            Self::NoActiveRun => crate::cli::ErrorCode::NotFound,
+            Self::ForegroundOperationIdWithCommand => {
+                crate::cli::ErrorCode::InvalidArgument
+            }
+            Self::IncompleteAgentEnvironment
+            | Self::InvalidAgentEnvironment { .. }
+            | Self::AgentEnvironmentRunMismatch { .. } => {
+                crate::cli::ErrorCode::Unauthenticated
+            }
+            Self::State(
+                StoreError::OperationConflict { .. }
+                | StoreError::OperationIncomplete { .. }
+                | StoreError::RunNotActive { .. },
+            ) => crate::cli::ErrorCode::Conflict,
+            Self::State(_) | Self::RunStateMismatch { .. } => {
+                crate::cli::ErrorCode::CorruptState
+            }
+            Self::SocketIo { .. }
+            | Self::Frame(_)
+            | Self::Spawn { .. }
+            | Self::StartupTimeout { .. }
+            | Self::ShutdownTimeout { .. } => {
+                crate::cli::ErrorCode::Unavailable
+            }
+            Self::Project(_)
+            | Self::Render(_)
+            | Self::StructuredOutput(_)
+            | Self::InvalidProof
+            | Self::InvalidResponseCorrelation
+            | Self::UnexpectedMessage { .. }
+            | Self::RequestIdExhausted
+            | Self::CurrentDirectory(_)
+            | Self::CurrentExecutable(_)
+            | Self::ChildStatus(_)
+            | Self::StateFileIo { .. }
+            | Self::UnsafeSocketPath { .. }
+            | Self::SystemClock(_)
+            | Self::TimestampOverflow
+            | Self::MissingChildStderr
+            | Self::CommandChannelClosed
+            | Self::ShutdownChannelClosed
+            | Self::SocketPathTooLong { .. } => crate::cli::ErrorCode::Internal,
+            Self::Operation { .. } => {
+                unreachable!("operation errors are unwrapped")
+            }
+        };
+        let diagnostic = crate::cli::Diagnostic::new(code, error.to_string());
+        operation_id.map_or(diagnostic.clone(), |operation_id| {
+            diagnostic.for_operation(operation_id)
+        })
+    }
 }
 
 impl From<RpcFailure> for SupervisorError {
@@ -1163,23 +2934,29 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        SupervisorClient, SupervisorCommand, SupervisorError, persist_shutdown,
+        AgentLaunch, SupervisorClient, SupervisorCommand, SupervisorError,
+        drain_fake_events, persist_shutdown, runtime_sessions,
         serve_connection, serve_listener, validate_handshake,
         validate_socket_path,
     };
     use crate::auth::{AgentToken, SessionScope};
-    use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
+    use crate::id::{
+        AgentId, AssignmentId, EventId, OperationId, ProjectId, RunId,
+        SessionId, TaskId,
+    };
     use crate::project::{ActiveRunEntry, ProjectIdentity};
     use crate::protocol::{
-        ClientMessage, ConnectionChannel, HandshakeRequest,
-        RequestAuthentication, RpcFailureCode, RpcResponse, ServerMessage,
-        VersionedRequest, read_frame, write_frame,
+        ClientMessage, ConnectionChannel, FinishStatus, HandshakeRequest,
+        RequestAuthentication, RpcFailureCode, RpcRequest, RpcResponse,
+        ServerMessage, VersionedRequest, read_frame, write_frame,
     };
-    use crate::providers::LifecycleState;
+    use crate::providers::{LaunchMode, LifecycleState};
     use crate::state::{
-        AgentRecord, RunRecord, SessionCredentialRecord, SessionRecord, Store,
-        StoreError,
+        AgentRecord, ClaimTaskMutation, DependencyRecord, EventRecord,
+        ProjectRecord, RunRecord, SessionCredentialRecord, SessionRecord,
+        Store, StoreError, TaskRecord,
     };
+    use crate::tasks::TaskStatus;
 
     const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
     const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -1202,6 +2979,22 @@ mod tests {
             .parse::<OperationId>()
             .expect("valid operation ID");
         let command_server = tokio::spawn(async move {
+            match command_rx
+                .recv()
+                .await
+                .expect("the ping command should arrive")
+            {
+                SupervisorCommand::Dispatch {
+                    request: RpcRequest::Ping,
+                    response,
+                    ..
+                } => response
+                    .send(Ok(RpcResponse::Pong {
+                        run_id: server_entry.run_id,
+                    }))
+                    .expect("the connection should await its ping response"),
+                _ => panic!("the first command should be the typed ping"),
+            }
             let (operation_id, response) = match command_rx
                 .recv()
                 .await
@@ -1215,6 +3008,9 @@ mod tests {
                     panic!(
                         "the operator ping must not use agent authentication"
                     )
+                }
+                SupervisorCommand::Dispatch { .. } => {
+                    panic!("the shutdown request must use its dedicated path")
                 }
             };
             response
@@ -1447,8 +3243,17 @@ mod tests {
             })
             .expect("the active session should be inserted");
         let served_entry = active.clone();
+        let run_state_directory = fixture.join("run");
+        let mut sessions = runtime_sessions(&run_state_directory);
         let server = tokio::spawn(async move {
-            serve_listener(listener, served_entry, &mut store).await
+            serve_listener(
+                listener,
+                served_entry,
+                &run_state_directory,
+                &mut store,
+                &mut sessions,
+            )
+            .await
         });
 
         let mut wrong_token_client = SupervisorClient::connect_agent_at(
@@ -1499,6 +3304,331 @@ mod tests {
             SupervisorClient::connect_operator_at(&socket, &active)
                 .await
                 .expect("the operator channel handshake should succeed");
+        operator
+            .shutdown(OperationId::generate())
+            .await
+            .expect("the operator should stop the run");
+        server
+            .await
+            .expect("the server task should finish")
+            .expect("the listener should shut down cleanly");
+    }
+
+    #[tokio::test]
+    async fn authenticated_agent_reads_its_inbox_finishes_and_the_operator_closes()
+     {
+        let fixture = TestDirectory::new();
+        let socket = fixture.join("supervisor.sock");
+        let project_path = fixture.join("project");
+        fs::create_dir(&project_path).expect("the project should be created");
+        let active = entry(&project_path);
+        let listener = UnixListener::bind(&socket)
+            .expect("the fixture socket should bind");
+        let agent_id = AGENT_ID.parse::<AgentId>().expect("valid agent ID");
+        let session_id =
+            SESSION_ID.parse::<SessionId>().expect("valid session ID");
+        let task_id = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAZ"
+            .parse::<TaskId>()
+            .expect("valid task ID");
+        let assignment_id = "ca-01ARZ3NDEKTSV4RRFFQ69G5FB0"
+            .parse::<AssignmentId>()
+            .expect("valid assignment ID");
+        let downstream_id = "ct-01ARZ3NDEKTSV4RRFFQ69G5FB2"
+            .parse::<TaskId>()
+            .expect("valid downstream task ID");
+        let run_state_directory = fixture.join("run");
+        fs::create_dir(&run_state_directory)
+            .expect("the run directory should be created");
+        let mut store = Store::open(&run_state_directory.join("state.sqlite3"))
+            .expect("the store should open");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: active.run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_project(&ProjectRecord {
+                    id: active.project_id,
+                    run_id: active.run_id,
+                    alias: "primary".to_owned(),
+                    original_path: project_path.clone(),
+                    canonical_path: project_path.clone(),
+                    identity: active.project_identity.clone(),
+                    is_primary: true,
+                    attached_at: 10,
+                })?;
+                repositories.insert_task(&TaskRecord {
+                    id: task_id,
+                    run_id: active.run_id,
+                    project_id: active.project_id,
+                    group_id: None,
+                    title: "Implement parser".to_owned(),
+                    description: "Add parsing tests first.".to_owned(),
+                    status: TaskStatus::Open,
+                    result: None,
+                    created_at: 11,
+                    updated_at: 11,
+                })?;
+                repositories.insert_task(&TaskRecord {
+                    id: downstream_id,
+                    run_id: active.run_id,
+                    project_id: active.project_id,
+                    group_id: None,
+                    title: "Document parser".to_owned(),
+                    description: "Document the accepted parser.".to_owned(),
+                    status: TaskStatus::Open,
+                    result: None,
+                    created_at: 11,
+                    updated_at: 11,
+                })?;
+                repositories.insert_dependency(&DependencyRecord {
+                    run_id: active.run_id,
+                    task_id: downstream_id,
+                    dependency_task_id: task_id,
+                    created_at: 11,
+                })?;
+                repositories.insert_event(&EventRecord {
+                    id: "ce-01ARZ3NDEKTSV4RRFFQ69G5FB3"
+                        .parse::<EventId>()
+                        .expect("valid event ID"),
+                    run_id: active.run_id,
+                    sequence: 1,
+                    event_type: "test.fixture".to_owned(),
+                    actor: "operator".to_owned(),
+                    subject: task_id.to_string(),
+                    project_id: Some(active.project_id),
+                    agent_id: None,
+                    task_id: Some(task_id),
+                    operation_id: None,
+                    correlation_id: None,
+                    causation_id: None,
+                    payload: serde_json::json!({"fixture": true}),
+                    summary: "Fixture event.".to_owned(),
+                    created_at: 11,
+                })
+            })
+            .expect("the run prerequisites should be inserted");
+        let mut sessions = runtime_sessions(&run_state_directory);
+        let launch = AgentLaunch {
+            scope: SessionScope {
+                run_id: active.run_id,
+                agent_id,
+                session_id,
+                generation: 0,
+            },
+            role: "worker".to_owned(),
+            mode: LaunchMode::Job,
+            working_directory: project_path,
+            bootstrap_instruction: "Run `coterie prime`.".to_owned(),
+            created_at: 12,
+        };
+        let launched = sessions
+            .launch(&mut store, &launch)
+            .expect("the fake worker should launch");
+        drain_fake_events(&mut sessions, &mut store, session_id, 12)
+            .expect("the fake worker should become running");
+        store
+            .claim_task(&ClaimTaskMutation {
+                operation_id: "co-01ARZ3NDEKTSV4RRFFQ69G5FB1"
+                    .parse()
+                    .expect("valid operation ID"),
+                run_id: active.run_id,
+                actor_agent_id: None,
+                task_id,
+                agent_id,
+                assignment_id,
+                claimed_at: 13,
+            })
+            .expect("the task should be claimed");
+        store
+            .transaction(|repositories| {
+                repositories
+                    .associate_assignment_session(assignment_id, session_id)
+            })
+            .expect("the assignment should own the session");
+
+        let served_entry = active.clone();
+        let server = tokio::spawn(async move {
+            serve_listener(
+                listener,
+                served_entry,
+                &run_state_directory,
+                &mut store,
+                &mut sessions,
+            )
+            .await
+        });
+        let mut operator =
+            SupervisorClient::connect_operator_at(&socket, &active)
+                .await
+                .expect("the operator should connect");
+        assert!(matches!(
+            operator
+                .request(RpcRequest::Events {
+                    after: 0,
+                    limit: 100,
+                })
+                .await,
+            Ok(RpcResponse::Events {
+                ref events,
+                next_cursor: 1,
+            }) if events.len() == 1
+                && events[0].event_type == "test.fixture"
+                && events[0].payload == serde_json::json!({"fixture": true})
+        ));
+        let sent = operator
+            .request(RpcRequest::Send {
+                operation_id: OperationId::generate(),
+                recipient: "worker-1".to_owned(),
+                message: "Check the parser edge cases.".to_owned(),
+            })
+            .await
+            .expect("the operator message should be durable");
+        assert!(matches!(sent, RpcResponse::MessageSent { sequence: 1, .. }));
+
+        let mut agent = SupervisorClient::connect_agent_at(
+            &socket,
+            &active,
+            agent_id,
+            session_id,
+            launched.token,
+        )
+        .await
+        .expect("the worker should connect");
+        assert!(matches!(
+            agent.request(RpcRequest::Whoami).await,
+            Ok(RpcResponse::Identity {
+                channel: crate::protocol::CallerChannel::Agent,
+                agent: Some(ref agent),
+                ..
+            }) if agent.name == "worker-1"
+        ));
+        assert!(matches!(
+            agent.request(RpcRequest::Prime).await,
+            Ok(RpcResponse::Prime {
+                identity: crate::protocol::CallerSummary {
+                    channel: crate::protocol::CallerChannel::Agent,
+                    ..
+                },
+                active_task: Some(ref task),
+                ref commands,
+                ..
+            }) if task.id == task_id && commands.iter().any(|command| command == "finish")
+        ));
+        assert!(matches!(
+            agent
+                .request(RpcRequest::Spawn {
+                    operation_id: OperationId::generate(),
+                    role: "worker".to_owned(),
+                    task_id,
+                })
+                .await,
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::PermissionDenied,
+                ..
+            })
+        ));
+        assert!(matches!(
+            agent
+                .request(RpcRequest::Events {
+                    after: 0,
+                    limit: 100,
+                })
+                .await,
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::PermissionDenied,
+                ..
+            })
+        ));
+        assert!(matches!(
+            agent.request(RpcRequest::Status).await,
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::PermissionDenied,
+                ..
+            })
+        ));
+        assert!(matches!(
+            agent.request(RpcRequest::Inbox { after: 0 }).await,
+            Ok(RpcResponse::Inbox {
+                ref messages,
+                next_cursor: 1,
+            }) if messages.len() == 1
+                && messages[0].body == "Check the parser edge cases."
+        ));
+        let finish_operation = OperationId::generate();
+        let finish_request = || RpcRequest::Finish {
+            operation_id: finish_operation,
+            status: FinishStatus::Completed,
+            summary: "Parser and tests implemented.".to_owned(),
+        };
+        let finished = agent
+            .request(finish_request())
+            .await
+            .expect("the worker should finish its assignment");
+        assert!(matches!(
+            finished,
+            RpcResponse::AssignmentFinished { ref task, .. }
+                if task.status == TaskStatus::Submitted
+        ));
+        assert_eq!(
+            agent
+                .request(finish_request())
+                .await
+                .expect("the finish retry should replay"),
+            finished
+        );
+        let close_operation = OperationId::generate();
+        let close_request = || RpcRequest::TaskClose {
+            operation_id: close_operation,
+            task_id,
+            summary: "Integrated and verified.".to_owned(),
+        };
+        let closed = operator
+            .request(close_request())
+            .await
+            .expect("the operator should close the task");
+        assert!(matches!(
+            closed,
+            RpcResponse::TaskClosed { ref task, .. }
+                if task.status == TaskStatus::Closed
+        ));
+        assert_eq!(
+            operator
+                .request(close_request())
+                .await
+                .expect("the closure retry should replay"),
+            closed
+        );
+        assert!(matches!(
+            operator.request(RpcRequest::TaskReady).await,
+            Ok(RpcResponse::ReadyTasks { ref tasks })
+                if tasks.len() == 1 && tasks[0].id == downstream_id
+        ));
+        let primed_tasks = match operator
+            .request(RpcRequest::Prime)
+            .await
+            .expect("prime should reconstruct the closed task result")
+        {
+            RpcResponse::Prime { tasks, .. } => tasks,
+            response => panic!("unexpected prime response: {response:?}"),
+        };
+        let closed_task = primed_tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .expect("prime should retain the closed task");
+        assert_eq!(closed_task.status, TaskStatus::Closed);
+        assert_eq!(
+            closed_task.result,
+            Some(serde_json::json!({
+                "assignment_result": {
+                    "status": "completed",
+                    "summary": "Parser and tests implemented.",
+                },
+                "validation_summary": "Integrated and verified.",
+            }))
+        );
         operator
             .shutdown(OperationId::generate())
             .await

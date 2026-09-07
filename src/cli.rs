@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
+use std::path::PathBuf;
 
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use schemars::generate::{Contract, SchemaSettings};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Serialize, Serializer};
@@ -11,6 +13,193 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::id::OperationId;
+
+/// Coterie's public command-line interface and private process entrypoints.
+#[derive(Debug, Parser)]
+#[command(
+    name = "coterie",
+    version,
+    about = "Project-native orchestration for coding agents"
+)]
+pub(crate) struct Arguments {
+    /// Emit the versioned machine-readable response.
+    #[arg(long, global = true)]
+    pub(crate) json: bool,
+
+    /// Reuse this operation ID when retrying a foreground launch.
+    #[arg(long)]
+    pub(crate) operation_id: Option<OperationId>,
+
+    #[command(subcommand)]
+    pub(crate) command: Option<Command>,
+}
+
+/// One operator- or agent-facing action.
+#[derive(Debug, Subcommand)]
+pub(crate) enum Command {
+    /// Inspect the active run, agents, and tasks.
+    Status,
+    /// Report the authenticated caller's identity.
+    Whoami,
+    /// Reconstruct the caller's current orchestration context.
+    Prime,
+    /// Create, inspect, or close durable tasks.
+    Task(TaskArguments),
+    /// Launch one configured role for a ready task.
+    Spawn(SpawnArguments),
+    /// Finish the caller's active assignment.
+    Finish(FinishArguments),
+    /// Send a durable message to another agent.
+    Send(SendArguments),
+    /// Read durable messages addressed to the caller.
+    Inbox(InboxArguments),
+    /// Read an agent's provider transcript.
+    Logs(LogsArguments),
+    /// Read the run's typed event stream.
+    Events(EventsArguments),
+    /// Stop the active run safely.
+    Stop(MutationArguments),
+
+    #[command(name = "__supervisor", hide = true)]
+    Supervisor(PrivateSupervisorArguments),
+    #[command(name = "__supervisor-connect", hide = true)]
+    SupervisorConnect,
+    #[command(name = "__supervisor-shutdown", hide = true)]
+    SupervisorShutdown,
+}
+
+/// Task commands.
+#[derive(Debug, Args)]
+pub(crate) struct TaskArguments {
+    #[command(subcommand)]
+    pub(crate) command: TaskCommand,
+}
+
+/// One task-graph action.
+#[derive(Debug, Subcommand)]
+pub(crate) enum TaskCommand {
+    /// Create a task in an attached project.
+    Create(TaskCreateArguments),
+    /// List tasks that can be claimed now.
+    Ready,
+    /// Close a submitted task after validation.
+    Close(TaskCloseArguments),
+}
+
+/// Common options for idempotent mutations.
+#[derive(Debug, Args)]
+pub(crate) struct MutationArguments {
+    /// Reuse this operation ID when retrying an uncertain mutation.
+    #[arg(long)]
+    pub(crate) operation_id: Option<OperationId>,
+}
+
+/// Inputs for `task create`.
+#[derive(Debug, Args)]
+pub(crate) struct TaskCreateArguments {
+    /// A concise task title.
+    pub(crate) title: String,
+    /// A longer task description. Defaults to the title.
+    #[arg(long)]
+    pub(crate) description: Option<String>,
+    /// The attached target project's alias.
+    #[arg(long, default_value = "primary")]
+    pub(crate) project: String,
+    /// An optional task-group name.
+    #[arg(long)]
+    pub(crate) group: Option<String>,
+    /// A task that must close before this task becomes ready.
+    #[arg(long = "after")]
+    pub(crate) dependencies: Vec<crate::id::TaskId>,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
+}
+
+/// Inputs for `task close`.
+#[derive(Debug, Args)]
+pub(crate) struct TaskCloseArguments {
+    pub(crate) task_id: crate::id::TaskId,
+    /// A concise account of the validation performed.
+    #[arg(long)]
+    pub(crate) summary: String,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
+}
+
+/// Inputs for `spawn`.
+#[derive(Debug, Args)]
+pub(crate) struct SpawnArguments {
+    /// A role declared by the active archetype.
+    pub(crate) role: String,
+    /// The ready task assigned to the new agent.
+    #[arg(long)]
+    pub(crate) task: crate::id::TaskId,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
+}
+
+/// Inputs for `finish`.
+#[derive(Debug, Args)]
+pub(crate) struct FinishArguments {
+    #[arg(long, value_enum)]
+    pub(crate) status: FinishStatus,
+    #[arg(long)]
+    pub(crate) summary: String,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
+}
+
+/// The assignment outcome reported by an agent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum FinishStatus {
+    Completed,
+    Failed,
+}
+
+/// Inputs for `send`.
+#[derive(Debug, Args)]
+pub(crate) struct SendArguments {
+    /// An agent ID or run-local agent name.
+    pub(crate) recipient: String,
+    /// Message text, passed as data without shell interpretation.
+    pub(crate) message: String,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
+}
+
+/// Inputs for `inbox`.
+#[derive(Debug, Args)]
+pub(crate) struct InboxArguments {
+    /// Return only messages after this recipient-local sequence.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) after: u64,
+}
+
+/// Inputs for `logs`.
+#[derive(Debug, Args)]
+pub(crate) struct LogsArguments {
+    /// An agent ID or run-local agent name.
+    pub(crate) agent: String,
+}
+
+/// Inputs for `events`.
+#[derive(Debug, Args)]
+pub(crate) struct EventsArguments {
+    /// Return only events after this run-local sequence.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) after: u64,
+    /// Bound the number of returned events.
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+    pub(crate) limit: u16,
+}
+
+/// The private child-supervisor invocation.
+#[derive(Debug, Args)]
+pub(crate) struct PrivateSupervisorArguments {
+    pub(crate) run_id: crate::id::RunId,
+    pub(crate) project_id: crate::id::ProjectId,
+    pub(crate) project_path: PathBuf,
+}
 
 /// The schema version emitted by the programmatic CLI interface.
 const OUTPUT_SCHEMA_VERSION: u16 = 1;
@@ -64,6 +253,10 @@ pub(crate) enum ExitCategory {
 
 impl ExitCategory {
     /// Every stable category in numeric order.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "verified by golden tests")
+    )]
     pub(crate) const ALL: [Self; 8] = [
         Self::Success,
         Self::Internal,
@@ -83,6 +276,10 @@ impl ExitCategory {
 
     /// Returns the stable machine-readable name for this category.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "verified by golden tests")
+    )]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Success => "success",
@@ -106,6 +303,13 @@ impl From<ExitCategory> for std::process::ExitCode {
 /// A stable, machine-readable CLI error code.
 #[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "all stable error codes remain in the v1 contract"
+    )
+)]
 pub(crate) enum ErrorCode {
     /// A command-line argument or request value is invalid.
     InvalidArgument,
@@ -167,6 +371,7 @@ impl Diagnostic {
 
     /// Adds one machine-readable detail to the diagnostic.
     #[must_use]
+    #[cfg_attr(not(test), allow(dead_code, reason = "used by golden tests"))]
     pub(crate) fn with_detail(
         mut self,
         key: impl Into<String>,
@@ -237,6 +442,7 @@ struct ErrorBody<'a> {
 
 /// A generated schema for one versioned CLI response shape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code, reason = "verified by golden tests"))]
 pub(crate) enum OutputSchema {
     /// A successful read-only response.
     Success,
@@ -251,6 +457,10 @@ pub(crate) enum OutputSchema {
 impl OutputSchema {
     /// Generates the JSON Schema from the response's typed representation.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "used by schema golden tests")
+    )]
     pub(crate) fn generate(self) -> Schema {
         match self {
             Self::Success => {
@@ -267,6 +477,7 @@ impl OutputSchema {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code, reason = "used by schema golden tests"))]
 fn generated_schema_for<T: JsonSchema + ?Sized>() -> Schema {
     SchemaSettings::draft2020_12()
         .with(|settings| settings.contract = Contract::Serialize)
@@ -341,6 +552,22 @@ where
     Ok(ExitCategory::Success)
 }
 
+/// Writes a human-readable successful response to standard output's writer.
+pub(crate) fn render_human_success<T, Stdout, Stderr>(
+    stdout: &mut Stdout,
+    _stderr: &mut Stderr,
+    data: &T,
+) -> Result<ExitCategory, RenderError>
+where
+    T: Serialize + ?Sized,
+    Stdout: Write,
+    Stderr: Write,
+{
+    serde_json::to_writer_pretty(&mut *stdout, data)?;
+    stdout.write_all(b"\n")?;
+    Ok(ExitCategory::Success)
+}
+
 /// Writes a structured diagnostic to standard error's writer.
 pub(crate) fn render_json_error<Stdout, Stderr>(
     _stdout: &mut Stdout,
@@ -374,6 +601,20 @@ where
             },
         )?;
     }
+    Ok(diagnostic.exit_category())
+}
+
+/// Writes a human-readable diagnostic to standard error's writer.
+pub(crate) fn render_human_error<Stdout, Stderr>(
+    _stdout: &mut Stdout,
+    stderr: &mut Stderr,
+    diagnostic: &Diagnostic,
+) -> Result<ExitCategory, RenderError>
+where
+    Stdout: Write,
+    Stderr: Write,
+{
+    writeln!(stderr, "coterie: {}", diagnostic.message)?;
     Ok(diagnostic.exit_category())
 }
 

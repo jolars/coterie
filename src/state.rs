@@ -89,6 +89,10 @@ pub(crate) enum StoreError {
     #[error("task `{id}` has corrupt lifecycle state: {reason}")]
     CorruptTaskState { id: TaskId, reason: String },
 
+    /// An assignment cannot be associated with the requested live session.
+    #[error("assignment `{id}` has corrupt lifecycle state: {reason}")]
+    CorruptAssignmentState { id: AssignmentId, reason: String },
+
     /// Orderly shutdown did not find the expected active run.
     #[error("run `{id}` is not active during orderly shutdown")]
     RunNotActive { id: RunId },
@@ -833,6 +837,58 @@ impl Repositories<'_, '_> {
             .optional()?)
     }
 
+    pub(crate) fn project_by_alias(
+        &self,
+        run_id: RunId,
+        alias: &str,
+    ) -> Result<Option<ProjectRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, alias, original_path, canonical_path, identity_json, \
+                        is_primary, attached_at \
+                 FROM projects WHERE run_id = ?1 AND alias = ?2",
+                params![run_id, alias],
+                |row| {
+                    Ok(ProjectRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        alias: row.get(2)?,
+                        original_path: decode_path(row, 3)?,
+                        canonical_path: decode_path(row, 4)?,
+                        identity: decode_json(row, 5)?,
+                        is_primary: row.get(6)?,
+                        attached_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn projects(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<ProjectRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT id, run_id, alias, original_path, canonical_path, identity_json, \
+                    is_primary, attached_at \
+             FROM projects WHERE run_id = ?1 ORDER BY is_primary DESC, alias, id",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok(ProjectRecord {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                alias: row.get(2)?,
+                original_path: decode_path(row, 3)?,
+                canonical_path: decode_path(row, 4)?,
+                identity: decode_json(row, 5)?,
+                is_primary: row.get(6)?,
+                attached_at: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub(crate) fn insert_agent(
         &self,
         agent: &AgentRecord,
@@ -876,6 +932,27 @@ impl Repositories<'_, '_> {
             .optional()?)
     }
 
+    pub(crate) fn agents(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<AgentRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT id, run_id, role, generation, state, created_at \
+             FROM agents WHERE run_id = ?1 ORDER BY created_at, rowid",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok(AgentRecord {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                role: row.get(2)?,
+                generation: row.get(3)?,
+                state: decode_lifecycle(row, 4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub(crate) fn insert_session(
         &self,
         session: &SessionRecord,
@@ -911,6 +988,36 @@ impl Repositories<'_, '_> {
                         created_at, ended_at \
                  FROM sessions WHERE id = ?1",
                 [id],
+                |row| {
+                    Ok(SessionRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        agent_id: row.get(2)?,
+                        generation: row.get(3)?,
+                        provider: row.get(4)?,
+                        state: decode_lifecycle(row, 5)?,
+                        transcript_path: decode_path(row, 6)?,
+                        created_at: row.get(7)?,
+                        ended_at: row.get(8)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn latest_session_for_agent(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+    ) -> Result<Option<SessionRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, agent_id, generation, provider, state, transcript_path, \
+                        created_at, ended_at \
+                 FROM sessions WHERE run_id = ?1 AND agent_id = ?2 \
+                 ORDER BY generation DESC LIMIT 1",
+                params![run_id, agent_id],
                 |row| {
                     Ok(SessionRecord {
                         id: row.get(0)?,
@@ -1121,6 +1228,42 @@ impl Repositories<'_, '_> {
             .optional()?)
     }
 
+    pub(crate) fn task_group_by_name(
+        &self,
+        run_id: RunId,
+        name: &str,
+    ) -> Result<Option<TaskGroupRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, name, created_at FROM task_groups \
+                 WHERE run_id = ?1 AND name = ?2 ORDER BY id LIMIT 1",
+                params![run_id, name],
+                |row| {
+                    Ok(TaskGroupRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        name: row.get(2)?,
+                        created_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn insert_named_task_group(
+        &self,
+        run_id: RunId,
+        name: &str,
+        created_at: i64,
+    ) -> Result<i64, StoreError> {
+        self.transaction.execute(
+            "INSERT INTO task_groups (run_id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![run_id, name, created_at],
+        )?;
+        Ok(self.transaction.last_insert_rowid())
+    }
+
     pub(crate) fn insert_task(
         &self,
         task: &TaskRecord,
@@ -1253,6 +1396,32 @@ impl Repositories<'_, '_> {
                      AND dependency.status <> 'closed' \
                ) \
              ORDER BY candidate.created_at, candidate.id",
+        )?;
+        let rows = statement.query_map([run_id], |row| {
+            Ok(TaskRecord {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                project_id: row.get(2)?,
+                group_id: row.get(3)?,
+                title: row.get(4)?,
+                description: row.get(5)?,
+                status: row.get(6)?,
+                result: decode_optional_json(row, 7)?,
+                created_at: row.get(8)?,
+                updated_at: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn tasks(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<TaskRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT id, run_id, project_id, group_id, title, description, status, \
+                    result_json, created_at, updated_at \
+             FROM tasks WHERE run_id = ?1 ORDER BY created_at, id",
         )?;
         let rows = statement.query_map([run_id], |row| {
             Ok(TaskRecord {
@@ -1561,7 +1730,7 @@ impl Repositories<'_, '_> {
             .optional()?)
     }
 
-    fn compare_and_set_claim(
+    pub(crate) fn compare_and_set_claim(
         &self,
         claim: &ClaimTaskMutation,
     ) -> Result<ClaimTaskResult, StoreError> {
@@ -1771,6 +1940,91 @@ impl Repositories<'_, '_> {
             .optional()?)
     }
 
+    pub(crate) fn active_assignment_for_agent(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+    ) -> Result<Option<AssignmentRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, task_id, agent_id, session_id, claim_id, generation, \
+                        state, summary, created_at, completed_at \
+                 FROM assignments WHERE run_id = ?1 AND agent_id = ?2 \
+                   AND completed_at IS NULL",
+                params![run_id, agent_id],
+                |row| {
+                    Ok(AssignmentRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        task_id: row.get(2)?,
+                        agent_id: row.get(3)?,
+                        session_id: row.get(4)?,
+                        claim_id: row.get(5)?,
+                        generation: row.get(6)?,
+                        state: row.get(7)?,
+                        summary: row.get(8)?,
+                        created_at: row.get(9)?,
+                        completed_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn assignment_for_agent_task(
+        &self,
+        run_id: RunId,
+        agent_id: AgentId,
+        task_id: TaskId,
+    ) -> Result<Option<AssignmentRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, task_id, agent_id, session_id, claim_id, generation, \
+                        state, summary, created_at, completed_at \
+                 FROM assignments WHERE run_id = ?1 AND agent_id = ?2 AND task_id = ?3 \
+                 ORDER BY created_at DESC, id DESC LIMIT 1",
+                params![run_id, agent_id, task_id],
+                |row| {
+                    Ok(AssignmentRecord {
+                        id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        task_id: row.get(2)?,
+                        agent_id: row.get(3)?,
+                        session_id: row.get(4)?,
+                        claim_id: row.get(5)?,
+                        generation: row.get(6)?,
+                        state: row.get(7)?,
+                        summary: row.get(8)?,
+                        created_at: row.get(9)?,
+                        completed_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn associate_assignment_session(
+        &self,
+        assignment_id: AssignmentId,
+        session_id: SessionId,
+    ) -> Result<(), StoreError> {
+        let changed = self.transaction.execute(
+            "UPDATE assignments SET session_id = ?2 \
+             WHERE id = ?1 AND session_id IS NULL AND completed_at IS NULL",
+            params![assignment_id, session_id],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StoreError::CorruptAssignmentState {
+                id: assignment_id,
+                reason: format!("cannot accept session `{session_id}`"),
+            })
+        }
+    }
+
     pub(crate) fn insert_message(
         &self,
         message: &MessageRecord,
@@ -1819,6 +2073,49 @@ impl Repositories<'_, '_> {
                 },
             )
             .optional()?)
+    }
+
+    pub(crate) fn next_message_sequence(
+        &self,
+        run_id: RunId,
+        recipient_agent_id: AgentId,
+    ) -> Result<i64, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM messages \
+             WHERE run_id = ?1 AND recipient_agent_id = ?2",
+            params![run_id, recipient_agent_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn messages_after(
+        &self,
+        run_id: RunId,
+        recipient_agent_id: AgentId,
+        after: i64,
+    ) -> Result<Vec<MessageRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT id, run_id, sender_agent_id, recipient_agent_id, sequence, body, \
+                    created_at, acknowledged_at \
+             FROM messages WHERE run_id = ?1 AND recipient_agent_id = ?2 \
+               AND sequence > ?3 ORDER BY sequence",
+        )?;
+        let rows = statement.query_map(
+            params![run_id, recipient_agent_id, after],
+            |row| {
+                Ok(MessageRecord {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    sender_agent_id: row.get(2)?,
+                    recipient_agent_id: row.get(3)?,
+                    sequence: row.get(4)?,
+                    body: row.get(5)?,
+                    created_at: row.get(6)?,
+                    acknowledged_at: row.get(7)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     pub(crate) fn insert_workspace(
@@ -1942,6 +2239,42 @@ impl Repositories<'_, '_> {
                 },
             )
             .optional()?)
+    }
+
+    pub(crate) fn events_after(
+        &self,
+        run_id: RunId,
+        after: i64,
+        limit: u16,
+    ) -> Result<Vec<EventRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT id, run_id, sequence, event_type, actor, subject, project_id, agent_id, \
+                    task_id, operation_id, correlation_id, causation_id, payload_json, \
+                    summary, created_at \
+             FROM events WHERE run_id = ?1 AND sequence > ?2 \
+             ORDER BY sequence LIMIT ?3",
+        )?;
+        let rows =
+            statement.query_map(params![run_id, after, limit], |row| {
+                Ok(EventRecord {
+                    id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    sequence: row.get(2)?,
+                    event_type: row.get(3)?,
+                    actor: row.get(4)?,
+                    subject: row.get(5)?,
+                    project_id: row.get(6)?,
+                    agent_id: row.get(7)?,
+                    task_id: row.get(8)?,
+                    operation_id: row.get(9)?,
+                    correlation_id: row.get(10)?,
+                    causation_id: row.get(11)?,
+                    payload: decode_json(row, 12)?,
+                    summary: row.get(13)?,
+                    created_at: row.get(14)?,
+                })
+            })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 

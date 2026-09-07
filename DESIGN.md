@@ -255,6 +255,7 @@ capabilities = [
   "spawn:reviewer",
   "send:*",
   "task:*",
+  "logs:*",
   "project:attach",
   "workspace:integrate",
 ]
