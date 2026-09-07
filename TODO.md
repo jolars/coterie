@@ -159,7 +159,7 @@ later milestones build on.
   tests pass. CI never requires networked or account-authenticated Codex
   runs.
 - [ ] Merge the first Versionary release PR only after every MVP criterion is
-  satisfied; publish that release as `v0.1.0`.
+  satisfied; publish that release as `v0.2.0`.
 
 The MVP intentionally excludes attached projects, cross-project dependencies,
 external configuration layers, provenance and lock files, live steering,
