@@ -227,9 +227,17 @@ workspace whose durable creation intent was interrupted, resumes incomplete
 spawn and integration operations, and rechecks session state. Each external
 operation records its reconciliation state, attempts, last error, and last
 attempt time. A vanished worker becomes `lost`; a process Coterie cannot prove
-belongs to the recorded generation remains `unknown` and is neither adopted nor
+belongs to the recorded run and generation remains `unknown` and is neither adopted nor
 killed. Tasks, dependencies, operations, messages, events, transcripts, and
 recoverable workspaces remain available.
+
+Sessions, assignments, workspaces, and integration intents retain their owning
+run and generation. Replacing a session fences its old credentials, queued
+requests, provider output, and exit observations. A new session cannot finish an
+older generation's assignment or create or integrate its workspace. Such work
+remains available for inspection. Recovery adopts a provider handle only when
+its provider identity and complete session scope match the current durable
+ownership; a PID alone does not establish that proof.
 
 Coterie never automatically deletes a dirty, unintegrated, running, lost, or
 ambiguously owned assignment worktree. Use `status`, `prime`, `logs`, and

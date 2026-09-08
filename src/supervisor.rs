@@ -1408,6 +1408,15 @@ fn reconcile_integration_operation<B: WorkspaceBackend>(
             );
         }
     };
+    if plan.run_id != operation.run_id {
+        return record_operation_reconciliation(
+            store,
+            operation.id,
+            ExternalResourceState::Unknown,
+            Some("integration plan belongs to another run".to_owned()),
+            reconciled_at,
+        );
+    }
     let workspace = store.transaction(|repositories| {
         repositories.workspace(plan.assignment_id)
     })?;
@@ -1426,7 +1435,7 @@ fn reconcile_integration_operation<B: WorkspaceBackend>(
     }
     if let Err(error) = workspaces.integrate(
         store,
-        plan.assignment_id,
+        plan.scope(),
         &plan,
         operation.id,
         "reconciler",
@@ -1981,6 +1990,28 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
     caller: &AuthenticatedCaller,
     request: RpcRequest,
 ) -> Result<RpcResponse, RpcFailure> {
+    if let AuthenticatedCaller::Agent(scope) = caller {
+        let current = store
+            .transaction(|repositories| {
+                Ok(scope.run_id == run_id
+                    && repositories
+                        .active_session_credential(
+                            scope.run_id,
+                            scope.agent_id,
+                            scope.session_id,
+                        )?
+                        .is_some_and(|credential| {
+                            credential.generation == scope.generation
+                        }))
+            })
+            .map_err(rpc_state_failure)?;
+        if !current {
+            return Err(RpcFailure::new(
+                RpcFailureCode::Unauthenticated,
+                "the caller's session generation is no longer active",
+            ));
+        }
+    }
     match request {
         RpcRequest::Ping => Ok(RpcResponse::Pong { run_id }),
         RpcRequest::LaunchForeground {
@@ -2614,6 +2645,11 @@ fn require_foreground_scope(
         || session.run_id != scope.run_id
         || session.agent_id != scope.agent_id
         || session.generation != scope.generation
+        || !store
+            .transaction(|repositories| {
+                repositories.session_scope_is_current(scope)
+            })
+            .map_err(rpc_state_failure)?
         || session.provider != "codex"
     {
         return Err(conflict(
@@ -3201,6 +3237,7 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
                             reason: "the target project disappeared".to_owned(),
                         })?;
                     let workspace = WorkspaceRecord {
+                        generation: 0,
                         assignment_id,
                         run_id,
                         project_id: task.project_id,
@@ -3369,6 +3406,26 @@ fn complete_spawn_operation<P: Provider, B: WorkspaceBackend>(
             "the assignment workspace intent is missing",
         )
     })?;
+    let assignment = store
+        .transaction(|repositories| {
+            repositories.assignment(intent.assignment_id)
+        })
+        .map_err(rpc_state_failure)?;
+    if workspace.run_id != run_id
+        || !assignment.is_some_and(|assignment| {
+            assignment.run_id == run_id
+                && assignment.agent_id == intent.agent_id
+                && assignment.task_id == intent.task_id
+                && assignment.scope() == workspace.scope()
+                && assignment
+                    .session_id
+                    .is_none_or(|id| id == intent.session_id)
+        })
+    {
+        return Err(conflict(
+            "the spawn intent belongs to another run or assignment generation",
+        ));
+    }
     let primary_project = primary_project.ok_or_else(|| {
         RpcFailure::new(
             RpcFailureCode::Internal,
@@ -3376,7 +3433,7 @@ fn complete_spawn_operation<P: Provider, B: WorkspaceBackend>(
         )
     })?;
     let workspace_state = workspaces
-        .materialize(store, intent.assignment_id, reconciled_at)
+        .materialize(store, workspace.scope(), reconciled_at)
         .map_err(rpc_workspace_failure)?;
     if workspace_state != ExternalResourceState::Observed {
         return Err(conflict(format!(
@@ -3389,7 +3446,7 @@ fn complete_spawn_operation<P: Provider, B: WorkspaceBackend>(
             run_id,
             agent_id: intent.agent_id,
             session_id: intent.session_id,
-            generation: 0,
+            generation: workspace.generation,
         },
         role: role.to_owned(),
         mode: LaunchMode::Job,
@@ -3467,9 +3524,27 @@ fn finish_assignment<B: WorkspaceBackend>(
         .map_err(rpc_state_failure)?;
     let assignment = assignment
         .ok_or_else(|| conflict("the caller has no active assignment"))?;
+    let AuthenticatedCaller::Agent(scope) = caller else {
+        return Err(conflict("the caller has no session"));
+    };
+    if scope.run_id != run_id
+        || assignment.run_id != scope.run_id
+        || assignment.agent_id != scope.agent_id
+        || assignment.generation != scope.generation
+        || assignment.session_id != Some(scope.session_id)
+        || !store
+            .transaction(|repositories| {
+                repositories.session_scope_is_current(*scope)
+            })
+            .map_err(rpc_state_failure)?
+    {
+        return Err(conflict(
+            "the assignment belongs to another session generation",
+        ));
+    }
     if status == FinishStatus::Completed && !replaying {
         workspaces
-            .record_result_commit(store, assignment.id)
+            .record_result_commit(store, assignment.scope())
             .map_err(rpc_workspace_failure)?;
     }
     let workspace = store
@@ -3589,7 +3664,7 @@ fn integrate_workspace<B: WorkspaceBackend>(
         }
         Some(
             workspaces
-                .prepare_integration(store, assignment_id, attempted_at)
+                .prepare_integration(store, workspace.scope(), attempted_at)
                 .map_err(rpc_workspace_failure)?,
         )
     } else {
@@ -3639,9 +3714,12 @@ fn integrate_workspace<B: WorkspaceBackend>(
         })
         .map_err(rpc_state_failure)?;
     let plan = mutation_value(outcome);
+    if plan.run_id != run_id {
+        return Err(conflict("the integration plan belongs to another run"));
+    }
     let integration = match workspaces.integrate(
         store,
-        assignment_id,
+        plan.scope(),
         &plan,
         operation_id,
         &event_actor(caller),
@@ -4384,9 +4462,6 @@ fn rpc_workspace_failure(error: WorkspaceError) -> RpcFailure {
             RpcFailure::new(RpcFailureCode::Unavailable, error.to_string())
         }
         WorkspaceError::State(state) => rpc_state_failure(state),
-        WorkspaceError::MissingIntent { .. } => {
-            RpcFailure::new(RpcFailureCode::Internal, error.to_string())
-        }
         WorkspaceError::MissingProject { .. } => {
             RpcFailure::new(RpcFailureCode::Internal, error.to_string())
         }
@@ -4398,6 +4473,7 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         StoreError::OperationConflict { .. }
         | StoreError::OperationIncomplete { .. }
         | StoreError::RunNotActive { .. }
+        | StoreError::StaleAssignment { .. }
         | StoreError::WorkspaceResultConflict { .. }
         | StoreError::WorkspaceTargetConflict { .. } => {
             RpcFailureCode::Conflict
@@ -5293,6 +5369,7 @@ impl SupervisorError {
                 StoreError::OperationConflict { .. }
                 | StoreError::OperationIncomplete { .. }
                 | StoreError::RunNotActive { .. }
+                | StoreError::StaleAssignment { .. }
                 | StoreError::WorkspaceResultConflict { .. }
                 | StoreError::WorkspaceTargetConflict { .. },
             ) => crate::cli::ErrorCode::Conflict,
@@ -5621,6 +5698,179 @@ mod tests {
             .await
             .expect("the server task should finish")
             .expect("a rejected sequence is handled normally");
+    }
+
+    #[test]
+    fn replaced_callers_cannot_finish_old_assignments_or_execute_queued_requests()
+     {
+        let fixture = TestDirectory::new();
+        let active = entry(&fixture.join("project"));
+        let run_id = active.run_id;
+        let mut store =
+            Store::open(&fixture.join("state.sqlite3")).expect("store");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_project(&ProjectRecord {
+                    id: active.project_id,
+                    run_id,
+                    alias: "primary".to_owned(),
+                    original_path: fixture.join("project"),
+                    canonical_path: fixture.join("project"),
+                    identity: active.project_identity,
+                    is_primary: true,
+                    attached_at: 10,
+                })
+            })
+            .expect("run");
+        let token = AgentToken::generate().expect("token");
+        let launch = launch_foreground(
+            &mut store,
+            run_id,
+            &AuthenticatedCaller::Operator,
+            OperationId::generate(),
+            &token,
+        )
+        .expect("launch");
+        let RpcResponse::ForegroundPrepared {
+            agent,
+            session_id,
+            generation,
+            ..
+        } = launch
+        else {
+            panic!("launch response")
+        };
+        let old = SessionScope {
+            run_id,
+            agent_id: agent.id,
+            session_id,
+            generation,
+        };
+        let task_id = TaskId::generate();
+        store
+            .transaction(|repositories| {
+                repositories.insert_task(&TaskRecord {
+                    id: task_id,
+                    run_id,
+                    project_id: active.project_id,
+                    group_id: None,
+                    title: "task".to_owned(),
+                    description: "task".to_owned(),
+                    status: TaskStatus::Open,
+                    result: None,
+                    created_at: 10,
+                    updated_at: 10,
+                })
+            })
+            .expect("task");
+        let assignment_id = AssignmentId::generate();
+        store
+            .claim_task(&crate::state::ClaimTaskMutation {
+                operation_id: OperationId::generate(),
+                run_id,
+                actor_agent_id: None,
+                task_id,
+                agent_id: agent.id,
+                assignment_id,
+                claimed_at: 11,
+            })
+            .expect("claim");
+        store
+            .transaction(|repositories| {
+                repositories
+                    .associate_assignment_session(assignment_id, session_id)?;
+                repositories.record_session_lifecycle(
+                    old,
+                    LifecycleState::Exited,
+                    super::rpc_timestamp().expect("time"),
+                )?;
+                Ok(())
+            })
+            .expect("retire");
+        let launch = launch_foreground(
+            &mut store,
+            run_id,
+            &AuthenticatedCaller::Operator,
+            OperationId::generate(),
+            &token,
+        )
+        .expect("replacement");
+        let RpcResponse::ForegroundPrepared {
+            agent,
+            session_id,
+            generation,
+            ..
+        } = launch
+        else {
+            panic!("launch response")
+        };
+        let current = SessionScope {
+            run_id,
+            agent_id: agent.id,
+            session_id,
+            generation,
+        };
+        assert!(current.generation > old.generation);
+        let mut workspaces = WorkspaceSupervisor::new(FakeWorkspace::new());
+        let finish_id = OperationId::generate();
+        let failure = super::finish_assignment(
+            &mut store,
+            &workspaces,
+            run_id,
+            &AuthenticatedCaller::Agent(current),
+            finish_id,
+            FinishStatus::Completed,
+            "late finish".to_owned(),
+        )
+        .expect_err("old assignment");
+        assert_eq!(failure.code, RpcFailureCode::Conflict);
+        let mut sessions = runtime_sessions(&fixture.0);
+        let queued_id = OperationId::generate();
+        let failure = super::execute_request(
+            &mut store,
+            &mut sessions,
+            &mut workspaces,
+            super::RuntimePaths {
+                run_state_directory: &fixture.0,
+                socket_path: &fixture.join("socket"),
+            },
+            run_id,
+            &AuthenticatedCaller::Agent(old),
+            RpcRequest::Finish {
+                operation_id: queued_id,
+                status: FinishStatus::Failed,
+                summary: "queued finish".to_owned(),
+            },
+        )
+        .expect_err("queued stale request");
+        assert_eq!(failure.code, RpcFailureCode::Unauthenticated);
+        assert!(
+            super::require_foreground_scope(&mut store, run_id, old).is_err()
+        );
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories.task(task_id)?.expect("task").status,
+                    TaskStatus::InProgress
+                );
+                assert_eq!(
+                    repositories
+                        .assignment(assignment_id)?
+                        .expect("assignment")
+                        .generation,
+                    old.generation
+                );
+                assert!(repositories.operation(finish_id)?.is_none());
+                assert!(repositories.operation(queued_id)?.is_none());
+                Ok(())
+            })
+            .expect("stale requests leave durable work intact");
     }
 
     #[tokio::test]
@@ -6241,6 +6491,7 @@ mod tests {
                     completed_at: Some(12),
                 })?;
                 repositories.insert_workspace(&WorkspaceRecord {
+                    generation: 0,
                     assignment_id,
                     run_id: active.run_id,
                     project_id: active.project_id,
@@ -6261,6 +6512,8 @@ mod tests {
                     status: "succeeded".to_owned(),
                     request: json!({"assignment_id": assignment_id}),
                     result: Some(json!({
+                        "run_id": active.run_id,
+                        "generation": 0,
                         "assignment_id": assignment_id,
                         "project_id": active.project_id,
                         "target_reference": "refs/heads/main",

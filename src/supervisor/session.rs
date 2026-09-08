@@ -106,7 +106,9 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 .map(Some);
         };
         let probe = self.provider.probe()?;
-        if session.run_id != launch.scope.run_id
+        if !store.transaction(|repositories| {
+            repositories.session_scope_is_current(launch.scope)
+        })? || session.run_id != launch.scope.run_id
             || session.agent_id != launch.scope.agent_id
             || session.generation != launch.scope.generation
             || session.provider != probe.name
@@ -500,6 +502,11 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 session_id: session.id,
                 generation: session.generation,
             };
+            if !store.transaction(|repositories| {
+                repositories.session_scope_is_current(scope)
+            })? {
+                continue;
+            }
             if session.process_owner == SessionProcessOwner::Foreground {
                 self.record_reconciliation(
                     store,
@@ -525,7 +532,13 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                     handle,
                     observation,
                 }) => {
-                    if handle.scope != scope {
+                    if handle.scope != scope
+                        || handle.provider_id() != provider_session_id
+                        || !self
+                            .provider
+                            .probe()
+                            .is_ok_and(|probe| probe.name == session.provider)
+                    {
                         self.record_reconciliation(
                             store,
                             scope,
@@ -678,6 +691,11 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         observed_at: i64,
     ) -> Result<Option<ProviderEvent>, AgentSessionError> {
         let handle = self.handle(session_id)?.clone();
+        if !store.transaction(|repositories| {
+            repositories.session_scope_is_current(handle.scope)
+        })? {
+            return Ok(None);
+        }
         let Some(event) = self.provider.next_event(&handle)? else {
             return Ok(None);
         };
@@ -717,7 +735,12 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         maximum_events: usize,
     ) -> Result<usize, AgentSessionError> {
         self.reconcile_unknown_sessions(store, run_id, observed_at)?;
-        let session_ids = self.sessions.keys().copied().collect::<Vec<_>>();
+        let session_ids = self
+            .sessions
+            .iter()
+            .filter(|(_, handle)| handle.scope.run_id == run_id)
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
         let mut advanced = 0;
         loop {
             let mut made_progress = false;
@@ -771,6 +794,11 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         observed_at: i64,
     ) -> Result<SessionObservation, AgentSessionError> {
         let handle = self.handle(session_id)?.clone();
+        if !store.transaction(|repositories| {
+            repositories.session_scope_is_current(handle.scope)
+        })? {
+            return Err(AgentSessionError::IntentMismatch { session_id });
+        }
         let observation = self.provider.interrupt(&handle)?;
         self.record_observation(store, &handle, observation, observed_at)?;
         Ok(observation)
@@ -787,6 +815,11 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         observed_at: i64,
     ) -> Result<SessionObservation, AgentSessionError> {
         let handle = self.handle(session_id)?.clone();
+        if !store.transaction(|repositories| {
+            repositories.session_scope_is_current(handle.scope)
+        })? {
+            return Err(AgentSessionError::IntentMismatch { session_id });
+        }
         let observation = self.provider.terminate(&handle)?;
         self.record_observation(store, &handle, observation, observed_at)?;
         Ok(observation)
@@ -1075,6 +1108,195 @@ mod tests {
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
     const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
     const TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAZ";
+
+    #[test]
+    fn replaced_sessions_cannot_append_output_or_apply_late_exits() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let launch = launch(RUN_ID.parse().expect("run"));
+        let mut supervisor = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([
+                FakeEvent::output(b"late output"),
+                FakeEvent::malformed(b"late malformed output", "invalid frame"),
+                FakeEvent::observation(SessionObservation::exited(0)),
+            ])]),
+            &directory.0,
+        );
+        supervisor.launch(&mut store, &launch).expect("launch");
+        store
+            .transaction(|repositories| {
+                repositories.record_session_lifecycle(
+                    launch.scope,
+                    LifecycleState::Exited,
+                    11,
+                )?;
+                assert!(repositories.start_agent_generation(
+                    launch.scope.run_id,
+                    launch.scope.agent_id,
+                    0,
+                    1
+                )?);
+                Ok(())
+            })
+            .expect("replace generation");
+        let before = store
+            .transaction(|repositories| {
+                repositories.events_after(launch.scope.run_id, 0, 100)
+            })
+            .expect("events");
+        assert!(
+            supervisor
+                .interrupt(&mut store, launch.scope.session_id, 12)
+                .is_err()
+        );
+        assert!(
+            supervisor
+                .terminate(&mut store, launch.scope.session_id, 12)
+                .is_err()
+        );
+        assert!(
+            supervisor
+                .ensure_existing_launch(&mut store, &launch, None)
+                .is_err()
+        );
+        assert_eq!(supervisor.provider.launches().len(), 1);
+        for _ in 0..3 {
+            supervisor
+                .advance(&mut store, launch.scope.session_id, 12)
+                .expect("ignore late event");
+        }
+        assert!(
+            !directory
+                .0
+                .join(crate::transcript::TranscriptStore::relative_path(
+                    launch.scope.session_id
+                ))
+                .exists()
+        );
+        assert_eq!(
+            store
+                .transaction(|repositories| repositories.events_after(
+                    launch.scope.run_id,
+                    0,
+                    100
+                ))
+                .expect("events"),
+            before
+        );
+    }
+
+    #[test]
+    fn recovery_requires_the_exact_provider_run_and_generation() {
+        for mismatch in 0..5 {
+            let directory = TestDirectory::new();
+            let mut store = store_with_run(&directory);
+            let launch = launch(RUN_ID.parse().expect("run"));
+            let mut first = AgentSessionSupervisor::new(
+                FakeProvider::new([FakeScript::new([])]),
+                &directory.0,
+            );
+            first.launch(&mut store, &launch).expect("launch");
+            let mut proof = first
+                .handle(launch.scope.session_id)
+                .expect("handle")
+                .clone();
+            match mismatch {
+                0 => proof.scope.run_id = RunId::generate(),
+                1 => proof.scope.generation += 1,
+                2 => proof.scope.agent_id = AgentId::generate(),
+                3 => proof.scope.session_id = SessionId::generate(),
+                _ => {
+                    proof = crate::providers::ProviderSessionHandle::new(
+                        "another-process",
+                        proof.scope,
+                    )
+                }
+            }
+            let provider = FakeProvider::new([]).with_missing_recoveries([
+                crate::providers::ProviderRecovery::Observed {
+                    handle: proof,
+                    observation: SessionObservation {
+                        lifecycle: LifecycleState::Running,
+                        activity: ActivityState::Unknown,
+                        exit: None,
+                    },
+                },
+            ]);
+            let mut restarted =
+                AgentSessionSupervisor::new(provider, &directory.0);
+            restarted
+                .reconcile_after_restart(&mut store, launch.scope.run_id, 11)
+                .expect("reconcile");
+            assert!(
+                restarted.sessions.is_empty(),
+                "mismatch {mismatch} must not be adopted"
+            );
+            store
+                .transaction(|repositories| {
+                    let session = repositories
+                        .session(launch.scope.session_id)?
+                        .expect("session");
+                    assert_eq!(session.state, LifecycleState::Unknown);
+                    assert_eq!(
+                        session.reconciliation_state,
+                        ExternalResourceState::Unknown
+                    );
+                    Ok(())
+                })
+                .expect("unknown ownership must remain visible");
+        }
+    }
+
+    #[test]
+    fn recovery_adopts_a_proven_current_process_but_not_a_replaced_one() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let launch = launch(RUN_ID.parse().expect("run"));
+        let mut supervisor = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([FakeEvent::output(
+                b"owned output",
+            )])]),
+            &directory.0,
+        );
+        supervisor.launch(&mut store, &launch).expect("launch");
+        supervisor.sessions.clear();
+        supervisor
+            .reconcile_after_restart(&mut store, launch.scope.run_id, 11)
+            .expect("recover");
+        assert!(supervisor.sessions.contains_key(&launch.scope.session_id));
+        supervisor
+            .advance(&mut store, launch.scope.session_id, 11)
+            .expect("owned output");
+        assert!(
+            directory
+                .0
+                .join(crate::transcript::TranscriptStore::relative_path(
+                    launch.scope.session_id
+                ))
+                .exists()
+        );
+        store
+            .transaction(|repositories| {
+                repositories.record_session_lifecycle(
+                    launch.scope,
+                    LifecycleState::Lost,
+                    12,
+                )?;
+                assert!(repositories.start_agent_generation(
+                    launch.scope.run_id,
+                    launch.scope.agent_id,
+                    0,
+                    1
+                )?);
+                Ok(())
+            })
+            .expect("replace");
+        supervisor.sessions.clear();
+        supervisor
+            .reconcile_after_restart(&mut store, launch.scope.run_id, 13)
+            .expect("reconcile");
+        assert!(supervisor.sessions.is_empty());
+    }
 
     #[test]
     fn failed_launch_retains_durable_desired_state() {

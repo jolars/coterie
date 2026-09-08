@@ -67,6 +67,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "operation_reconciliation",
         sql: include_str!("state/migrations/0007_operation_reconciliation.sql"),
     },
+    Migration {
+        version: 8,
+        name: "generation_fencing",
+        sql: include_str!("state/migrations/0008_generation_fencing.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -120,6 +125,12 @@ pub(crate) enum StoreError {
     /// An assignment cannot be associated with the requested live session.
     #[error("assignment `{id}` has corrupt lifecycle state: {reason}")]
     CorruptAssignmentState { id: AssignmentId, reason: String },
+
+    /// A resource belongs to another run or a retired generation.
+    #[error(
+        "assignment `{id}` does not belong to the current run and generation"
+    )]
+    StaleAssignment { id: AssignmentId },
 
     /// A completed workspace observation conflicts with its durable result.
     #[error(
@@ -570,10 +581,39 @@ pub(crate) enum AcknowledgeMessagesResult {
     },
 }
 
+/// Immutable ownership shared by an assignment and its workspace.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct AssignmentScope {
+    pub(crate) run_id: RunId,
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) generation: i64,
+}
+
+impl AssignmentRecord {
+    pub(crate) const fn scope(&self) -> AssignmentScope {
+        AssignmentScope {
+            run_id: self.run_id,
+            assignment_id: self.id,
+            generation: self.generation,
+        }
+    }
+}
+
+impl WorkspaceRecord {
+    pub(crate) const fn scope(&self) -> AssignmentScope {
+        AssignmentScope {
+            run_id: self.run_id,
+            assignment_id: self.assignment_id,
+            generation: self.generation,
+        }
+    }
+}
+
 /// Durable ownership and integration metadata for an assignment workspace.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkspaceRecord {
     pub(crate) assignment_id: AssignmentId,
+    pub(crate) generation: i64,
     pub(crate) run_id: RunId,
     pub(crate) project_id: ProjectId,
     pub(crate) kind: String,
@@ -1381,6 +1421,7 @@ impl Repositories<'_, '_> {
         if agent.run_id != run_id
             || agent.generation != current_generation
             || !agent.state.is_terminal()
+            || next_generation <= current_generation
         {
             return Ok(false);
         }
@@ -1523,6 +1564,22 @@ impl Repositories<'_, '_> {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Checks durable ownership before accepting provider data or control.
+    pub(crate) fn session_scope_is_current(
+        &self,
+        scope: crate::auth::SessionScope,
+    ) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sessions AS session \
+             JOIN agents AS agent ON agent.id = session.agent_id AND agent.run_id = session.run_id \
+             JOIN runs AS run ON run.id = session.run_id \
+             WHERE session.id = ?1 AND session.run_id = ?2 AND session.agent_id = ?3 \
+               AND session.generation = ?4 AND agent.generation = ?4 AND run.status = 'active')",
+            params![scope.session_id, scope.run_id, scope.agent_id, scope.generation],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Records the provider identity observed after a launch side effect.
     pub(crate) fn record_session_launch_observation(
         &self,
@@ -1533,10 +1590,7 @@ impl Repositories<'_, '_> {
         let Some(session) = self.session(scope.session_id)? else {
             return Ok(SessionTransitionOutcome::Stale);
         };
-        if session.run_id != scope.run_id
-            || session.agent_id != scope.agent_id
-            || session.generation != scope.generation
-        {
+        if !self.session_scope_is_current(scope)? {
             return Ok(SessionTransitionOutcome::Stale);
         }
         if session.reconciliation_state == ExternalResourceState::Observed
@@ -1572,10 +1626,7 @@ impl Repositories<'_, '_> {
         let Some(session) = self.session(scope.session_id)? else {
             return Ok(SessionTransitionOutcome::Stale);
         };
-        if session.run_id != scope.run_id
-            || session.agent_id != scope.agent_id
-            || session.generation != scope.generation
-        {
+        if !self.session_scope_is_current(scope)? {
             return Ok(SessionTransitionOutcome::Stale);
         }
         if session.reconciliation_state == state {
@@ -1606,10 +1657,7 @@ impl Repositories<'_, '_> {
         let Some(session) = self.session(scope.session_id)? else {
             return Ok(SessionTransitionOutcome::Stale);
         };
-        if session.run_id != scope.run_id
-            || session.agent_id != scope.agent_id
-            || session.generation != scope.generation
-        {
+        if !self.session_scope_is_current(scope)? {
             return Ok(SessionTransitionOutcome::Stale);
         }
 
@@ -1678,6 +1726,17 @@ impl Repositories<'_, '_> {
         if credential.revoked_at.is_some() {
             return Err(StoreError::CredentialAlreadyRevoked {
                 session_id: credential.session_id,
+            });
+        }
+        if !self.session_scope_is_current(crate::auth::SessionScope {
+            run_id: credential.run_id,
+            agent_id: credential.agent_id,
+            session_id: credential.session_id,
+            generation: credential.generation,
+        })? {
+            return Err(StoreError::InconsistentSessionLifecycle {
+                session_id: credential.session_id,
+                agent_id: credential.agent_id,
             });
         }
         self.transaction.execute(
@@ -2770,6 +2829,23 @@ impl Repositories<'_, '_> {
         &self,
         assignment: &AssignmentRecord,
     ) -> Result<(), StoreError> {
+        let agent = self.agent(assignment.agent_id)?;
+        if !agent.is_some_and(|agent| {
+            agent.run_id == assignment.run_id
+                && agent.generation == assignment.generation
+        }) {
+            return Err(StoreError::StaleAssignment { id: assignment.id });
+        }
+        if let Some(session_id) = assignment.session_id {
+            let session = self.session(session_id)?;
+            if !session.is_some_and(|session| {
+                session.run_id == assignment.run_id
+                    && session.agent_id == assignment.agent_id
+                    && session.generation == assignment.generation
+            }) {
+                return Err(StoreError::StaleAssignment { id: assignment.id });
+            }
+        }
         self.transaction.execute(
             "INSERT INTO assignments (\
                  id, run_id, task_id, agent_id, session_id, claim_id, generation, state, \
@@ -2955,6 +3031,33 @@ impl Repositories<'_, '_> {
         assignment_id: AssignmentId,
         session_id: SessionId,
     ) -> Result<(), StoreError> {
+        let assignment = self.assignment(assignment_id)?;
+        let session = self.session(session_id)?;
+        let valid = match (&assignment, &session) {
+            (Some(assignment), Some(session)) => {
+                assignment.run_id == session.run_id
+                    && assignment.agent_id == session.agent_id
+                    && assignment.generation == session.generation
+                    && !session.state.is_terminal()
+                    && self.session_scope_is_current(
+                        crate::auth::SessionScope {
+                            run_id: session.run_id,
+                            agent_id: session.agent_id,
+                            session_id,
+                            generation: session.generation,
+                        },
+                    )?
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(StoreError::CorruptAssignmentState {
+                id: assignment_id,
+                reason: format!(
+                    "session `{session_id}` does not own this generation"
+                ),
+            });
+        }
         let changed = self.transaction.execute(
             "UPDATE assignments SET session_id = ?2 \
              WHERE id = ?1 AND session_id IS NULL AND completed_at IS NULL",
@@ -3112,8 +3215,8 @@ impl Repositories<'_, '_> {
         self.transaction.execute(
             "INSERT INTO workspaces (\
                  assignment_id, run_id, project_id, kind, path, state, base_commit, \
-                 result_commit, target_commit, created_at, reconciled_at\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 result_commit, target_commit, created_at, reconciled_at, generation\
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 workspace.assignment_id,
                 workspace.run_id,
@@ -3126,6 +3229,7 @@ impl Repositories<'_, '_> {
                 workspace.target_commit,
                 workspace.created_at,
                 workspace.reconciled_at,
+                workspace.generation,
             ],
         )?;
         Ok(())
@@ -3139,11 +3243,12 @@ impl Repositories<'_, '_> {
             .transaction
             .query_row(
                 "SELECT assignment_id, run_id, project_id, kind, path, state, base_commit, \
-                        result_commit, target_commit, created_at, reconciled_at \
+                        result_commit, target_commit, created_at, reconciled_at, generation \
                  FROM workspaces WHERE assignment_id = ?1",
                 [assignment_id],
                 |row| {
                     Ok(WorkspaceRecord {
+                        generation: row.get(11)?,
                         assignment_id: row.get(0)?,
                         run_id: row.get(1)?,
                         project_id: row.get(2)?,
@@ -3167,11 +3272,12 @@ impl Repositories<'_, '_> {
     ) -> Result<Vec<WorkspaceRecord>, StoreError> {
         let mut statement = self.transaction.prepare(
             "SELECT assignment_id, run_id, project_id, kind, path, state, base_commit, \
-                    result_commit, target_commit, created_at, reconciled_at \
+                    result_commit, target_commit, created_at, reconciled_at, generation \
              FROM workspaces WHERE run_id = ?1 ORDER BY created_at, rowid",
         )?;
         let rows = statement.query_map([run_id], |row| {
             Ok(WorkspaceRecord {
+                generation: row.get(11)?,
                 assignment_id: row.get(0)?,
                 run_id: row.get(1)?,
                 project_id: row.get(2)?,
@@ -3188,14 +3294,54 @@ impl Repositories<'_, '_> {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub(crate) fn assignment_scope_is_current(
+        &self,
+        scope: AssignmentScope,
+    ) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM assignments AS assignment \
+             JOIN agents AS agent ON agent.id = assignment.agent_id AND agent.run_id = assignment.run_id \
+             JOIN runs AS run ON run.id = assignment.run_id \
+             WHERE assignment.id = ?1 AND assignment.run_id = ?2 AND assignment.generation = ?3 \
+               AND agent.generation = ?3 AND run.status = 'active' \
+               AND (assignment.session_id IS NULL OR EXISTS (SELECT 1 FROM sessions \
+                    WHERE sessions.id = assignment.session_id AND sessions.run_id = assignment.run_id \
+                      AND sessions.agent_id = assignment.agent_id AND sessions.generation = assignment.generation)))",
+            params![scope.assignment_id, scope.run_id, scope.generation],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Loads a workspace only while its immutable ownership remains current.
+    pub(crate) fn workspace_for_scope(
+        &self,
+        scope: AssignmentScope,
+    ) -> Result<WorkspaceRecord, StoreError> {
+        let workspace = self.workspace(scope.assignment_id)?;
+        if self.assignment_scope_is_current(scope)?
+            && let Some(workspace) = workspace
+            && workspace.scope() == scope
+        {
+            return Ok(workspace);
+        }
+        Err(StoreError::StaleAssignment {
+            id: scope.assignment_id,
+        })
+    }
+
     pub(crate) fn record_workspace_reconciliation_state(
         &self,
-        assignment_id: AssignmentId,
+        scope: AssignmentScope,
         state: ExternalResourceState,
         reconciled_at: i64,
     ) -> Result<ResourceTransitionOutcome, StoreError> {
-        let Some(workspace) = self.workspace(assignment_id)? else {
-            return Ok(ResourceTransitionOutcome::Stale);
+        let assignment_id = scope.assignment_id;
+        let workspace = match self.workspace_for_scope(scope) {
+            Ok(workspace) => workspace,
+            Err(StoreError::StaleAssignment { .. }) => {
+                return Ok(ResourceTransitionOutcome::Stale);
+            }
+            Err(error) => return Err(error),
         };
         if workspace.state == state {
             return Ok(ResourceTransitionOutcome::Unchanged);
@@ -3210,11 +3356,16 @@ impl Repositories<'_, '_> {
 
     pub(crate) fn record_workspace_result_commit(
         &self,
-        assignment_id: AssignmentId,
+        scope: AssignmentScope,
         result_commit: &str,
     ) -> Result<ResourceTransitionOutcome, StoreError> {
-        let Some(workspace) = self.workspace(assignment_id)? else {
-            return Ok(ResourceTransitionOutcome::Stale);
+        let assignment_id = scope.assignment_id;
+        let workspace = match self.workspace_for_scope(scope) {
+            Ok(workspace) => workspace,
+            Err(StoreError::StaleAssignment { .. }) => {
+                return Ok(ResourceTransitionOutcome::Stale);
+            }
+            Err(error) => return Err(error),
         };
         match workspace.result_commit {
             Some(recorded) if recorded == result_commit => {
@@ -3237,11 +3388,16 @@ impl Repositories<'_, '_> {
 
     pub(crate) fn record_workspace_target_commit(
         &self,
-        assignment_id: AssignmentId,
+        scope: AssignmentScope,
         target_commit: &str,
     ) -> Result<ResourceTransitionOutcome, StoreError> {
-        let Some(workspace) = self.workspace(assignment_id)? else {
-            return Ok(ResourceTransitionOutcome::Stale);
+        let assignment_id = scope.assignment_id;
+        let workspace = match self.workspace_for_scope(scope) {
+            Ok(workspace) => workspace,
+            Err(StoreError::StaleAssignment { .. }) => {
+                return Ok(ResourceTransitionOutcome::Stale);
+            }
+            Err(error) => return Err(error),
         };
         match workspace.target_commit {
             Some(recorded) if recorded == target_commit => {
@@ -4745,7 +4901,7 @@ mod tests {
         store
             .transaction(|repositories| {
                 repositories.record_workspace_target_commit(
-                    workspace.assignment_id,
+                    workspace.scope(),
                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 )?;
                 Ok(())
@@ -4901,6 +5057,39 @@ mod tests {
                     )
                     .expect("the prior process owner should be set");
             }
+            connection.execute(
+                "INSERT INTO projects (id, run_id, alias, original_path, canonical_path, identity_json, is_primary, attached_at) \
+                 VALUES (?1, ?2, 'primary', ?3, ?3, '{}', 1, 10)",
+                rusqlite::params![PROJECT_ID, RUN_ID, b"/tmp/project".as_slice()],
+            ).expect("legacy project");
+            connection.execute(
+                "INSERT INTO tasks (id, run_id, project_id, title, description, status, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 'task', 'task', 'submitted', 10, 12)",
+                rusqlite::params![TASK_ID, RUN_ID, PROJECT_ID],
+            ).expect("legacy task");
+            connection.execute(
+                "INSERT INTO operations (id, run_id, kind, status, request_json, result_json, attempt_count, created_at, updated_at) \
+                 VALUES (?1, ?2, 'workspace.integrate', 'succeeded', '{}', ?3, 1, 12, 12)",
+                rusqlite::params![OPERATION_ID, RUN_ID, json!({
+                    "assignment_id": ASSIGNMENT_ID, "project_id": PROJECT_ID,
+                    "target_reference": "refs/heads/main", "target_commit": "base", "integrated_at": 12,
+                }).to_string()],
+            ).expect("legacy integration plan");
+            connection.execute(
+                "INSERT INTO claims (id, run_id, task_id, agent_id, operation_id, state, claimed_at, released_at) \
+                 VALUES (1, ?1, ?2, ?3, ?4, 'released', 10, 12)",
+                rusqlite::params![RUN_ID, TASK_ID, AGENT_ID, OPERATION_ID],
+            ).expect("legacy claim");
+            connection.execute(
+                "INSERT INTO assignments (id, run_id, task_id, agent_id, session_id, claim_id, generation, state, created_at, completed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, 2, 'completed', 10, 12)",
+                rusqlite::params![ASSIGNMENT_ID, RUN_ID, TASK_ID, AGENT_ID, SESSION_ID],
+            ).expect("legacy assignment");
+            connection.execute(
+                "INSERT INTO workspaces (assignment_id, run_id, project_id, kind, path, state, created_at) \
+                 VALUES (?1, ?2, ?3, 'worktree', ?4, 'observed', 10)",
+                rusqlite::params![ASSIGNMENT_ID, RUN_ID, PROJECT_ID, b"/tmp/workspace".as_slice()],
+            ).expect("legacy workspace");
             drop(connection);
 
             let store =
@@ -4963,6 +5152,33 @@ mod tests {
                 )
                 .expect("the migrated process owner should be readable");
 
+            let generation: i64 = store.connection.query_row(
+                "SELECT generation FROM workspaces WHERE assignment_id = ?1", [ASSIGNMENT_ID], |row| row.get(0),
+            ).expect("migrated workspace generation");
+            let plan_json: String = store
+                .connection
+                .query_row(
+                    "SELECT result_json FROM operations WHERE id = ?1",
+                    [OPERATION_ID],
+                    |row| row.get(0),
+                )
+                .expect("migrated integration plan");
+            let plan: crate::workspace::IntegrationPlan =
+                serde_json::from_str(&plan_json).expect("typed migrated plan");
+            assert_eq!(generation, 2);
+            assert_eq!(plan.generation, generation);
+            assert_eq!(plan.run_id.to_string(), RUN_ID);
+            for statement in [
+                "UPDATE workspaces SET generation = 3",
+                "UPDATE assignments SET generation = 3",
+                "UPDATE workspaces SET run_id = 'another-run'",
+                "UPDATE assignments SET run_id = 'another-run'",
+            ] {
+                assert!(
+                    store.connection.execute(statement, []).is_err(),
+                    "{statement}"
+                );
+            }
             assert_eq!(applied, MIGRATIONS.len() as i64);
             assert_eq!(credential_table, 1);
             assert_eq!(claim_indexes, 3);
@@ -5643,6 +5859,123 @@ mod tests {
     }
 
     #[test]
+    fn replaced_generations_cannot_change_session_metadata() {
+        let mut store = Store::open_in_memory().expect("store");
+        let records = Records::fixture();
+        let scope = SessionScope {
+            run_id: records.run.id,
+            agent_id: records.agent.id,
+            session_id: records.session.id,
+            generation: records.session.generation,
+        };
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_agent(&records.agent)?;
+                repositories.insert_session(&records.session)?;
+                repositories.record_session_lifecycle(
+                    scope,
+                    LifecycleState::Exited,
+                    30,
+                )?;
+                assert!(repositories.start_agent_generation(
+                    scope.run_id,
+                    scope.agent_id,
+                    scope.generation,
+                    scope.generation + 1
+                )?);
+                let before = repositories.session(scope.session_id)?;
+                assert_eq!(
+                    repositories.record_session_launch_observation(
+                        scope,
+                        "late-process",
+                        31
+                    )?,
+                    SessionTransitionOutcome::Stale
+                );
+                assert_eq!(
+                    repositories.record_session_reconciliation_state(
+                        scope,
+                        ExternalResourceState::Unknown,
+                        31
+                    )?,
+                    SessionTransitionOutcome::Stale
+                );
+                assert_eq!(repositories.session(scope.session_id)?, before);
+                Ok(())
+            })
+            .expect("stale metadata must be ignored");
+    }
+
+    #[test]
+    fn assignments_reject_a_session_from_another_generation() {
+        let mut store = Store::open_in_memory().expect("store");
+        let mut records = Records::fixture();
+        records.assignment.session_id = None;
+        records.session.generation += 1;
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_project(&records.project)?;
+                repositories.insert_agent(&records.agent)?;
+                repositories.insert_task_group(&records.group)?;
+                repositories.insert_task(&records.task)?;
+                repositories.insert_operation(&records.operation)?;
+                repositories.insert_claim(&records.claim)?;
+                repositories.insert_assignment(&records.assignment)?;
+                let wrong_workspace = WorkspaceRecord {
+                    generation: records.workspace.generation + 1,
+                    ..records.workspace.clone()
+                };
+                assert!(
+                    repositories.insert_workspace(&wrong_workspace).is_err()
+                );
+                assert!(
+                    repositories.workspace(records.assignment.id)?.is_none()
+                );
+                repositories.insert_session(&records.session)?;
+                assert!(
+                    repositories
+                        .associate_assignment_session(
+                            records.assignment.id,
+                            records.session.id
+                        )
+                        .is_err()
+                );
+                assert_eq!(
+                    repositories.assignment(records.assignment.id)?,
+                    Some(records.assignment.clone())
+                );
+                Ok(())
+            })
+            .expect("association must preserve ownership");
+    }
+
+    #[test]
+    fn replacement_generations_must_increase() {
+        let mut store = Store::open_in_memory().expect("store");
+        let mut records = Records::fixture();
+        records.agent.state = LifecycleState::Exited;
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_agent(&records.agent)?;
+                for next in
+                    [records.agent.generation, records.agent.generation - 1]
+                {
+                    assert!(!repositories.start_agent_generation(
+                        records.run.id,
+                        records.agent.id,
+                        records.agent.generation,
+                        next
+                    )?);
+                }
+                Ok(())
+            })
+            .expect("generations must never be reused");
+    }
+
+    #[test]
     fn project_reads_reject_a_malformed_typed_identity() {
         let mut store = Store::open_in_memory().expect("the store should open");
         let records = Records::fixture();
@@ -5980,6 +6313,7 @@ mod tests {
                     acknowledged_at: None,
                 },
                 workspace: WorkspaceRecord {
+                    generation: 2,
                     assignment_id,
                     run_id,
                     project_id,

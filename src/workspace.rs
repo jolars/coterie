@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::id::{AssignmentId, RunId};
 use crate::project::ProjectIdentity;
 use crate::state::{
-    EventKind, ExternalResourceState, NewEvent, ProjectRecord,
+    AssignmentScope, EventKind, ExternalResourceState, NewEvent, ProjectRecord,
     ResourceTransitionOutcome, Store, StoreError, WorkspaceRecord,
 };
 
@@ -68,11 +68,23 @@ pub(crate) trait WorkspaceBackend {
 /// Immutable Git observations recorded before an integration side effect.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct IntegrationPlan {
+    pub(crate) run_id: RunId,
+    pub(crate) generation: i64,
     pub(crate) assignment_id: AssignmentId,
     pub(crate) project_id: crate::id::ProjectId,
     pub(crate) target_reference: String,
     pub(crate) target_commit: String,
     pub(crate) integrated_at: i64,
+}
+
+impl IntegrationPlan {
+    pub(crate) const fn scope(&self) -> AssignmentScope {
+        AssignmentScope {
+            run_id: self.run_id,
+            assignment_id: self.assignment_id,
+            generation: self.generation,
+        }
+    }
 }
 
 /// Exact Git identities observed after applying an integration plan.
@@ -112,23 +124,10 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
     pub(crate) fn materialize(
         &mut self,
         store: &mut Store,
-        assignment_id: AssignmentId,
+        scope: AssignmentScope,
         reconciled_at: i64,
     ) -> Result<ExternalResourceState, WorkspaceError> {
-        let (workspace, project) = store.transaction(|repositories| {
-            let workspace = repositories.workspace(assignment_id)?;
-            let project = workspace
-                .as_ref()
-                .map(|workspace| repositories.project(workspace.project_id))
-                .transpose()?
-                .flatten();
-            Ok((workspace, project))
-        })?;
-        let workspace =
-            workspace.ok_or(WorkspaceError::MissingIntent { assignment_id })?;
-        let project = project.ok_or(WorkspaceError::MissingProject {
-            project_id: workspace.project_id,
-        })?;
+        let (workspace, project) = workspace_records(store, scope)?;
         let observed = match self.backend.observe(&workspace, &project) {
             Ok(observed) => observed,
             Err(error) => {
@@ -184,12 +183,12 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         let workspaces = store
             .transaction(|repositories| repositories.workspaces(run_id))?;
         for workspace in workspaces {
-            match self.materialize(
-                store,
-                workspace.assignment_id,
-                reconciled_at,
-            ) {
-                Ok(_) | Err(WorkspaceError::Backend(_)) => {}
+            match self.materialize(store, workspace.scope(), reconciled_at) {
+                Ok(_)
+                | Err(WorkspaceError::Backend(_))
+                | Err(WorkspaceError::State(StoreError::StaleAssignment {
+                    ..
+                })) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -209,29 +208,14 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
     pub(crate) fn record_result_commit(
         &self,
         store: &mut Store,
-        assignment_id: AssignmentId,
+        scope: AssignmentScope,
     ) -> Result<Option<String>, WorkspaceError> {
-        let (workspace, project) = store.transaction(|repositories| {
-            let workspace = repositories.workspace(assignment_id)?;
-            let project = workspace
-                .as_ref()
-                .map(|workspace| repositories.project(workspace.project_id))
-                .transpose()?
-                .flatten();
-            Ok((workspace, project))
-        })?;
-        let workspace =
-            workspace.ok_or(WorkspaceError::MissingIntent { assignment_id })?;
-        let project = project.ok_or(WorkspaceError::MissingProject {
-            project_id: workspace.project_id,
-        })?;
+        let (workspace, project) = workspace_records(store, scope)?;
         let result_commit = self.backend.result_commit(&workspace, &project)?;
         if let Some(result_commit) = result_commit.as_deref() {
             store.transaction(|repositories| {
-                repositories.record_workspace_result_commit(
-                    assignment_id,
-                    result_commit,
-                )?;
+                repositories
+                    .record_workspace_result_commit(scope, result_commit)?;
                 Ok(())
             })?;
         }
@@ -242,10 +226,10 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
     pub(crate) fn prepare_integration(
         &self,
         store: &mut Store,
-        assignment_id: AssignmentId,
+        scope: AssignmentScope,
         integrated_at: i64,
     ) -> Result<IntegrationPlan, WorkspaceError> {
-        let (workspace, project) = integration_records(store, assignment_id)?;
+        let (workspace, project) = workspace_records(store, scope)?;
         Ok(self.backend.prepare_integration(
             &workspace,
             &project,
@@ -257,17 +241,33 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
     pub(crate) fn integrate(
         &mut self,
         store: &mut Store,
-        assignment_id: AssignmentId,
+        scope: AssignmentScope,
         plan: &IntegrationPlan,
         operation_id: crate::id::OperationId,
         actor: &str,
         reconciled_at: i64,
     ) -> Result<IntegrationRecord, WorkspaceError> {
-        let (workspace, project) = integration_records(store, assignment_id)?;
+        let assignment_id = scope.assignment_id;
+        let (workspace, project) = workspace_records(store, scope)?;
+        if plan.scope() != scope {
+            return Err(
+                StoreError::StaleAssignment { id: assignment_id }.into()
+            );
+        }
+        let operation_matches = store.transaction(|repositories| {
+            Ok(repositories
+                .operation(operation_id)?
+                .is_some_and(|operation| operation.run_id == scope.run_id))
+        })?;
+        if !operation_matches {
+            return Err(
+                StoreError::OperationConflict { id: operation_id }.into()
+            );
+        }
         let integration = self.backend.integrate(&workspace, &project, plan)?;
         store.transaction(|repositories| {
             let outcome = repositories.record_workspace_target_commit(
-                assignment_id,
+                scope,
                 &integration.target_commit,
             )?;
             if outcome == ResourceTransitionOutcome::Applied {
@@ -317,7 +317,7 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
     ) -> Result<(), WorkspaceError> {
         store.transaction(|repositories| {
             let outcome = repositories.record_workspace_reconciliation_state(
-                workspace.assignment_id,
+                workspace.scope(),
                 state,
                 reconciled_at,
             )?;
@@ -357,21 +357,15 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
     }
 }
 
-fn integration_records(
+fn workspace_records(
     store: &mut Store,
-    assignment_id: AssignmentId,
+    scope: AssignmentScope,
 ) -> Result<(WorkspaceRecord, ProjectRecord), WorkspaceError> {
     let (workspace, project) = store.transaction(|repositories| {
-        let workspace = repositories.workspace(assignment_id)?;
-        let project = workspace
-            .as_ref()
-            .map(|workspace| repositories.project(workspace.project_id))
-            .transpose()?
-            .flatten();
+        let workspace = repositories.workspace_for_scope(scope)?;
+        let project = repositories.project(workspace.project_id)?;
         Ok((workspace, project))
     })?;
-    let workspace =
-        workspace.ok_or(WorkspaceError::MissingIntent { assignment_id })?;
     let project = project.ok_or(WorkspaceError::MissingProject {
         project_id: workspace.project_id,
     })?;
@@ -964,6 +958,8 @@ impl WorkspaceBackend for GitWorkspace {
     ) -> Result<IntegrationPlan, WorkspaceBackendError> {
         let inputs = self.integration_inputs(workspace, project)?;
         Ok(IntegrationPlan {
+            run_id: workspace.run_id,
+            generation: workspace.generation,
             assignment_id: workspace.assignment_id,
             project_id: project.id,
             target_reference: inputs.target_reference,
@@ -978,9 +974,7 @@ impl WorkspaceBackend for GitWorkspace {
         project: &ProjectRecord,
         plan: &IntegrationPlan,
     ) -> Result<IntegrationRecord, WorkspaceBackendError> {
-        if plan.assignment_id != workspace.assignment_id
-            || plan.project_id != project.id
-        {
+        if plan.scope() != workspace.scope() || plan.project_id != project.id {
             return Err(WorkspaceBackendError::IntegrationPlanMismatch {
                 assignment_id: workspace.assignment_id,
             });
@@ -1820,6 +1814,8 @@ pub(crate) mod fake {
                 });
             }
             Ok(IntegrationPlan {
+                run_id: workspace.run_id,
+                generation: workspace.generation,
                 assignment_id: workspace.assignment_id,
                 project_id: project.id,
                 target_reference: "refs/heads/main".to_owned(),
@@ -1834,7 +1830,7 @@ pub(crate) mod fake {
             project: &ProjectRecord,
             plan: &IntegrationPlan,
         ) -> Result<IntegrationRecord, WorkspaceBackendError> {
-            if plan.assignment_id != workspace.assignment_id
+            if plan.scope() != workspace.scope()
                 || plan.project_id != project.id
             {
                 return Err(WorkspaceBackendError::IntegrationPlanMismatch {
@@ -1868,7 +1864,8 @@ pub(crate) mod fake {
     }
 
     fn same_intent(left: &WorkspaceRecord, right: &WorkspaceRecord) -> bool {
-        left.assignment_id == right.assignment_id
+        left.generation == right.generation
+            && left.assignment_id == right.assignment_id
             && left.run_id == right.run_id
             && left.project_id == right.project_id
             && left.kind == right.kind
@@ -2009,8 +2006,6 @@ pub(crate) enum WorkspaceError {
     State(#[from] StoreError),
     #[error(transparent)]
     Backend(#[from] WorkspaceBackendError),
-    #[error("assignment `{assignment_id}` has no durable workspace intent")]
-    MissingIntent { assignment_id: AssignmentId },
     #[error("project `{project_id}` for an assignment workspace is missing")]
     MissingProject { project_id: crate::id::ProjectId },
 }
@@ -2046,6 +2041,159 @@ mod tests {
     const TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAY";
     const ASSIGNMENT_ID: &str = "ca-01ARZ3NDEKTSV4RRFFQ69G5FAZ";
     const OPERATION_ID: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FB0";
+
+    #[test]
+    fn workspace_side_effects_and_observations_require_current_ownership() {
+        let fixture = GitFixture::new();
+        let workspace = fixture.workspace();
+        let mut store = store_with_workspace_records(
+            fixture.project.clone(),
+            workspace.clone(),
+        );
+        let mut supervisor =
+            WorkspaceSupervisor::new(GitWorkspace::new(&fixture.state));
+        let scope = workspace.scope();
+        for stale in [
+            crate::state::AssignmentScope {
+                run_id: RunId::generate(),
+                ..scope
+            },
+            crate::state::AssignmentScope {
+                generation: scope.generation + 1,
+                ..scope
+            },
+        ] {
+            assert!(supervisor.materialize(&mut store, stale, 11).is_err());
+            assert!(
+                supervisor.record_result_commit(&mut store, stale).is_err()
+            );
+            assert!(
+                supervisor
+                    .prepare_integration(&mut store, stale, 11)
+                    .is_err()
+            );
+            store
+                .transaction(|repositories| {
+                    use crate::state::ResourceTransitionOutcome::Stale;
+                    assert_eq!(
+                        repositories.record_workspace_result_commit(
+                            stale,
+                            &fixture.base
+                        )?,
+                        Stale
+                    );
+                    assert_eq!(
+                        repositories.record_workspace_target_commit(
+                            stale,
+                            &fixture.base
+                        )?,
+                        Stale
+                    );
+                    assert_eq!(
+                        repositories.record_workspace_reconciliation_state(
+                            stale,
+                            ExternalResourceState::Observed,
+                            11
+                        )?,
+                        Stale
+                    );
+                    Ok(())
+                })
+                .expect("stale observations");
+        }
+        assert!(!workspace.path.exists());
+        assert_eq!(
+            stored_workspace(&mut store, workspace.assignment_id),
+            workspace
+        );
+        store
+            .transaction(|repositories| {
+                let agent_id = AGENT_ID.parse().expect("agent");
+                // A lost session can leave recoverable work owned by an earlier generation.
+                let session = crate::state::SessionRecord {
+                    id: crate::id::SessionId::generate(),
+                    run_id: scope.run_id,
+                    agent_id,
+                    generation: 0,
+                    provider: "fake".to_owned(),
+                    provider_session_id: None,
+                    reconciliation_state: ExternalResourceState::Lost,
+                    state: LifecycleState::Starting,
+                    transcript_path: PathBuf::from("transcript"),
+                    created_at: 10,
+                    ended_at: None,
+                    reconciled_at: Some(10),
+                    process_owner:
+                        crate::state::SessionProcessOwner::Supervisor,
+                };
+                repositories.insert_session(&session)?;
+                repositories.record_session_lifecycle(
+                    crate::auth::SessionScope {
+                        run_id: scope.run_id,
+                        agent_id,
+                        session_id: session.id,
+                        generation: 0,
+                    },
+                    LifecycleState::Lost,
+                    11,
+                )?;
+                assert!(repositories.start_agent_generation(
+                    scope.run_id,
+                    agent_id,
+                    0,
+                    1
+                )?);
+                Ok(())
+            })
+            .expect("retire assignment generation");
+        supervisor
+            .reconcile_after_restart(&mut store, scope.run_id, 12)
+            .expect("preserve stale work");
+        assert!(supervisor.materialize(&mut store, scope, 12).is_err());
+        assert!(!workspace.path.exists());
+        assert_eq!(
+            stored_workspace(&mut store, workspace.assignment_id),
+            workspace
+        );
+    }
+
+    #[test]
+    fn integration_plans_cannot_cross_runs_or_generations() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        workspace.result_commit = Some(commit_file(
+            &workspace.path,
+            "result.txt",
+            "result",
+            "result",
+        ));
+        let plan = backend
+            .prepare_integration(&workspace, &fixture.project, 11)
+            .expect("plan");
+        for stale in [
+            super::IntegrationPlan {
+                run_id: RunId::generate(),
+                ..plan.clone()
+            },
+            super::IntegrationPlan {
+                generation: plan.generation + 1,
+                ..plan.clone()
+            },
+        ] {
+            assert!(
+                backend
+                    .integrate(&workspace, &fixture.project, &stale)
+                    .is_err()
+            );
+            assert_eq!(
+                head_commit(&fixture.project.canonical_path),
+                fixture.base
+            );
+            assert!(
+                !fixture.project.canonical_path.join("result.txt").exists()
+            );
+        }
+    }
 
     #[test]
     fn git_backend_creates_an_owned_worktree_from_the_recorded_base() {
@@ -2158,13 +2306,13 @@ mod tests {
         let supervisor = WorkspaceSupervisor::new(backend);
         assert_eq!(
             supervisor
-                .record_result_commit(&mut store, workspace.assignment_id)
+                .record_result_commit(&mut store, workspace.scope())
                 .expect("the result observation should be recorded")
                 .as_deref(),
             Some(result.as_str())
         );
         supervisor
-            .record_result_commit(&mut store, workspace.assignment_id)
+            .record_result_commit(&mut store, workspace.scope())
             .expect("recording the same result should be idempotent");
         assert_eq!(
             stored_workspace(&mut store, workspace.assignment_id)
@@ -2176,7 +2324,7 @@ mod tests {
             store
                 .transaction(|repositories| {
                     repositories.record_workspace_result_commit(
-                        workspace.assignment_id,
+                        workspace.scope(),
                         &fixture.base,
                     )?;
                     Ok(())
@@ -2518,7 +2666,7 @@ mod tests {
 
         assert!(
             supervisor
-                .materialize(&mut store, workspace.assignment_id, 11)
+                .materialize(&mut store, workspace.scope(), 11)
                 .is_err(),
             "the injected external failure should be visible"
         );
@@ -2529,13 +2677,13 @@ mod tests {
 
         assert_eq!(
             supervisor
-                .materialize(&mut store, workspace.assignment_id, 12)
+                .materialize(&mut store, workspace.scope(), 12)
                 .expect("retry should materialize the desired workspace"),
             ExternalResourceState::Observed
         );
         assert_eq!(
             supervisor
-                .materialize(&mut store, workspace.assignment_id, 13)
+                .materialize(&mut store, workspace.scope(), 13)
                 .expect("reconciliation should be repeatable"),
             ExternalResourceState::Observed
         );
@@ -2557,8 +2705,10 @@ mod tests {
         workspace.result_commit =
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned());
         let assignment_id = workspace.assignment_id;
-        let mut store =
-            store_with_workspace_records(fixture.project.clone(), workspace);
+        let mut store = store_with_workspace_records(
+            fixture.project.clone(),
+            workspace.clone(),
+        );
         let mut supervisor =
             WorkspaceSupervisor::new(FakeWorkspace::with_commits(
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2568,13 +2718,13 @@ mod tests {
             .parse::<OperationId>()
             .expect("valid operation ID");
         let plan = supervisor
-            .prepare_integration(&mut store, assignment_id, 11)
+            .prepare_integration(&mut store, workspace.scope(), 11)
             .expect("the fake integration should preflight");
 
         let integrated = supervisor
             .integrate(
                 &mut store,
-                assignment_id,
+                workspace.scope(),
                 &plan,
                 operation_id,
                 "operator",
@@ -2585,7 +2735,7 @@ mod tests {
             supervisor
                 .integrate(
                     &mut store,
-                    assignment_id,
+                    workspace.scope(),
                     &plan,
                     operation_id,
                     "operator",
@@ -2643,7 +2793,7 @@ mod tests {
         );
         let mut supervisor = WorkspaceSupervisor::new(backend);
         let plan = supervisor
-            .prepare_integration(&mut store, assignment_id, 11)
+            .prepare_integration(&mut store, workspace.scope(), 11)
             .expect("the integration should preflight");
         store
             .transaction(|repositories| {
@@ -2673,7 +2823,7 @@ mod tests {
         let observed = supervisor
             .integrate(
                 &mut store,
-                assignment_id,
+                workspace.scope(),
                 &plan,
                 operation_id,
                 "reconciler",
@@ -2720,18 +2870,18 @@ mod tests {
         let (mut store, workspace) = store_with_workspace();
         let mut supervisor = WorkspaceSupervisor::new(FakeWorkspace::new());
         supervisor
-            .materialize(&mut store, workspace.assignment_id, 11)
+            .materialize(&mut store, workspace.scope(), 11)
             .expect("the desired workspace should materialize");
         supervisor.backend_mut().forget(workspace.assignment_id);
 
         assert_eq!(
             supervisor
-                .materialize(&mut store, workspace.assignment_id, 12)
+                .materialize(&mut store, workspace.scope(), 12)
                 .expect("the missing side effect should reconcile"),
             ExternalResourceState::Lost
         );
         supervisor
-            .materialize(&mut store, workspace.assignment_id, 13)
+            .materialize(&mut store, workspace.scope(), 13)
             .expect("lost reconciliation should be idempotent");
 
         let (stored, lost_events) = store
@@ -2779,7 +2929,7 @@ mod tests {
 
         assert_eq!(
             supervisor
-                .materialize(&mut store, workspace.assignment_id, 11)
+                .materialize(&mut store, workspace.scope(), 11)
                 .expect("ambiguous ownership should remain inspectable"),
             ExternalResourceState::Unknown
         );
@@ -2808,6 +2958,7 @@ mod tests {
             .parse::<AssignmentId>()
             .expect("valid assignment ID");
         let workspace = WorkspaceRecord {
+            generation: 0,
             assignment_id,
             run_id,
             project_id,
@@ -2999,6 +3150,7 @@ mod tests {
                 .parse::<AssignmentId>()
                 .expect("valid assignment ID");
             WorkspaceRecord {
+                generation: 0,
                 assignment_id,
                 run_id: self.project.run_id,
                 project_id: self.project.id,
