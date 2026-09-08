@@ -61,7 +61,7 @@ use crate::state::{
     AcknowledgeMessagesMutation, AcknowledgeMessagesResult, AgentRecord,
     ClaimTaskMutation, ClaimTaskResult, DependencyRecord, EventKind,
     EventRecord, ExternalResourceState, MessageRecord, Mutation,
-    MutationOutcome, NewEvent, ProjectRecord, RunRecord,
+    MutationOutcome, NewEvent, OperationRecord, ProjectRecord, RunRecord,
     SessionCredentialRecord, SessionProcessOwner, SessionRecord,
     SessionTransitionOutcome, Store, StoreError, TaskRecord,
     TaskTransitionMutation, TaskTransitionRejection, TaskTransitionResult,
@@ -73,8 +73,8 @@ use crate::workspace::GitWorkspace;
 #[cfg(test)]
 use crate::workspace::fake::FakeWorkspace;
 use crate::workspace::{
-    IntegrationRecord, WorkspaceBackend, WorkspaceBackendError, WorkspaceError,
-    WorkspaceSupervisor,
+    IntegrationPlan, IntegrationRecord, WorkspaceBackend,
+    WorkspaceBackendError, WorkspaceError, WorkspaceSupervisor,
 };
 
 use self::session::{
@@ -87,6 +87,7 @@ const INTERNAL_SUPERVISOR_ARGUMENT: &str = "__supervisor";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(5);
 const MAXIMUM_EVENTS_PER_POLL: usize = 256;
 const WORKER_INTERRUPT_GRACE: Duration = Duration::from_millis(250);
 const FOREGROUND_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -979,6 +980,17 @@ async fn serve(
         active.run_id,
         reconciled_at,
     )?;
+    reconcile_operations(
+        &mut SpawnRuntime {
+            store: &mut store,
+            sessions: &mut sessions,
+            workspaces: &mut workspaces,
+            run_state_directory: &run_directories.state,
+            socket_path: &socket_path,
+            run_id: active.run_id,
+        },
+        reconciled_at,
+    )?;
     let serve_result = serve_listener(
         listener,
         active.clone(),
@@ -1019,6 +1031,11 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
     let mut session_poll = tokio::time::interval(SESSION_POLL_INTERVAL);
     session_poll
         .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut reconciliation_poll =
+        tokio::time::interval(RECONCILIATION_INTERVAL);
+    reconciliation_poll
+        .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    reconciliation_poll.tick().await;
     loop {
         tokio::select! {
             shutdown = shutdown_rx.recv() => {
@@ -1072,6 +1089,25 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
                     active.run_id,
                     &mut foreground,
                 );
+            }
+            _ = reconciliation_poll.tick() => {
+                let reconciled_at = unix_timestamp()?;
+                workspaces.reconcile_after_restart(
+                    store,
+                    active.run_id,
+                    reconciled_at,
+                )?;
+                reconcile_operations(
+                    &mut SpawnRuntime {
+                        store,
+                        sessions,
+                        workspaces,
+                        run_state_directory,
+                        socket_path,
+                        run_id: active.run_id,
+                    },
+                    reconciled_at,
+                )?;
             }
             _ = sleep_until_pending_shutdown(&foreground.pending_shutdown),
                 if foreground.pending_shutdown.is_some() =>
@@ -1149,6 +1185,295 @@ fn runtime_workspaces(
     _run_state_directory: &Path,
 ) -> WorkspaceSupervisor<FakeWorkspace> {
     WorkspaceSupervisor::new(FakeWorkspace::new())
+}
+
+fn reconcile_operations<P: Provider, B: WorkspaceBackend>(
+    runtime: &mut SpawnRuntime<'_, P, B>,
+    reconciled_at: i64,
+) -> Result<(), SupervisorError> {
+    let operations = runtime.store.transaction(|repositories| {
+        repositories.operations_requiring_reconciliation(runtime.run_id)
+    })?;
+    for operation in operations {
+        match operation.kind.as_str() {
+            "agent.launch_foreground" => {
+                reconcile_foreground_operation(
+                    runtime.store,
+                    &operation,
+                    reconciled_at,
+                )?;
+            }
+            "agent.spawn" => {
+                reconcile_spawn_operation(runtime, &operation, reconciled_at)?;
+            }
+            "workspace.integrate" => {
+                reconcile_integration_operation(
+                    runtime.store,
+                    runtime.workspaces,
+                    &operation,
+                    reconciled_at,
+                )?;
+            }
+            _ => {
+                record_operation_reconciliation(
+                    runtime.store,
+                    operation.id,
+                    ExternalResourceState::Unknown,
+                    Some(format!(
+                        "operation kind `{}` has no reconciler",
+                        operation.kind
+                    )),
+                    reconciled_at,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_foreground_operation(
+    store: &mut Store,
+    operation: &OperationRecord,
+    reconciled_at: i64,
+) -> Result<(), SupervisorError> {
+    let intent = match operation_result::<LaunchIntent>(operation) {
+        Ok(intent) => intent,
+        Err(error) => {
+            return record_operation_reconciliation(
+                store,
+                operation.id,
+                ExternalResourceState::Unknown,
+                Some(error),
+                reconciled_at,
+            );
+        }
+    };
+    let session = store
+        .transaction(|repositories| repositories.session(intent.session_id))?;
+    let state =
+        session
+            .as_ref()
+            .map_or(ExternalResourceState::Lost, |session| {
+                if session.provider_session_id.is_some() {
+                    ExternalResourceState::Observed
+                } else {
+                    session.reconciliation_state
+                }
+            });
+    if operation.reconciliation_state == Some(state)
+        && operation.reconciled_at.is_some()
+    {
+        return Ok(());
+    }
+    let error = (state != ExternalResourceState::Observed).then(|| {
+        format!("foreground session {} is {}", intent.session_id, state)
+    });
+    record_operation_reconciliation(
+        store,
+        operation.id,
+        state,
+        error,
+        reconciled_at,
+    )
+}
+
+fn reconcile_spawn_operation<P: Provider, B: WorkspaceBackend>(
+    runtime: &mut SpawnRuntime<'_, P, B>,
+    operation: &OperationRecord,
+    reconciled_at: i64,
+) -> Result<(), SupervisorError> {
+    let intent = match operation_result::<SpawnIntent>(operation) {
+        Ok(intent) => intent,
+        Err(error) => {
+            return record_operation_reconciliation(
+                runtime.store,
+                operation.id,
+                ExternalResourceState::Unknown,
+                Some(error),
+                reconciled_at,
+            );
+        }
+    };
+    let session = runtime
+        .store
+        .transaction(|repositories| repositories.session(intent.session_id))?;
+    if let Some(session) = session {
+        if session.provider_session_id.is_some() {
+            return record_operation_reconciliation(
+                runtime.store,
+                operation.id,
+                ExternalResourceState::Observed,
+                None,
+                reconciled_at,
+            );
+        }
+        if session.reconciliation_state != ExternalResourceState::Desired {
+            let state = session.reconciliation_state;
+            let error = Some(format!(
+                "provider session {} is {state}",
+                intent.session_id
+            ));
+            if operation.reconciliation_state == Some(state)
+                && operation.reconciled_at.is_some()
+            {
+                return Ok(());
+            }
+            return record_operation_reconciliation(
+                runtime.store,
+                operation.id,
+                state,
+                error,
+                reconciled_at,
+            );
+        }
+    } else {
+        let workspace = runtime.store.transaction(|repositories| {
+            repositories.workspace(intent.assignment_id)
+        })?;
+        if operation.reconciliation_state
+            == Some(ExternalResourceState::Unknown)
+            && operation.reconciled_at.is_some()
+            && !workspace.is_some_and(|workspace| {
+                workspace.state == ExternalResourceState::Observed
+            })
+        {
+            return Ok(());
+        }
+    }
+
+    let Some(role) =
+        operation.request.get("role").and_then(|role| role.as_str())
+    else {
+        return record_operation_reconciliation(
+            runtime.store,
+            operation.id,
+            ExternalResourceState::Unknown,
+            Some("spawn operation has no role".to_owned()),
+            reconciled_at,
+        );
+    };
+    let archetype = builtin_standard();
+    let Some(role_definition) = archetype.role(role) else {
+        return record_operation_reconciliation(
+            runtime.store,
+            operation.id,
+            ExternalResourceState::Unknown,
+            Some(format!("spawn role `{role}` is no longer configured")),
+            reconciled_at,
+        );
+    };
+    let Some(permission_profile) = archetype
+        .permission_profiles
+        .get(role_definition.permission_profile)
+        .copied()
+    else {
+        return record_operation_reconciliation(
+            runtime.store,
+            operation.id,
+            ExternalResourceState::Unknown,
+            Some(format!("spawn role `{role}` has no permission profile")),
+            reconciled_at,
+        );
+    };
+    let _operation_completed = attempt_spawn_operation(
+        runtime,
+        SpawnCompletion {
+            operation_id: operation.id,
+            role,
+            permission_profile,
+            intent: &intent,
+            created_at: operation.created_at,
+            reconciled_at,
+        },
+    )
+    .is_ok();
+    Ok(())
+}
+
+fn reconcile_integration_operation<B: WorkspaceBackend>(
+    store: &mut Store,
+    workspaces: &mut WorkspaceSupervisor<B>,
+    operation: &OperationRecord,
+    reconciled_at: i64,
+) -> Result<(), SupervisorError> {
+    let plan = match operation_result::<IntegrationPlan>(operation) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return record_operation_reconciliation(
+                store,
+                operation.id,
+                ExternalResourceState::Unknown,
+                Some(error),
+                reconciled_at,
+            );
+        }
+    };
+    let workspace = store.transaction(|repositories| {
+        repositories.workspace(plan.assignment_id)
+    })?;
+    if workspace
+        .as_ref()
+        .and_then(|workspace| workspace.target_commit.as_ref())
+        .is_some()
+    {
+        return record_operation_reconciliation(
+            store,
+            operation.id,
+            ExternalResourceState::Observed,
+            None,
+            reconciled_at,
+        );
+    }
+    if let Err(error) = workspaces.integrate(
+        store,
+        plan.assignment_id,
+        &plan,
+        operation.id,
+        "reconciler",
+        reconciled_at,
+    ) {
+        record_operation_reconciliation(
+            store,
+            operation.id,
+            ExternalResourceState::Unknown,
+            Some(error.to_string()),
+            reconciled_at,
+        )?;
+    }
+    Ok(())
+}
+
+fn operation_result<T: serde::de::DeserializeOwned>(
+    operation: &OperationRecord,
+) -> Result<T, String> {
+    let result = operation.result.clone().ok_or_else(|| {
+        format!("operation {} has no durable result", operation.id)
+    })?;
+    serde_json::from_value(result).map_err(|error| {
+        format!(
+            "operation {} has an invalid durable result: {error}",
+            operation.id
+        )
+    })
+}
+
+fn record_operation_reconciliation(
+    store: &mut Store,
+    operation_id: OperationId,
+    state: ExternalResourceState,
+    error: Option<String>,
+    reconciled_at: i64,
+) -> Result<(), SupervisorError> {
+    store.transaction(|repositories| {
+        repositories.record_operation_reconciliation(
+            operation_id,
+            state,
+            error.as_deref(),
+            reconciled_at,
+        )?;
+        Ok(())
+    })?;
+    Ok(())
 }
 
 enum SupervisorCommand {
@@ -1632,6 +1957,15 @@ struct SpawnRuntime<'a, P, B> {
     run_id: RunId,
 }
 
+struct SpawnCompletion<'a> {
+    operation_id: OperationId,
+    role: &'a str,
+    permission_profile: crate::config::PermissionProfile,
+    intent: &'a SpawnIntent,
+    created_at: i64,
+    reconciled_at: i64,
+}
+
 #[derive(Clone, Copy)]
 struct RuntimePaths<'a> {
     run_state_directory: &'a Path,
@@ -1951,6 +2285,7 @@ fn launch_foreground(
                 ),
                 created_at: now,
             })?;
+            repositories.mark_operation_reconciliation_desired(operation_id)?;
             let claim = repositories.record_session_reconciliation_state(
                 scope,
                 ExternalResourceState::Unknown,
@@ -2141,6 +2476,12 @@ fn observe_foreground_started(
                 json!({"process_id": process_id}),
                 observed_at,
             )?;
+            repositories.record_operation_reconciliation(
+                operation_for_session(repositories, scope)?.id,
+                ExternalResourceState::Observed,
+                None,
+                observed_at,
+            )?;
             Ok(())
         })
         .map_err(rpc_state_failure)?;
@@ -2150,6 +2491,7 @@ fn observe_foreground_started(
     })
 }
 
+#[derive(Clone, Copy)]
 enum ForegroundEnd {
     Exited {
         code: Option<i32>,
@@ -2236,6 +2578,20 @@ fn observe_foreground_ended(
                 details,
                 observed_at,
             )?;
+            repositories.record_operation_reconciliation(
+                operation_for_session(repositories, scope)?.id,
+                reconciliation,
+                match end {
+                    ForegroundEnd::Exited { .. } => None,
+                    ForegroundEnd::LaunchFailed => {
+                        Some("foreground provider launch failed")
+                    }
+                    ForegroundEnd::ObservationLost => {
+                        Some("foreground provider observation was lost")
+                    }
+                },
+                observed_at,
+            )?;
             Ok(())
         })
         .map_err(rpc_state_failure)?;
@@ -2265,6 +2621,24 @@ fn require_foreground_scope(
         ));
     }
     Ok(())
+}
+
+fn operation_for_session(
+    repositories: &crate::state::Repositories<'_, '_>,
+    scope: SessionScope,
+) -> Result<crate::state::OperationRecord, StoreError> {
+    repositories
+        .foreground_launch_operation_for_session(
+            scope.run_id,
+            scope.session_id,
+        )?
+        .ok_or_else(|| StoreError::CorruptAgentState {
+            id: scope.agent_id,
+            reason: format!(
+                "session {} has no durable launch operation",
+                scope.session_id
+            ),
+        })
 }
 
 fn record_foreground_lifecycle(
@@ -2867,6 +3241,8 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
                         ),
                         created_at: now,
                     })?;
+                    repositories
+                        .mark_operation_reconciliation_desired(operation_id)?;
                     Ok(SpawnIntent {
                         agent_id,
                         session_id,
@@ -2886,6 +3262,97 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         })
         .map_err(rpc_state_failure)?;
     let intent = mutation_value(outcome);
+    let mut completion_runtime = SpawnRuntime {
+        store: &mut *store,
+        sessions: &mut *sessions,
+        workspaces: &mut *workspaces,
+        run_state_directory,
+        socket_path,
+        run_id,
+    };
+    attempt_spawn_operation(
+        &mut completion_runtime,
+        SpawnCompletion {
+            operation_id,
+            role: &role,
+            permission_profile,
+            intent: &intent,
+            created_at: now,
+            reconciled_at: now,
+        },
+    )?;
+    Ok(RpcResponse::Spawned {
+        operation_id,
+        agent: summary_for_agent(store, run_id, intent.agent_id)?,
+        session_id: intent.session_id,
+        assignment_id: intent.assignment_id,
+        task_id: intent.task_id,
+    })
+}
+
+fn attempt_spawn_operation<P: Provider, B: WorkspaceBackend>(
+    runtime: &mut SpawnRuntime<'_, P, B>,
+    completion: SpawnCompletion<'_>,
+) -> Result<(), RpcFailure> {
+    let operation_id = completion.operation_id;
+    let session_id = completion.intent.session_id;
+    let reconciled_at = completion.reconciled_at;
+    match complete_spawn_operation(runtime, completion) {
+        Ok(()) => Ok(()),
+        Err(failure) => {
+            let state = runtime
+                .store
+                .transaction(|repositories| {
+                    let session = repositories.session(session_id)?;
+                    Ok(spawn_reconciliation_state(session.as_ref()))
+                })
+                .map_err(rpc_state_failure)?;
+            runtime
+                .store
+                .transaction(|repositories| {
+                    repositories.record_operation_reconciliation(
+                        operation_id,
+                        state,
+                        Some(&failure.message),
+                        reconciled_at,
+                    )?;
+                    Ok(())
+                })
+                .map_err(rpc_state_failure)?;
+            Err(failure)
+        }
+    }
+}
+
+fn spawn_reconciliation_state(
+    session: Option<&SessionRecord>,
+) -> ExternalResourceState {
+    if let Some(session) = session {
+        if session.provider_session_id.is_some() {
+            return ExternalResourceState::Observed;
+        }
+        return session.reconciliation_state;
+    }
+    ExternalResourceState::Desired
+}
+
+fn complete_spawn_operation<P: Provider, B: WorkspaceBackend>(
+    runtime: &mut SpawnRuntime<'_, P, B>,
+    completion: SpawnCompletion<'_>,
+) -> Result<(), RpcFailure> {
+    let store = &mut *runtime.store;
+    let sessions = &mut *runtime.sessions;
+    let workspaces = &mut *runtime.workspaces;
+    let socket_path = runtime.socket_path;
+    let run_id = runtime.run_id;
+    let SpawnCompletion {
+        operation_id,
+        role,
+        permission_profile,
+        intent,
+        created_at,
+        reconciled_at,
+    } = completion;
     let (workspace, primary_project) = store
         .transaction(|repositories| {
             let workspace = repositories.workspace(intent.assignment_id)?;
@@ -2909,7 +3376,7 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         )
     })?;
     let workspace_state = workspaces
-        .materialize(store, intent.assignment_id, now)
+        .materialize(store, intent.assignment_id, reconciled_at)
         .map_err(rpc_workspace_failure)?;
     if workspace_state != ExternalResourceState::Observed {
         return Err(conflict(format!(
@@ -2924,7 +3391,7 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
             session_id: intent.session_id,
             generation: 0,
         },
-        role: role.clone(),
+        role: role.to_owned(),
         mode: LaunchMode::Job,
         working_directory: workspace.path,
         project_id: workspace.project_id,
@@ -2932,8 +3399,8 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         task_id: intent.task_id,
         socket_path: socket_path.to_path_buf(),
         permission_profile,
-        bootstrap_instruction: bootstrap_instruction(run_id, &role),
-        created_at: now,
+        bootstrap_instruction: bootstrap_instruction(run_id, role),
+        created_at,
     };
     if let Some(launched) = sessions
         .ensure_existing_launch(store, &launch, Some(intent.assignment_id))
@@ -2942,14 +3409,19 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         debug_assert_eq!(launched.scope, launch.scope);
         let _provider_token = launched.token;
     }
-    drain_available_events(sessions, store, intent.session_id, now)?;
-    Ok(RpcResponse::Spawned {
-        operation_id,
-        agent: summary_for_agent(store, run_id, intent.agent_id)?,
-        session_id: intent.session_id,
-        assignment_id: intent.assignment_id,
-        task_id: intent.task_id,
-    })
+    drain_available_events(sessions, store, intent.session_id, reconciled_at)?;
+    store
+        .transaction(|repositories| {
+            repositories.record_operation_reconciliation(
+                operation_id,
+                ExternalResourceState::Observed,
+                None,
+                reconciled_at,
+            )?;
+            Ok(())
+        })
+        .map_err(rpc_state_failure)?;
+    Ok(())
 }
 
 fn finish_assignment<B: WorkspaceBackend>(
@@ -3055,6 +3527,7 @@ fn integrate_workspace<B: WorkspaceBackend>(
     assignment_id: AssignmentId,
 ) -> Result<RpcResponse, RpcFailure> {
     require_capability(store, run_id, caller, "workspace", "integrate")?;
+    let attempted_at = rpc_timestamp()?;
     let request = json!({"assignment_id": assignment_id});
     let existing = store
         .transaction(|repositories| repositories.operation(operation_id))
@@ -3116,7 +3589,7 @@ fn integrate_workspace<B: WorkspaceBackend>(
         }
         Some(
             workspaces
-                .prepare_integration(store, assignment_id, rpc_timestamp()?)
+                .prepare_integration(store, assignment_id, attempted_at)
                 .map_err(rpc_workspace_failure)?,
         )
     } else {
@@ -3128,9 +3601,7 @@ fn integrate_workspace<B: WorkspaceBackend>(
         kind: "workspace.integrate".to_owned(),
         actor_agent_id: caller.agent_id(),
         request,
-        created_at: prepared
-            .as_ref()
-            .map_or_else(rpc_timestamp, |plan| Ok(plan.integrated_at))?,
+        created_at: attempted_at,
     };
     let outcome = store
         .mutate(&mutation, |repositories| {
@@ -3163,19 +3634,35 @@ fn integrate_workspace<B: WorkspaceBackend>(
                 ),
                 created_at: plan.integrated_at,
             })?;
+            repositories.mark_operation_reconciliation_desired(operation_id)?;
             Ok(plan.clone())
         })
         .map_err(rpc_state_failure)?;
     let plan = mutation_value(outcome);
-    let integration = workspaces
-        .integrate(
-            store,
-            assignment_id,
-            &plan,
-            operation_id,
-            &event_actor(caller),
-        )
-        .map_err(rpc_workspace_failure)?;
+    let integration = match workspaces.integrate(
+        store,
+        assignment_id,
+        &plan,
+        operation_id,
+        &event_actor(caller),
+        attempted_at,
+    ) {
+        Ok(integration) => integration,
+        Err(error) => {
+            store
+                .transaction(|repositories| {
+                    repositories.record_operation_reconciliation(
+                        operation_id,
+                        ExternalResourceState::Unknown,
+                        Some(&error.to_string()),
+                        attempted_at,
+                    )?;
+                    Ok(())
+                })
+                .map_err(rpc_state_failure)?;
+            return Err(rpc_workspace_failure(error));
+        }
+    };
     Ok(RpcResponse::WorkspaceIntegrated {
         operation_id,
         integration: integration_summary(integration),
@@ -4870,30 +5357,36 @@ mod tests {
     use std::os::unix::fs::DirBuilderExt;
     use std::path::PathBuf;
 
+    use serde_json::json;
     use tokio::net::UnixListener;
     use tokio::sync::{mpsc, oneshot};
 
     use super::{
         AuthenticatedCaller, ForegroundCoordination, SupervisorClient,
         SupervisorCommand, SupervisorError, begin_shutdown, launch_foreground,
-        persist_shutdown, runtime_sessions, runtime_workspaces,
-        serve_connection, serve_listener, validate_handshake,
-        validate_socket_path,
+        persist_shutdown, reconcile_operations, runtime_sessions,
+        runtime_workspaces, serve_connection, serve_listener, spawn_agent,
+        validate_handshake, validate_socket_path,
     };
     use crate::auth::{AgentToken, SessionScope};
-    use crate::id::{AgentId, OperationId, ProjectId, RunId, SessionId};
+    use crate::id::{
+        AgentId, AssignmentId, OperationId, ProjectId, RunId, SessionId, TaskId,
+    };
     use crate::project::{ActiveRunEntry, ProjectIdentity};
     use crate::protocol::{
         ClientMessage, ConnectionChannel, FinishStatus, HandshakeRequest,
         RequestAuthentication, RpcFailureCode, RpcRequest, RpcResponse,
         ServerMessage, VersionedRequest, read_frame, write_frame,
     };
-    use crate::providers::LifecycleState;
+    use crate::providers::fake::{FakeProvider, FakeScript};
+    use crate::providers::{LifecycleState, ProviderCapability};
     use crate::state::{
-        AgentRecord, ExternalResourceState, ProjectRecord, RunRecord,
-        SessionCredentialRecord, SessionProcessOwner, SessionRecord, Store,
-        StoreError,
+        AgentRecord, AssignmentRecord, ClaimRecord, ExternalResourceState,
+        OperationRecord, ProjectRecord, RunRecord, SessionCredentialRecord,
+        SessionProcessOwner, SessionRecord, Store, StoreError, TaskRecord,
+        WorkspaceRecord,
     };
+    use crate::supervisor::session::AgentSessionSupervisor;
     use crate::tasks::TaskStatus;
     use crate::workspace::WorkspaceSupervisor;
     use crate::workspace::fake::FakeWorkspace;
@@ -4902,6 +5395,7 @@ mod tests {
     const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
     const AGENT_ID: &str = "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX";
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+    const TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAZ";
     const TOKEN: &str =
         "cot1_000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
@@ -5141,6 +5635,7 @@ mod tests {
         let session_id =
             SESSION_ID.parse::<SessionId>().expect("valid session ID");
         let token = TOKEN.parse::<AgentToken>().expect("valid agent token");
+        let launch_operation_id = OperationId::generate();
         let scope = SessionScope {
             run_id: active.run_id,
             agent_id,
@@ -5164,6 +5659,27 @@ mod tests {
                     generation: scope.generation,
                     state: LifecycleState::Running,
                     created_at: 11,
+                })?;
+                repositories.insert_operation(&OperationRecord {
+                    id: launch_operation_id,
+                    run_id: active.run_id,
+                    kind: "agent.launch_foreground".to_owned(),
+                    actor_agent_id: None,
+                    status: "succeeded".to_owned(),
+                    request: json!({"role": "lead"}),
+                    result: Some(json!({
+                        "agent_id": agent_id,
+                        "session_id": session_id,
+                        "generation": scope.generation,
+                        "already_active": false,
+                    })),
+                    attempt_count: 1,
+                    reconciliation_state: Some(ExternalResourceState::Observed),
+                    reconciliation_attempt_count: 1,
+                    reconciliation_error: None,
+                    reconciled_at: Some(12),
+                    created_at: 11,
+                    updated_at: 11,
                 })?;
                 repositories.insert_session(&SessionRecord {
                     id: session_id,
@@ -5281,6 +5797,534 @@ mod tests {
             .await
             .expect("the server task should finish")
             .expect("the listener should shut down cleanly");
+    }
+
+    #[test]
+    fn reconciliation_completes_an_interrupted_spawn_once() {
+        let fixture = TestDirectory::new();
+        let project_path = fixture.join("project");
+        let run_state_directory = fixture.join("run");
+        fs::create_dir(&project_path).expect("the project should be created");
+        fs::create_dir(&run_state_directory)
+            .expect("the run state directory should be created");
+        let active = entry(&project_path);
+        let task_id = TASK_ID.parse::<TaskId>().expect("valid task ID");
+        let operation_id = OperationId::generate();
+        let socket_path = fixture.join("supervisor.sock");
+        let mut store = Store::open(&run_state_directory.join("state.sqlite3"))
+            .expect("the store should open");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: active.run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_project(&ProjectRecord {
+                    id: active.project_id,
+                    run_id: active.run_id,
+                    alias: "primary".to_owned(),
+                    original_path: project_path.clone(),
+                    canonical_path: project_path.clone(),
+                    identity: active.project_identity.clone(),
+                    is_primary: true,
+                    attached_at: 10,
+                })?;
+                repositories.insert_task(&TaskRecord {
+                    id: task_id,
+                    run_id: active.run_id,
+                    project_id: active.project_id,
+                    group_id: None,
+                    title: "Recover spawn".to_owned(),
+                    description: "Resume the durable spawn intent.".to_owned(),
+                    status: TaskStatus::Open,
+                    result: None,
+                    created_at: 11,
+                    updated_at: 11,
+                })
+            })
+            .expect("the spawn prerequisites should commit");
+        let mut sessions = runtime_sessions(&run_state_directory);
+        let mut workspaces =
+            WorkspaceSupervisor::new(FakeWorkspace::failing_creations(1));
+
+        let first = spawn_agent(
+            super::SpawnRuntime {
+                store: &mut store,
+                sessions: &mut sessions,
+                workspaces: &mut workspaces,
+                run_state_directory: &run_state_directory,
+                socket_path: &socket_path,
+                run_id: active.run_id,
+            },
+            &AuthenticatedCaller::Operator,
+            operation_id,
+            "worker".to_owned(),
+            task_id,
+        );
+        assert!(first.is_err(), "the first workspace creation should fail");
+
+        workspaces
+            .reconcile_after_restart(&mut store, active.run_id, 20)
+            .expect("workspace reconciliation should recover the creation");
+        sessions
+            .reconcile_after_restart(&mut store, active.run_id, 20)
+            .expect("the pre-launch session set should reconcile");
+        let mut runtime = super::SpawnRuntime {
+            store: &mut store,
+            sessions: &mut sessions,
+            workspaces: &mut workspaces,
+            run_state_directory: &run_state_directory,
+            socket_path: &socket_path,
+            run_id: active.run_id,
+        };
+        reconcile_operations(&mut runtime, 20)
+            .expect("the durable spawn should resume");
+        reconcile_operations(&mut runtime, 21)
+            .expect("repeated reconciliation should be idempotent");
+
+        store
+            .transaction(|repositories| {
+                let operation = repositories
+                    .operation(operation_id)?
+                    .expect("the spawn operation should remain durable");
+                assert_eq!(
+                    operation.reconciliation_state,
+                    Some(ExternalResourceState::Observed)
+                );
+                assert_eq!(operation.reconciliation_attempt_count, 2);
+                assert_eq!(operation.reconciliation_error, None);
+                assert_eq!(repositories.sessions(active.run_id)?.len(), 1);
+                assert_eq!(
+                    repositories
+                        .events_after(active.run_id, 0, 100)?
+                        .into_iter()
+                        .filter(|event| {
+                            event.event_type
+                                == "operation.reconciliation_changed"
+                                && event.subject == operation_id.to_string()
+                                && event.payload["data"]["state"] == "observed"
+                        })
+                        .count(),
+                    1
+                );
+                Ok(())
+            })
+            .expect("the reconciled spawn should be inspectable");
+    }
+
+    #[test]
+    fn reconciliation_retries_a_spawn_with_a_desired_session() {
+        let fixture = TestDirectory::new();
+        let project_path = fixture.join("project");
+        let run_state_directory = fixture.join("run");
+        fs::create_dir(&project_path).expect("the project should be created");
+        fs::create_dir(&run_state_directory)
+            .expect("the run state directory should be created");
+        let active = entry(&project_path);
+        let task_id = TASK_ID.parse::<TaskId>().expect("valid task ID");
+        let operation_id = OperationId::generate();
+        let socket_path = fixture.join("supervisor.sock");
+        let mut store = Store::open(&run_state_directory.join("state.sqlite3"))
+            .expect("the store should open");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: active.run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_project(&ProjectRecord {
+                    id: active.project_id,
+                    run_id: active.run_id,
+                    alias: "primary".to_owned(),
+                    original_path: project_path.clone(),
+                    canonical_path: project_path.clone(),
+                    identity: active.project_identity.clone(),
+                    is_primary: true,
+                    attached_at: 10,
+                })?;
+                repositories.insert_task(&TaskRecord {
+                    id: task_id,
+                    run_id: active.run_id,
+                    project_id: active.project_id,
+                    group_id: None,
+                    title: "Recover provider launch".to_owned(),
+                    description: "Retry the durable provider intent."
+                        .to_owned(),
+                    status: TaskStatus::Open,
+                    result: None,
+                    created_at: 11,
+                    updated_at: 11,
+                })
+            })
+            .expect("the spawn prerequisites should commit");
+        let mut failed_sessions = AgentSessionSupervisor::new(
+            FakeProvider::new([]),
+            &run_state_directory,
+        );
+        let mut workspaces = WorkspaceSupervisor::new(FakeWorkspace::new());
+
+        let first = spawn_agent(
+            super::SpawnRuntime {
+                store: &mut store,
+                sessions: &mut failed_sessions,
+                workspaces: &mut workspaces,
+                run_state_directory: &run_state_directory,
+                socket_path: &socket_path,
+                run_id: active.run_id,
+            },
+            &AuthenticatedCaller::Operator,
+            operation_id,
+            "worker".to_owned(),
+            task_id,
+        );
+        assert!(first.is_err(), "the first provider launch should fail");
+        store
+            .transaction(|repositories| {
+                let operation = repositories
+                    .operation(operation_id)?
+                    .expect("the spawn operation should remain durable");
+                let session = repositories
+                    .sessions(active.run_id)?
+                    .into_iter()
+                    .next()
+                    .expect("the provider intent should remain durable");
+                assert_eq!(
+                    operation.reconciliation_state,
+                    Some(ExternalResourceState::Desired)
+                );
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Desired
+                );
+                assert_eq!(session.provider_session_id, None);
+                Ok(())
+            })
+            .expect("the failed launch should remain inspectable");
+
+        let mut recovered_sessions = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([])]),
+            &run_state_directory,
+        );
+        let mut runtime = super::SpawnRuntime {
+            store: &mut store,
+            sessions: &mut recovered_sessions,
+            workspaces: &mut workspaces,
+            run_state_directory: &run_state_directory,
+            socket_path: &socket_path,
+            run_id: active.run_id,
+        };
+        reconcile_operations(&mut runtime, 20)
+            .expect("the desired provider session should be retried");
+
+        store
+            .transaction(|repositories| {
+                let operation = repositories
+                    .operation(operation_id)?
+                    .expect("the spawn operation should remain durable");
+                let session = repositories
+                    .sessions(active.run_id)?
+                    .into_iter()
+                    .next()
+                    .expect("the provider session should remain durable");
+                assert_eq!(
+                    operation.reconciliation_state,
+                    Some(ExternalResourceState::Observed)
+                );
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Observed
+                );
+                assert_eq!(
+                    session.provider_session_id.as_deref(),
+                    Some("fake-session-1")
+                );
+                Ok(())
+            })
+            .expect("the retried launch should be observed");
+    }
+
+    #[test]
+    fn spawn_preflight_failure_does_not_inherit_the_workspace_observation() {
+        let fixture = TestDirectory::new();
+        let project_path = fixture.join("project");
+        let run_state_directory = fixture.join("run");
+        fs::create_dir(&project_path).expect("the project should be created");
+        fs::create_dir(&run_state_directory)
+            .expect("the run state directory should be created");
+        let active = entry(&project_path);
+        let task_id = TASK_ID.parse::<TaskId>().expect("valid task ID");
+        let operation_id = OperationId::generate();
+        let socket_path = fixture.join("supervisor.sock");
+        let mut store = Store::open(&run_state_directory.join("state.sqlite3"))
+            .expect("the store should open");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: active.run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_project(&ProjectRecord {
+                    id: active.project_id,
+                    run_id: active.run_id,
+                    alias: "primary".to_owned(),
+                    original_path: project_path.clone(),
+                    canonical_path: project_path.clone(),
+                    identity: active.project_identity.clone(),
+                    is_primary: true,
+                    attached_at: 10,
+                })?;
+                repositories.insert_task(&TaskRecord {
+                    id: task_id,
+                    run_id: active.run_id,
+                    project_id: active.project_id,
+                    group_id: None,
+                    title: "Reject provider preflight".to_owned(),
+                    description: "Keep an incomplete spawn reconcilable."
+                        .to_owned(),
+                    status: TaskStatus::Open,
+                    result: None,
+                    created_at: 11,
+                    updated_at: 11,
+                })
+            })
+            .expect("the spawn prerequisites should commit");
+        let provider = FakeProvider::new([FakeScript::new([])])
+            .without_capability(ProviderCapability::BackgroundJobs);
+        let mut sessions =
+            AgentSessionSupervisor::new(provider, &run_state_directory);
+        let mut workspaces = WorkspaceSupervisor::new(FakeWorkspace::new());
+
+        let result = spawn_agent(
+            super::SpawnRuntime {
+                store: &mut store,
+                sessions: &mut sessions,
+                workspaces: &mut workspaces,
+                run_state_directory: &run_state_directory,
+                socket_path: &socket_path,
+                run_id: active.run_id,
+            },
+            &AuthenticatedCaller::Operator,
+            operation_id,
+            "worker".to_owned(),
+            task_id,
+        );
+        assert!(result.is_err(), "provider preflight should fail");
+
+        store
+            .transaction(|repositories| {
+                let operation = repositories
+                    .operation(operation_id)?
+                    .expect("the spawn operation should remain durable");
+                let assignment = repositories
+                    .latest_assignment_for_task(active.run_id, task_id)?
+                    .expect("the assignment should remain durable");
+                let workspace = repositories
+                    .workspace(assignment.id)?
+                    .expect("the workspace should remain durable");
+                assert_eq!(workspace.state, ExternalResourceState::Observed);
+                assert!(repositories.sessions(active.run_id)?.is_empty());
+                assert_eq!(
+                    operation.reconciliation_state,
+                    Some(ExternalResourceState::Desired)
+                );
+                assert_eq!(
+                    repositories
+                        .operations_requiring_reconciliation(active.run_id)?,
+                    vec![operation]
+                );
+                Ok(())
+            })
+            .expect("the incomplete spawn should remain reconcilable");
+    }
+
+    #[test]
+    fn reconciliation_completes_an_interrupted_integration_once() {
+        let fixture = TestDirectory::new();
+        let project_path = fixture.join("project");
+        let run_state_directory = fixture.join("run");
+        fs::create_dir(&project_path).expect("the project should be created");
+        fs::create_dir(&run_state_directory)
+            .expect("the run state directory should be created");
+        let active = entry(&project_path);
+        let agent_id = AgentId::generate();
+        let task_id = TaskId::generate();
+        let assignment_id = AssignmentId::generate();
+        let spawn_operation_id = OperationId::generate();
+        let integration_operation_id = OperationId::generate();
+        let base_commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let result_commit = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let socket_path = fixture.join("supervisor.sock");
+        let mut store = Store::open(&run_state_directory.join("state.sqlite3"))
+            .expect("the store should open");
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: active.run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_project(&ProjectRecord {
+                    id: active.project_id,
+                    run_id: active.run_id,
+                    alias: "primary".to_owned(),
+                    original_path: project_path.clone(),
+                    canonical_path: project_path.clone(),
+                    identity: active.project_identity.clone(),
+                    is_primary: true,
+                    attached_at: 10,
+                })?;
+                repositories.insert_agent(&AgentRecord {
+                    id: agent_id,
+                    run_id: active.run_id,
+                    role: "worker".to_owned(),
+                    generation: 0,
+                    state: LifecycleState::Exited,
+                    created_at: 11,
+                })?;
+                repositories.insert_task(&TaskRecord {
+                    id: task_id,
+                    run_id: active.run_id,
+                    project_id: active.project_id,
+                    group_id: None,
+                    title: "Recover integration".to_owned(),
+                    description: "Resume the durable integration intent."
+                        .to_owned(),
+                    status: TaskStatus::Submitted,
+                    result: None,
+                    created_at: 11,
+                    updated_at: 12,
+                })?;
+                repositories.insert_operation(&OperationRecord {
+                    id: spawn_operation_id,
+                    run_id: active.run_id,
+                    kind: "agent.spawn".to_owned(),
+                    actor_agent_id: None,
+                    status: "succeeded".to_owned(),
+                    request: json!({"role": "worker", "task_id": task_id}),
+                    result: Some(json!({"assignment_id": assignment_id})),
+                    attempt_count: 1,
+                    reconciliation_state: None,
+                    reconciliation_attempt_count: 0,
+                    reconciliation_error: None,
+                    reconciled_at: None,
+                    created_at: 11,
+                    updated_at: 11,
+                })?;
+                repositories.insert_claim(&ClaimRecord {
+                    id: 1,
+                    run_id: active.run_id,
+                    task_id,
+                    agent_id,
+                    operation_id: spawn_operation_id,
+                    state: "released".to_owned(),
+                    claimed_at: 11,
+                    released_at: Some(12),
+                })?;
+                repositories.insert_assignment(&AssignmentRecord {
+                    id: assignment_id,
+                    run_id: active.run_id,
+                    task_id,
+                    agent_id,
+                    session_id: None,
+                    claim_id: 1,
+                    generation: 0,
+                    state: "completed".to_owned(),
+                    summary: Some("Implemented the change.".to_owned()),
+                    created_at: 11,
+                    completed_at: Some(12),
+                })?;
+                repositories.insert_workspace(&WorkspaceRecord {
+                    assignment_id,
+                    run_id: active.run_id,
+                    project_id: active.project_id,
+                    kind: "worktree".to_owned(),
+                    path: run_state_directory.join("workspace"),
+                    state: ExternalResourceState::Observed,
+                    base_commit: Some(base_commit.to_owned()),
+                    result_commit: Some(result_commit.to_owned()),
+                    target_commit: None,
+                    created_at: 11,
+                    reconciled_at: Some(11),
+                })?;
+                repositories.insert_operation(&OperationRecord {
+                    id: integration_operation_id,
+                    run_id: active.run_id,
+                    kind: "workspace.integrate".to_owned(),
+                    actor_agent_id: None,
+                    status: "succeeded".to_owned(),
+                    request: json!({"assignment_id": assignment_id}),
+                    result: Some(json!({
+                        "assignment_id": assignment_id,
+                        "project_id": active.project_id,
+                        "target_reference": "refs/heads/main",
+                        "target_commit": base_commit,
+                        "integrated_at": 13,
+                    })),
+                    attempt_count: 1,
+                    reconciliation_state: Some(ExternalResourceState::Desired),
+                    reconciliation_attempt_count: 0,
+                    reconciliation_error: None,
+                    reconciled_at: None,
+                    created_at: 13,
+                    updated_at: 13,
+                })
+            })
+            .expect("the integration intent should commit");
+        let mut sessions = runtime_sessions(&run_state_directory);
+        let mut workspaces = WorkspaceSupervisor::new(
+            FakeWorkspace::with_commits(base_commit, result_commit),
+        );
+        let mut runtime = super::SpawnRuntime {
+            store: &mut store,
+            sessions: &mut sessions,
+            workspaces: &mut workspaces,
+            run_state_directory: &run_state_directory,
+            socket_path: &socket_path,
+            run_id: active.run_id,
+        };
+
+        reconcile_operations(&mut runtime, 20)
+            .expect("the durable integration should resume");
+        reconcile_operations(&mut runtime, 21)
+            .expect("repeated reconciliation should be idempotent");
+
+        store
+            .transaction(|repositories| {
+                let operation = repositories
+                    .operation(integration_operation_id)?
+                    .expect("the integration operation should remain durable");
+                let workspace = repositories
+                    .workspace(assignment_id)?
+                    .expect("the workspace should remain durable");
+                assert_eq!(
+                    operation.reconciliation_state,
+                    Some(ExternalResourceState::Observed)
+                );
+                assert_eq!(operation.reconciliation_attempt_count, 1);
+                assert_eq!(
+                    workspace.target_commit.as_deref(),
+                    Some(result_commit)
+                );
+                assert_eq!(
+                    repositories
+                        .events_after(active.run_id, 0, 100)?
+                        .into_iter()
+                        .filter(|event| {
+                            event.event_type == "workspace.integrated"
+                        })
+                        .count(),
+                    1
+                );
+                Ok(())
+            })
+            .expect("the reconciled integration should be inspectable");
     }
 
     #[tokio::test]

@@ -129,11 +129,44 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         let project = project.ok_or(WorkspaceError::MissingProject {
             project_id: workspace.project_id,
         })?;
-        let observed = self.backend.observe(&workspace, &project)?;
+        let observed = match self.backend.observe(&workspace, &project) {
+            Ok(observed) => observed,
+            Err(error) => {
+                self.record_state(
+                    store,
+                    &workspace,
+                    ExternalResourceState::Unknown,
+                    reconciled_at,
+                )?;
+                return Err(error.into());
+            }
+        };
         let state = match (workspace.state, observed) {
-            (ExternalResourceState::Desired, ExternalResourceState::Lost) => {
-                self.backend.create(&workspace, &project)?;
-                self.backend.observe(&workspace, &project)?
+            (
+                ExternalResourceState::Desired | ExternalResourceState::Unknown,
+                ExternalResourceState::Lost,
+            ) => {
+                if let Err(error) = self.backend.create(&workspace, &project) {
+                    self.record_state(
+                        store,
+                        &workspace,
+                        ExternalResourceState::Unknown,
+                        reconciled_at,
+                    )?;
+                    return Err(error.into());
+                }
+                match self.backend.observe(&workspace, &project) {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        self.record_state(
+                            store,
+                            &workspace,
+                            ExternalResourceState::Unknown,
+                            reconciled_at,
+                        )?;
+                        return Err(error.into());
+                    }
+                }
             }
             (_, state) => state,
         };
@@ -151,7 +184,14 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         let workspaces = store
             .transaction(|repositories| repositories.workspaces(run_id))?;
         for workspace in workspaces {
-            self.materialize(store, workspace.assignment_id, reconciled_at)?;
+            match self.materialize(
+                store,
+                workspace.assignment_id,
+                reconciled_at,
+            ) {
+                Ok(_) | Err(WorkspaceError::Backend(_)) => {}
+                Err(error) => return Err(error),
+            }
         }
         Ok(())
     }
@@ -221,6 +261,7 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         plan: &IntegrationPlan,
         operation_id: crate::id::OperationId,
         actor: &str,
+        reconciled_at: i64,
     ) -> Result<IntegrationRecord, WorkspaceError> {
         let (workspace, project) = integration_records(store, assignment_id)?;
         let integration = self.backend.integrate(&workspace, &project, plan)?;
@@ -256,6 +297,12 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
                     created_at: plan.integrated_at,
                 })?;
             }
+            repositories.record_operation_reconciliation(
+                operation_id,
+                ExternalResourceState::Observed,
+                None,
+                reconciled_at,
+            )?;
             Ok(())
         })?;
         Ok(integration)
@@ -2477,7 +2524,7 @@ mod tests {
         );
         assert_eq!(
             stored_workspace(&mut store, workspace.assignment_id).state,
-            ExternalResourceState::Desired
+            ExternalResourceState::Unknown
         );
 
         assert_eq!(
@@ -2531,6 +2578,7 @@ mod tests {
                 &plan,
                 operation_id,
                 "operator",
+                plan.integrated_at,
             )
             .expect("the fake integration should be recorded");
         assert_eq!(
@@ -2541,6 +2589,7 @@ mod tests {
                     &plan,
                     operation_id,
                     "operator",
+                    plan.integrated_at,
                 )
                 .expect("the integration observation should be idempotent"),
             integrated
@@ -2571,6 +2620,99 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn reconciliation_records_an_integration_completed_before_observation() {
+        let fixture = GitFixture::new();
+        let (backend, mut workspace) = fixture.materialized_workspace();
+        let result = commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "worker result",
+        );
+        workspace.state = ExternalResourceState::Observed;
+        workspace.result_commit = Some(result);
+        let assignment_id = workspace.assignment_id;
+        let run_id = workspace.run_id;
+        let operation_id = OperationId::generate();
+        let mut store = store_with_workspace_records(
+            fixture.project.clone(),
+            workspace.clone(),
+        );
+        let mut supervisor = WorkspaceSupervisor::new(backend);
+        let plan = supervisor
+            .prepare_integration(&mut store, assignment_id, 11)
+            .expect("the integration should preflight");
+        store
+            .transaction(|repositories| {
+                repositories.insert_operation(&OperationRecord {
+                    id: operation_id,
+                    run_id,
+                    kind: "workspace.integrate".to_owned(),
+                    actor_agent_id: None,
+                    status: "succeeded".to_owned(),
+                    request: json!({"assignment_id": assignment_id}),
+                    result: Some(serde_json::to_value(&plan)?),
+                    attempt_count: 1,
+                    reconciliation_state: Some(ExternalResourceState::Desired),
+                    reconciliation_attempt_count: 0,
+                    reconciliation_error: None,
+                    reconciled_at: None,
+                    created_at: 11,
+                    updated_at: 11,
+                })
+            })
+            .expect("the integration intent should commit");
+
+        let side_effect = supervisor
+            .backend_mut()
+            .integrate(&workspace, &fixture.project, &plan)
+            .expect("the external side effect should complete");
+        let observed = supervisor
+            .integrate(
+                &mut store,
+                assignment_id,
+                &plan,
+                operation_id,
+                "reconciler",
+                20,
+            )
+            .expect("reconciliation should observe the completed side effect");
+        assert_eq!(observed, side_effect);
+
+        store
+            .transaction(|repositories| {
+                let operation = repositories
+                    .operation(operation_id)?
+                    .expect("the integration operation should remain durable");
+                let workspace = repositories
+                    .workspace(assignment_id)?
+                    .expect("the workspace should remain durable");
+                assert_eq!(
+                    operation.reconciliation_state,
+                    Some(ExternalResourceState::Observed)
+                );
+                assert_eq!(operation.reconciliation_attempt_count, 1);
+                assert_eq!(operation.reconciled_at, Some(20));
+                assert_eq!(
+                    workspace.target_commit.as_deref(),
+                    Some(side_effect.target_commit.as_str())
+                );
+                assert_eq!(
+                    repositories
+                        .events_after(run_id, 0, 100)?
+                        .into_iter()
+                        .filter(|event| {
+                            event.event_type == "workspace.integrated"
+                        })
+                        .count(),
+                    1
+                );
+                Ok(())
+            })
+            .expect("the observed integration should be inspectable");
     }
 
     #[test]
@@ -2745,6 +2887,10 @@ mod tests {
                     request: json!({"role": "worker", "task_id": task_id}),
                     result: Some(json!({"assignment_id": assignment_id})),
                     attempt_count: 1,
+                    reconciliation_state: None,
+                    reconciliation_attempt_count: 0,
+                    reconciliation_error: None,
+                    reconciled_at: None,
                     created_at: 5,
                     updated_at: 5,
                 })?;

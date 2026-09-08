@@ -167,7 +167,7 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 
 ## M4: Reliability and safety hardening
 
-- [ ] Reconcile every durable operation and owned resource idempotently after
+- [x] Reconcile every durable operation and owned resource idempotently after
   crashes between intent, external side effect, and observed-result
   recording.
 - [ ] Fence sessions, assignments, workspaces, and late provider output by run

@@ -1813,9 +1813,11 @@ fn durable_restart_snapshot(
         operations: query_rows(
             connection,
             "SELECT id, run_id, kind, actor_agent_id, status, request_json, \
-                    result_json, attempt_count, created_at, updated_at \
+                    result_json, attempt_count, reconciliation_state, \
+                    reconciliation_attempt_count, reconciliation_error, \
+                    reconciled_at, created_at, updated_at \
              FROM operations ORDER BY id",
-            10,
+            14,
         ),
         workspaces: query_rows(
             connection,

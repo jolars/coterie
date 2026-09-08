@@ -223,11 +223,13 @@ or provider-session resume. The injected bootstrap directs the lead to
 After a supervisor crash, the next foreground launch reconnects when possible
 or restarts the same run from its database, lease, and index. Startup removes a
 stale owned socket, republishes the same run and project identities, repairs a
-workspace whose durable creation intent was interrupted, and rechecks session
-state. A vanished worker becomes `lost`; a process Coterie cannot prove belongs
-to the recorded generation remains `unknown` and is neither adopted nor killed.
-Tasks, dependencies, operations, messages, events, transcripts, and recoverable
-workspaces remain available.
+workspace whose durable creation intent was interrupted, resumes incomplete
+spawn and integration operations, and rechecks session state. Each external
+operation records its reconciliation state, attempts, last error, and last
+attempt time. A vanished worker becomes `lost`; a process Coterie cannot prove
+belongs to the recorded generation remains `unknown` and is neither adopted nor
+killed. Tasks, dependencies, operations, messages, events, transcripts, and
+recoverable workspaces remain available.
 
 Coterie never automatically deletes a dirty, unintegrated, running, lost, or
 ambiguously owned assignment worktree. Use `status`, `prime`, `logs`, and

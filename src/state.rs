@@ -62,6 +62,11 @@ const MIGRATIONS: &[Migration] = &[
             "state/migrations/0006_session_process_ownership.sql"
         ),
     },
+    Migration {
+        version: 7,
+        name: "operation_reconciliation",
+        sql: include_str!("state/migrations/0007_operation_reconciliation.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -395,6 +400,10 @@ pub(crate) struct OperationRecord {
     pub(crate) request: JsonValue,
     pub(crate) result: Option<JsonValue>,
     pub(crate) attempt_count: i64,
+    pub(crate) reconciliation_state: Option<ExternalResourceState>,
+    pub(crate) reconciliation_attempt_count: i64,
+    pub(crate) reconciliation_error: Option<String>,
+    pub(crate) reconciled_at: Option<i64>,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
 }
@@ -608,6 +617,7 @@ pub(crate) enum EventKind {
     SessionStarted,
     SessionLifecycleChanged,
     SessionReconciliationChanged,
+    OperationReconciliationChanged,
     TaskCreated,
     TaskClaimed,
     TaskLifecycleChanged,
@@ -636,6 +646,9 @@ impl EventKind {
             Self::SessionLifecycleChanged => "session.lifecycle_changed",
             Self::SessionReconciliationChanged => {
                 "session.reconciliation_changed"
+            }
+            Self::OperationReconciliationChanged => {
+                "operation.reconciliation_changed"
             }
             Self::TaskCreated => "task.created",
             Self::TaskClaimed => "task.claimed",
@@ -852,6 +865,10 @@ impl Store {
             request: mutation.request.clone(),
             result: None,
             attempt_count: 1,
+            reconciliation_state: None,
+            reconciliation_attempt_count: 0,
+            reconciliation_error: None,
+            reconciled_at: None,
             created_at: mutation.created_at,
             updated_at: mutation.created_at,
         })?;
@@ -2229,8 +2246,11 @@ impl Repositories<'_, '_> {
         self.transaction.execute(
             "INSERT INTO operations (\
                  id, run_id, kind, actor_agent_id, status, request_json, result_json, \
-                 attempt_count, created_at, updated_at\
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 attempt_count, reconciliation_state, reconciliation_attempt_count, \
+                 reconciliation_error, reconciled_at, created_at, updated_at\
+             ) VALUES (\
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14\
+             )",
             params![
                 operation.id,
                 operation.run_id,
@@ -2240,6 +2260,10 @@ impl Repositories<'_, '_> {
                 request,
                 result,
                 operation.attempt_count,
+                operation.reconciliation_state.map(ExternalResourceState::as_str),
+                operation.reconciliation_attempt_count,
+                operation.reconciliation_error,
+                operation.reconciled_at,
                 operation.created_at,
                 operation.updated_at,
             ],
@@ -2255,25 +2279,176 @@ impl Repositories<'_, '_> {
             .transaction
             .query_row(
                 "SELECT id, run_id, kind, actor_agent_id, status, request_json, result_json, \
-                        attempt_count, created_at, updated_at \
+                        attempt_count, reconciliation_state, reconciliation_attempt_count, \
+                        reconciliation_error, reconciled_at, created_at, updated_at \
                  FROM operations WHERE id = ?1",
                 [id],
-                |row| {
-                    Ok(OperationRecord {
-                        id: row.get(0)?,
-                        run_id: row.get(1)?,
-                        kind: row.get(2)?,
-                        actor_agent_id: row.get(3)?,
-                        status: row.get(4)?,
-                        request: decode_json(row, 5)?,
-                        result: decode_optional_json(row, 6)?,
-                        attempt_count: row.get(7)?,
-                        created_at: row.get(8)?,
-                        updated_at: row.get(9)?,
-                    })
-                },
+                decode_operation,
             )
             .optional()?)
+    }
+
+    pub(crate) fn operations_requiring_reconciliation(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<OperationRecord>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT id, run_id, kind, actor_agent_id, status, request_json, result_json, \
+                    attempt_count, reconciliation_state, reconciliation_attempt_count, \
+                    reconciliation_error, reconciled_at, created_at, updated_at \
+             FROM operations \
+             WHERE run_id = ?1 AND (\
+                 reconciliation_state = 'desired' \
+                 OR (\
+                     reconciliation_state = 'unknown' \
+                     AND (\
+                         kind IN ('agent.spawn', 'workspace.integrate') \
+                         OR reconciled_at IS NULL\
+                     )\
+                 )\
+             ) \
+             ORDER BY created_at, id",
+        )?;
+        let rows = statement.query_map([run_id], decode_operation)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub(crate) fn foreground_launch_operation_for_session(
+        &self,
+        run_id: RunId,
+        session_id: SessionId,
+    ) -> Result<Option<OperationRecord>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT id, run_id, kind, actor_agent_id, status, request_json, \
+                        result_json, attempt_count, reconciliation_state, \
+                        reconciliation_attempt_count, reconciliation_error, \
+                        reconciled_at, created_at, updated_at \
+                 FROM operations \
+                 WHERE run_id = ?1 \
+                   AND kind = 'agent.launch_foreground' \
+                   AND json_extract(result_json, '$.session_id') = ?2 \
+                   AND json_extract(result_json, '$.already_active') = 0",
+                params![run_id, session_id],
+                decode_operation,
+            )
+            .optional()?)
+    }
+
+    pub(crate) fn mark_operation_reconciliation_desired(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<(), StoreError> {
+        let updated = self.transaction.execute(
+            "UPDATE operations SET reconciliation_state = 'desired', \
+                 reconciliation_error = NULL, reconciled_at = NULL \
+             WHERE id = ?1 AND reconciliation_state IS NULL",
+            [operation_id],
+        )?;
+        if updated == 1 {
+            let operation = self.operation(operation_id)?.ok_or(
+                StoreError::OperationIncomplete {
+                    id: operation_id,
+                    status: "external reconciliation intent disappeared"
+                        .to_owned(),
+                },
+            )?;
+            self.append_operation_reconciliation_event(
+                &operation,
+                None,
+                ExternalResourceState::Desired,
+                None,
+                operation.created_at,
+            )?;
+            Ok(())
+        } else {
+            let operation = self.operation(operation_id)?;
+            if operation.as_ref().is_some_and(|operation| {
+                operation.reconciliation_state
+                    == Some(ExternalResourceState::Desired)
+            }) {
+                Ok(())
+            } else {
+                Err(StoreError::OperationIncomplete {
+                    id: operation_id,
+                    status: "missing external reconciliation intent".to_owned(),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn record_operation_reconciliation(
+        &self,
+        operation_id: OperationId,
+        state: ExternalResourceState,
+        error: Option<&str>,
+        reconciled_at: i64,
+    ) -> Result<ResourceTransitionOutcome, StoreError> {
+        let Some(operation) = self.operation(operation_id)? else {
+            return Ok(ResourceTransitionOutcome::Stale);
+        };
+        if operation.reconciliation_state.is_none() {
+            return Ok(ResourceTransitionOutcome::Stale);
+        }
+        let outcome = if operation.reconciliation_state == Some(state)
+            && operation.reconciliation_error.as_deref() == error
+        {
+            ResourceTransitionOutcome::Unchanged
+        } else {
+            ResourceTransitionOutcome::Applied
+        };
+        self.transaction.execute(
+            "UPDATE operations \
+             SET reconciliation_state = ?2, \
+                 reconciliation_attempt_count = reconciliation_attempt_count + 1, \
+                 reconciliation_error = ?3, reconciled_at = ?4 \
+             WHERE id = ?1 AND reconciliation_state IS NOT NULL",
+            params![operation_id, state.as_str(), error, reconciled_at],
+        )?;
+        if outcome == ResourceTransitionOutcome::Applied {
+            self.append_operation_reconciliation_event(
+                &operation,
+                operation.reconciliation_state,
+                state,
+                error,
+                reconciled_at,
+            )?;
+        }
+        Ok(outcome)
+    }
+
+    fn append_operation_reconciliation_event(
+        &self,
+        operation: &OperationRecord,
+        previous_state: Option<ExternalResourceState>,
+        state: ExternalResourceState,
+        error: Option<&str>,
+        created_at: i64,
+    ) -> Result<(), StoreError> {
+        self.append_event(&NewEvent {
+            run_id: operation.run_id,
+            kind: EventKind::OperationReconciliationChanged,
+            actor: "reconciler".to_owned(),
+            subject: operation.id.to_string(),
+            project_id: None,
+            agent_id: operation.actor_agent_id,
+            task_id: None,
+            operation_id: Some(operation.id),
+            correlation_id: None,
+            causation_id: None,
+            data: json!({
+                "error": error,
+                "previous_state": previous_state.map(ExternalResourceState::as_str),
+                "state": state.as_str(),
+            }),
+            summary: format!(
+                "Operation {} reconciliation changed to {}.",
+                operation.id, state
+            ),
+            created_at,
+        })?;
+        Ok(())
     }
 
     pub(crate) fn insert_claim(
@@ -3303,6 +3478,27 @@ fn decode_optional_json(
         .transpose()
 }
 
+fn decode_operation(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<OperationRecord> {
+    Ok(OperationRecord {
+        id: row.get(0)?,
+        run_id: row.get(1)?,
+        kind: row.get(2)?,
+        actor_agent_id: row.get(3)?,
+        status: row.get(4)?,
+        request: decode_json(row, 5)?,
+        result: decode_optional_json(row, 6)?,
+        attempt_count: row.get(7)?,
+        reconciliation_state: decode_optional_external_resource_state(row, 8)?,
+        reconciliation_attempt_count: row.get(9)?,
+        reconciliation_error: row.get(10)?,
+        reconciled_at: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
 fn decode_lifecycle(
     row: &rusqlite::Row<'_>,
     index: usize,
@@ -3329,6 +3525,23 @@ fn decode_external_resource_state(
             Box::new(error),
         )
     })
+}
+
+fn decode_optional_external_resource_state(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<ExternalResourceState>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|encoded| {
+            encoded.parse().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    index,
+                    Type::Text,
+                    Box::new(error),
+                )
+            })
+        })
+        .transpose()
 }
 
 fn decode_session_process_owner(
@@ -3362,11 +3575,11 @@ mod tests {
         ClaimTaskMutation, ClaimTaskResult, CommentRecord,
         ConfigurationSnapshotRecord, DependencyRecord, EventRecord,
         ExternalResourceState, MIGRATIONS, MessageRecord, Mutation,
-        MutationOutcome, OperationRecord, ProjectRecord, RunRecord,
-        SessionCredentialRecord, SessionProcessOwner, SessionRecord,
-        SessionTransitionOutcome, Store, TaskGroupRecord, TaskRecord,
-        TaskTransitionMutation, TaskTransitionRejection, TaskTransitionResult,
-        WorkspaceRecord,
+        MutationOutcome, OperationRecord, ProjectRecord,
+        ResourceTransitionOutcome, RunRecord, SessionCredentialRecord,
+        SessionProcessOwner, SessionRecord, SessionTransitionOutcome, Store,
+        TaskGroupRecord, TaskRecord, TaskTransitionMutation,
+        TaskTransitionRejection, TaskTransitionResult, WorkspaceRecord,
     };
     use crate::auth::{AgentToken, SessionScope};
     use crate::id::{
@@ -3634,6 +3847,162 @@ mod tests {
     }
 
     #[test]
+    fn external_operation_reconciliation_is_durable_and_inspectable() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        let operation = OperationRecord {
+            actor_agent_id: None,
+            kind: "agent.spawn".to_owned(),
+            ..records.operation.clone()
+        };
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_operation(&operation)?;
+                repositories.mark_operation_reconciliation_desired(operation.id)
+            })
+            .expect("the external-operation intent should commit");
+
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories.record_operation_reconciliation(
+                        records.operation.id,
+                        ExternalResourceState::Unknown,
+                        Some("provider identity could not be proved"),
+                        20,
+                    )?,
+                    ResourceTransitionOutcome::Applied
+                );
+                assert_eq!(
+                    repositories.record_operation_reconciliation(
+                        records.operation.id,
+                        ExternalResourceState::Unknown,
+                        Some("provider identity could not be proved"),
+                        21,
+                    )?,
+                    ResourceTransitionOutcome::Unchanged
+                );
+                Ok(())
+            })
+            .expect("reconciliation attempts should commit");
+
+        store
+            .transaction(|repositories| {
+                let operation = repositories
+                    .operation(records.operation.id)?
+                    .expect("the operation should remain durable");
+                assert_eq!(
+                    operation.reconciliation_state,
+                    Some(ExternalResourceState::Unknown)
+                );
+                assert_eq!(operation.reconciliation_attempt_count, 2);
+                assert_eq!(
+                    operation.reconciliation_error.as_deref(),
+                    Some("provider identity could not be proved")
+                );
+                assert_eq!(operation.reconciled_at, Some(21));
+                assert_eq!(
+                    repositories
+                        .operations_requiring_reconciliation(records.run.id)?,
+                    vec![operation]
+                );
+                Ok(())
+            })
+            .expect("reconciliation state should be readable");
+    }
+
+    #[test]
+    fn unknown_integration_operations_remain_reconcilable() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        let operation = OperationRecord {
+            actor_agent_id: None,
+            kind: "workspace.integrate".to_owned(),
+            status: "succeeded".to_owned(),
+            result: Some(json!({"assignment_id": records.assignment.id})),
+            reconciliation_state: Some(ExternalResourceState::Unknown),
+            reconciliation_attempt_count: 1,
+            reconciliation_error: Some(
+                "repository is temporarily unavailable".to_owned(),
+            ),
+            reconciled_at: Some(20),
+            ..records.operation.clone()
+        };
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_operation(&operation)
+            })
+            .expect("the integration operation should commit");
+
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .operations_requiring_reconciliation(records.run.id)?,
+                    vec![operation]
+                );
+                Ok(())
+            })
+            .expect("the uncertain integration should remain reconcilable");
+    }
+
+    #[test]
+    fn foreground_session_lookup_ignores_already_active_attempts() {
+        let mut store = Store::open_in_memory().expect("the store should open");
+        let records = Records::fixture();
+        let rejected = OperationRecord {
+            actor_agent_id: None,
+            kind: "agent.launch_foreground".to_owned(),
+            status: "succeeded".to_owned(),
+            request: json!({"role": "lead"}),
+            result: Some(json!({
+                "agent_id": records.agent.id,
+                "session_id": records.session.id,
+                "generation": records.session.generation,
+                "already_active": true,
+            })),
+            attempt_count: 1,
+            ..records.operation.clone()
+        };
+        let creator = OperationRecord {
+            id: SECOND_OPERATION_ID
+                .parse()
+                .expect("the operation ID should parse"),
+            result: Some(json!({
+                "agent_id": records.agent.id,
+                "session_id": records.session.id,
+                "generation": records.session.generation,
+                "already_active": false,
+            })),
+            ..rejected.clone()
+        };
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&records.run)?;
+                repositories.insert_operation(&rejected)?;
+                assert_eq!(
+                    repositories.foreground_launch_operation_for_session(
+                        records.run.id,
+                        records.session.id,
+                    )?,
+                    None
+                );
+                repositories.insert_operation(&creator)?;
+                assert_eq!(
+                    repositories.foreground_launch_operation_for_session(
+                        records.run.id,
+                        records.session.id,
+                    )?,
+                    Some(creator)
+                );
+                Ok(())
+            })
+            .expect("a rejected launch must not own the active session");
+    }
+
+    #[test]
     fn retries_reject_incomplete_and_corrupt_durable_results() {
         let cases = [
             ("pending", None, "incomplete"),
@@ -3665,6 +4034,10 @@ mod tests {
                         request: mutation.request.clone(),
                         result: result.clone(),
                         attempt_count: 1,
+                        reconciliation_state: None,
+                        reconciliation_attempt_count: 0,
+                        reconciliation_error: None,
+                        reconciled_at: None,
                         created_at: mutation.created_at,
                         updated_at: mutation.created_at,
                     })
@@ -4519,6 +4892,15 @@ mod tests {
                     )
                     .expect("the prior foreground process identity should be set");
             }
+            if prior_count >= 6 {
+                connection
+                    .execute(
+                        "UPDATE sessions SET process_owner = 'foreground' \
+                         WHERE id = ?1",
+                        [SESSION_ID],
+                    )
+                    .expect("the prior process owner should be set");
+            }
             drop(connection);
 
             let store =
@@ -4595,6 +4977,91 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn operation_reconciliation_migration_classifies_external_intents() {
+        let database = TestDatabase::new();
+        let connection = Connection::open(&database.0)
+            .expect("the prior database should open");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (\
+                     version INTEGER PRIMARY KEY,\
+                     name TEXT NOT NULL,\
+                     source TEXT NOT NULL,\
+                     applied_at INTEGER NOT NULL DEFAULT (unixepoch())\
+                 ) STRICT;",
+            )
+            .expect("the migration ledger should be created");
+        for migration in &MIGRATIONS[..6] {
+            connection
+                .execute_batch(migration.sql)
+                .expect("the released schema should be created");
+            connection
+                .execute(
+                    "INSERT INTO schema_migrations (version, name, source) \
+                     VALUES (?1, ?2, ?3)",
+                    (migration.version, migration.name, migration.sql),
+                )
+                .expect("the prior migration should be recorded");
+        }
+        connection
+            .execute(
+                "INSERT INTO runs (id, status, created_at) \
+                 VALUES (?1, 'active', 10)",
+                [RUN_ID],
+            )
+            .expect("the prior run should be inserted");
+        let kinds = [
+            "agent.launch_foreground",
+            "agent.spawn",
+            "workspace.integrate",
+            "task.create",
+        ];
+        let operation_ids = kinds
+            .iter()
+            .map(|_| OperationId::generate())
+            .collect::<Vec<_>>();
+        for (operation_id, kind) in operation_ids.iter().zip(kinds) {
+            connection
+                .execute(
+                    "INSERT INTO operations (\
+                         id, run_id, kind, status, request_json, result_json, \
+                         attempt_count, created_at, updated_at\
+                     ) VALUES (?1, ?2, ?3, 'succeeded', '{}', '{}', 1, 11, 11)",
+                    rusqlite::params![operation_id, RUN_ID, kind],
+                )
+                .expect("the prior operation should be inserted");
+        }
+        drop(connection);
+
+        let mut store = Store::open(&database.0)
+            .expect("the operation schema should upgrade");
+        store
+            .transaction(|repositories| {
+                for operation_id in &operation_ids[..3] {
+                    let operation = repositories
+                        .operation(*operation_id)?
+                        .expect("the external operation should remain durable");
+                    assert_eq!(
+                        operation.reconciliation_state,
+                        Some(ExternalResourceState::Unknown)
+                    );
+                    assert_eq!(operation.reconciliation_attempt_count, 0);
+                    assert_eq!(operation.reconciliation_error, None);
+                    assert_eq!(operation.reconciled_at, None);
+                }
+                assert_eq!(
+                    repositories
+                        .operation(operation_ids[3])?
+                        .expect("the database mutation should remain durable")
+                        .reconciliation_state,
+                    None
+                );
+                Ok(())
+            })
+            .expect("the classified operations should be readable");
     }
 
     #[test]
@@ -5470,6 +5937,10 @@ mod tests {
                     request: json!({"task_id": TASK_ID}),
                     result: None,
                     attempt_count: 0,
+                    reconciliation_state: None,
+                    reconciliation_attempt_count: 0,
+                    reconciliation_error: None,
+                    reconciled_at: None,
                     created_at: 21,
                     updated_at: 21,
                 },
