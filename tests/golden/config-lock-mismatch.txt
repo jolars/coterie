@@ -1,0 +1,1 @@
+configuration lock mismatch at "coterie.lock": archetype, coterie_version, providers, fingerprint; restore the locked configuration or review the configuration files and run `coterie config lock`; for coterie_version mismatches, use a compatible Coterie release

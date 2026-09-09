@@ -1,0 +1,397 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EffectiveReport",
+  "description": "Command data inside the version 1 CLI success envelope.",
+  "type": "object",
+  "properties": {
+    "effective": {
+      "$ref": "#/$defs/EffectiveConfig"
+    },
+    "fingerprint": {
+      "type": "string"
+    },
+    "lock": {
+      "$ref": "#/$defs/LockStatus"
+    },
+    "provenance": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/ValueProvenance"
+      }
+    }
+  },
+  "required": [
+    "effective",
+    "fingerprint",
+    "lock"
+  ],
+  "$defs": {
+    "ApprovalPolicy": {
+      "description": "How a provider process may request operator approval.",
+      "type": "string",
+      "enum": [
+        "interactive",
+        "never"
+      ]
+    },
+    "ArchetypeDefinition": {
+      "description": "A sealed, versioned declaration of roles and provider policy.",
+      "type": "object",
+      "properties": {
+        "lead": {
+          "type": "string"
+        },
+        "permission_profiles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/PermissionProfile"
+          }
+        },
+        "reference": {
+          "type": "string"
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RoleDefinition"
+          }
+        }
+      },
+      "required": [
+        "reference",
+        "lead",
+        "permission_profiles",
+        "roles"
+      ]
+    },
+    "CapabilityGrant": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "action"
+      ]
+    },
+    "ConfigLayer": {
+      "type": "string",
+      "enum": [
+        "compiled",
+        "builtin",
+        "global",
+        "project",
+        "operator"
+      ]
+    },
+    "ConfigSource": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "layer": {
+          "$ref": "#/$defs/ConfigLayer"
+        }
+      },
+      "required": [
+        "layer",
+        "file",
+        "field"
+      ]
+    },
+    "EffectiveConfig": {
+      "description": "Resolved values are distinct from the unmodified, versioned archetype.",
+      "type": "object",
+      "properties": {
+        "archetype": {
+          "$ref": "#/$defs/ArchetypeDefinition"
+        },
+        "limits": {
+          "$ref": "#/$defs/RunLimits"
+        },
+        "providers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ProviderBinding"
+          }
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/EffectiveRole"
+          }
+        },
+        "supervision": {
+          "$ref": "#/$defs/SupervisionPolicy"
+        }
+      },
+      "required": [
+        "archetype",
+        "providers",
+        "limits",
+        "supervision",
+        "roles"
+      ]
+    },
+    "EffectiveRole": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "max_instances": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "permission_profile": {
+          "$ref": "#/$defs/PermissionProfile"
+        }
+      },
+      "required": [
+        "enabled",
+        "max_instances",
+        "permission_profile"
+      ]
+    },
+    "FilesystemPolicy": {
+      "description": "Filesystem authority granted to a provider process.",
+      "type": "string",
+      "enum": [
+        "project-write",
+        "workspace-write",
+        "read-only"
+      ]
+    },
+    "LockStatus": {
+      "type": "string",
+      "enum": [
+        "absent",
+        "verified"
+      ]
+    },
+    "NetworkPolicy": {
+      "description": "Network authority granted to a provider process.",
+      "type": "string",
+      "enum": [
+        "provider-default",
+        "deny"
+      ]
+    },
+    "PermissionProfile": {
+      "description": "Provider sandbox policy referenced by a role.",
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "$ref": "#/$defs/ApprovalPolicy"
+        },
+        "filesystem": {
+          "$ref": "#/$defs/FilesystemPolicy"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "filesystem",
+        "network",
+        "approvals"
+      ]
+    },
+    "ProviderBinding": {
+      "description": "A trusted command binding for an out-of-process provider.",
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "command"
+      ]
+    },
+    "RoleDefinition": {
+      "description": "A configured type of agent with no runtime-defined role semantics.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityGrant"
+          }
+        },
+        "instructions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_instances": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "mode": {
+          "$ref": "#/$defs/RoleMode"
+        },
+        "permission_profile": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "workspace": {
+          "$ref": "#/$defs/WorkspacePolicy"
+        }
+      },
+      "required": [
+        "provider",
+        "mode",
+        "max_instances",
+        "workspace",
+        "permission_profile",
+        "instructions",
+        "capabilities"
+      ]
+    },
+    "RoleMode": {
+      "description": "The provider interaction style required by a role.",
+      "type": "string",
+      "enum": [
+        "interactive",
+        "job"
+      ]
+    },
+    "RunLimits": {
+      "description": "Operator ceilings that apply across archetypes.",
+      "type": "object",
+      "properties": {
+        "max_agents_per_run": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "max_concurrent_agents": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "max_spawns_per_minute": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "max_concurrent_agents",
+        "max_agents_per_run",
+        "max_spawns_per_minute"
+      ]
+    },
+    "SupervisionPolicy": {
+      "description": "Trusted bounds on provider quota and process control, independent of roles.",
+      "type": "object",
+      "properties": {
+        "interrupt_grace_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "job_timeout_seconds": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "max_launch_attempts": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "restart_backoff_seconds": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "restart_window_seconds": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "shutdown_timeout_ms": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "startup_timeout_seconds": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "restart_window_seconds",
+        "max_launch_attempts",
+        "restart_backoff_seconds",
+        "startup_timeout_seconds",
+        "job_timeout_seconds",
+        "interrupt_grace_ms",
+        "shutdown_timeout_ms"
+      ]
+    },
+    "ValueProvenance": {
+      "description": "A reference selects a value without becoming the source of its definition.",
+      "type": "object",
+      "properties": {
+        "selected_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfigSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/ConfigSource"
+        }
+      },
+      "required": [
+        "source",
+        "selected_by"
+      ]
+    },
+    "WorkspacePolicy": {
+      "description": "The kind of target workspace assigned to a role.",
+      "type": "string",
+      "enum": [
+        "project",
+        "worktree",
+        "read-only"
+      ]
+    }
+  }
+}

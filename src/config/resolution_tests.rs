@@ -816,7 +816,7 @@ fn supervision_is_trusted_only_and_requires_consistent_positive_bounds() {
     assert!(fixture.load().is_err());
 }
 
-fn generated_schemas() -> [(PathBuf, String); 2] {
+fn generated_schemas() -> [(PathBuf, String); 4] {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas");
     [
         (
@@ -826,6 +826,14 @@ fn generated_schemas() -> [(PathBuf, String); 2] {
         (
             root.join("config-project-v1.schema.json"),
             schemars::schema_for!(ProjectConfig),
+        ),
+        (
+            root.join("config-lock-v1.schema.json"),
+            crate::cli::config::SchemaTarget::Lock.generate(),
+        ),
+        (
+            root.join("config-effective-v1.schema.json"),
+            crate::cli::config::SchemaTarget::Effective.generate(),
         ),
     ]
     .map(|(path, schema)| {

@@ -26,6 +26,14 @@ recoverable work. Run
 `coterie --help` for the generated command reference; see the [CLI
 contract](docs/cli-contract.md) for programmatic output and retry rules.
 
+Configuration inspection supports `config check`,
+`config show --effective --provenance`, `config schema`, and explicit
+`config lock` creation. These commands resolve layered configuration and verify
+portable locks without starting a run or probing providers. Launch and recovery
+adoption of that configuration remains separate M5 work. See the
+[configuration command contract](docs/cli-contract.md#coterie-config-check)
+and [examples](examples/config).
+
 ## Installation
 
 Coterie currently supports Linux. Install the latest prebuilt release with the

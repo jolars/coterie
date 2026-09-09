@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::{ArchetypeDefinition, ArchetypeInput, ConfigLayer};
@@ -10,7 +11,7 @@ use super::{ArchetypeDefinition, ArchetypeInput, ConfigLayer};
 /// Field paths use dots; definition names cannot contain dots.
 pub(crate) type Provenance = BTreeMap<String, ValueProvenance>;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct ConfigSource {
     pub(crate) layer: ConfigLayer,
     pub(crate) file: Option<PathBuf>,
@@ -28,7 +29,7 @@ impl ConfigSource {
 }
 
 /// A reference selects a value without becoming the source of its definition.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct ValueProvenance {
     pub(crate) source: ConfigSource,
     pub(crate) selected_by: Option<ConfigSource>,

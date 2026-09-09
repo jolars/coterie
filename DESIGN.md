@@ -209,10 +209,10 @@ for a run using the built-in tracker.
 Global configuration lives at `$XDG_CONFIG_HOME/coterie/config.toml`, falling
 back to `~/.config/coterie/config.toml`.
 
-The internal M5 loader and resolver retain provenance for every effective
-value. Runtime launches and recovery still use compiled defaults until the
-snapshot and runtime integration work is complete. Configuration inspection
-commands and lock handling remain separate M5 work.
+The M5 loader, resolver, and inspection commands retain provenance for every
+effective value and verify portable configuration locks. Runtime launches and
+recovery still use compiled defaults until the snapshot and runtime integration
+work is complete.
 
 Only absolute `XDG_CONFIG_HOME` and `HOME` values participate in discovery.
 An absent or relative `XDG_CONFIG_HOME` falls back to an absolute `HOME`; if
@@ -443,8 +443,23 @@ Coterie provides the following inspection commands:
 coterie config check
 coterie config show --effective --provenance
 coterie config schema
+coterie config schema --target global
+coterie config schema --target lock
+coterie config schema --target effective
 coterie config lock
 ```
+
+These commands run locally without creating a run, contacting a supervisor,
+or probing a provider. `check` validates the resolved configuration and verifies
+an existing lock. `show` displays effective policy by default; `--effective`
+makes that selection explicit, and `--provenance` includes origins and selectors.
+It also verifies an existing lock before emitting successful output. Known
+provider credentials and Coterie tokens are redacted from inspection output.
+`schema` defaults to the project input format and emits JSON Schema without
+reading configuration. The `global`, `lock`, and `effective` targets expose the
+other typed contracts. `--json` wraps command results in the version 1 CLI
+success envelope; without it, schemas and effective configuration are pretty
+JSON, and validation and lock creation return concise text.
 
 Unknown fields and unsupported schema versions are errors. Includes are
 global-only, non-recursive, cycle-checked, and resolved relative to the
@@ -468,6 +483,43 @@ range, provider requirements, and a SHA-256 digest of the portable effective
 configuration. It contains no secrets, executable paths, or host-specific
 values. When a lock is present, a mismatch fails with an actionable diagnostic
 rather than silently using a different archetype.
+
+The version 1 lock is JSON with required `schema_version`, `archetype`,
+`coterie_version`, `providers`, and `fingerprint` fields. Creation records a
+caret-compatible range starting at the running Coterie version; verification
+checks that range semantically. Provider requirements map each provider name
+to its enabled roles' required modes and effective permission profiles. They
+describe configuration demands, not observed provider versions or capabilities.
+Provider capability probes remain the launch boundary's responsibility.
+
+The fingerprint is SHA-256 over compact UTF-8 JSON with recursively sorted
+object keys and preserved array order. Its projection contains configuration
+schema version 1, the complete selected archetype definition, effective roles,
+run limits, supervision policy, and provider requirements. Archetype instructions
+and capabilities therefore participate in the digest without being copied into
+the lock. Provider command arrays, unused provider bindings, provenance, source
+and include paths, project identity, environment values, and installed executable
+versions are excluded. Moving files, changing host command bindings, or making
+an equal explicit assignment leaves the fingerprint unchanged.
+
+Lock verification rejects unknown fields, unsupported schemas, malformed
+fingerprints or version requirements, and mismatches in the archetype, Coterie
+compatibility, provider requirements, or fingerprint. Diagnostics identify
+mismatched fields without echoing arbitrary lock content and suggest restoring
+the intended configuration or explicitly regenerating the lock after review.
+Inspection never repairs a lock. `config lock` may replace an existing invalid
+or outdated regular file, using a private temporary file, file sync, atomic
+rename, and directory sync. Locks are bounded to 1 MiB. Reads and writes refuse
+symlinks, hard links, and nonregular files. Interrupted writes leave an absent,
+old, or complete new lock and may retain a temporary file for inspection;
+retries never adopt or remove another attempt's temporary file.
+
+The [lock schema](schemas/config-lock-v1.schema.json),
+[effective report schema](schemas/config-effective-v1.schema.json), and
+[example lock](examples/config/coterie.lock) are generated and checked against
+their typed definitions and example configuration.
+Regenerate lock golden files and the example explicitly with
+`cargo test config::lock::tests::regenerate_lock_goldens -- --ignored`.
 
 Project configuration is untrusted. It cannot define provider executables,
 instructions, hooks, host paths, environment-variable passthrough, capabilities,

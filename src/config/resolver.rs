@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ConfigLayer {
     Compiled,
@@ -72,7 +72,7 @@ impl ConfigError {
 }
 
 /// Resolved values are distinct from the unmodified, versioned archetype.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct EffectiveConfig {
     pub(crate) archetype: ArchetypeDefinition,
     pub(crate) providers: BTreeMap<String, ProviderBinding>,
@@ -84,7 +84,7 @@ pub(crate) struct EffectiveConfig {
     pub(crate) provenance: Provenance,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct EffectiveRole {
     pub(crate) enabled: bool,
     pub(crate) max_instances: Option<u16>,

@@ -177,6 +177,12 @@ pub(crate) async fn run(
             .await
             .map_err(|error| error.for_operation(operation_id))
         }
+        Some(CliCommand::Config(arguments)) => {
+            if foreground_operation_id.is_some() {
+                return Err(SupervisorError::ForegroundOperationIdWithCommand);
+            }
+            crate::cli::config::run(arguments, json_output)
+        }
         Some(CliCommand::Doctor) => {
             if foreground_operation_id.is_some() {
                 return Err(SupervisorError::ForegroundOperationIdWithCommand);
@@ -927,6 +933,9 @@ fn public_request(
                 Some(operation_id),
                 true,
             )
+        }
+        CliCommand::Config(_) => {
+            unreachable!("configuration commands run locally")
         }
         CliCommand::Supervisor(_)
         | CliCommand::SupervisorConnect
@@ -5781,6 +5790,10 @@ async fn reject(
 /// A failure while locating, starting, or communicating with a supervisor.
 #[derive(Debug, Error)]
 pub(crate) enum SupervisorError {
+    #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
+    #[error(transparent)]
+    ConfigLock(#[from] crate::config::LockError),
     #[error("timed out waiting for {action}")]
     RpcTimeout { action: &'static str },
     #[error(transparent)]
@@ -5955,6 +5968,9 @@ impl SupervisorError {
                 | RpcFailureCode::InvalidRequestSequence
                 | RpcFailureCode::Internal => crate::cli::ErrorCode::Internal,
             },
+            Self::Config(_) | Self::ConfigLock(_) => {
+                crate::cli::ErrorCode::InvalidConfiguration
+            }
             Self::NoActiveRun => crate::cli::ErrorCode::NotFound,
             Self::ForegroundOperationIdWithCommand => {
                 crate::cli::ErrorCode::InvalidArgument

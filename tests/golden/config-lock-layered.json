@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "archetype": "global:custom@1",
+  "coterie_version": "^0.1.0",
+  "providers": {
+    "codex": {
+      "builder": {
+        "mode": "job",
+        "permission_profile": {
+          "filesystem": "read-only",
+          "network": "deny",
+          "approvals": "never"
+        }
+      },
+      "coordinator": {
+        "mode": "interactive",
+        "permission_profile": {
+          "filesystem": "read-only",
+          "network": "deny",
+          "approvals": "never"
+        }
+      }
+    }
+  },
+  "fingerprint": "7741e5953218fc394850a541257b16dc9b6cd80347170423beeb311daf7c28c8"
+}

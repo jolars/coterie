@@ -1,5 +1,7 @@
 //! Command parsing and human-readable or JSON presentation.
 
+pub(crate) mod config;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
@@ -37,6 +39,8 @@ pub(crate) struct Arguments {
 /// One operator- or agent-facing action.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Validate, inspect, or lock declarative configuration without starting a run.
+    Config(config::ConfigArguments),
     /// Inspect the active run, agents, and tasks.
     Status,
     /// Diagnose runtime ownership and durable state without changing either.

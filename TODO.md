@@ -203,7 +203,7 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   or reduce authority and capacity but cannot introduce commands,
   instructions, hooks, paths, environment variables, capabilities, or
   permission profiles.
-- [ ] Implement `config check`, effective configuration with provenance, schema
+- [x] Implement `config check`, effective configuration with provenance, schema
   generation, explicit lock creation, and lock verification without secrets
   or host-specific values.
 - [ ] Wire resolved configuration into launches and recovery, snapshot the
@@ -216,8 +216,11 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   never increase authority or a resource ceiling. See the
   [policy tests](src/config/policy_tests.rs) for intersection laws, combined
   restrictions, trusted selection, operator bounds, and injection rejection.
-- [ ] Golden tests cover schemas, provenance, configuration fingerprints, lock
-  portability, includes, and actionable mismatch diagnostics.
+- [x] Golden tests cover schemas, provenance, configuration fingerprints, lock
+  portability, includes, and actionable mismatch diagnostics. See the
+  [lock tests](src/config/lock/tests.rs) and
+  [configuration CLI tests](tests/config_cli.rs), alongside the loader and
+  provenance golden tests. `task check` passes.
 
 ## M6: Cross-project orchestration
 

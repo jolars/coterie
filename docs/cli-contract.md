@@ -6,9 +6,10 @@ output, retry behavior, authentication, and process exit codes.
 ## Commands
 
 Generated `--help` output is authoritative for argument spelling. The reference
-below covers every public command in the MVP. Commands other than the foreground
-launch and `doctor` require an active run and never create one as a side effect.
-Every subcommand accepts the global `--json` option; mutating commands also accept
+below covers every implemented public command. Commands other than the foreground
+launch, `doctor`, and `config` require an active run and never create one as a side
+effect. Every subcommand accepts the global `--json` option; mutating run
+commands also accept
 `--operation-id <co-ULID>` as shown below.
 
 ### `coterie`
@@ -28,6 +29,84 @@ The foreground launch does not accept `--json`. A foreground operation ID is
 only for retrying an uncertain launch and cannot be combined with a subcommand.
 Closing the TUI does not stop the run or its workers, and `SIGINT` is forwarded
 to Codex rather than interpreted as `coterie stop`.
+
+### `coterie config check`
+
+```console
+coterie config check [--json]
+```
+
+Configuration commands run without an active run, runtime directories, or an
+installed provider. They discover the project root and resolve compiled defaults,
+trusted global configuration and includes, the selected archetype, and project
+restrictions. `schema` does not discover a project or read configuration.
+Launches, recovery, and `doctor` configuration compatibility still use the
+existing compiled runtime policy until M5 snapshot integration is complete.
+
+`check` validates configuration and verifies `coterie.lock` if present. Its JSON
+data contains `archetype`, the portable `fingerprint`, and `lock` (`absent` or
+`verified`).
+
+### `coterie config show`
+
+```console
+coterie config show [--effective] [--provenance] [--json]
+```
+
+`show` returns `effective`, `fingerprint`, and `lock`; adding
+`--provenance` includes a field-to-origin map with source layer, source file,
+input field, and optional selector origin. It verifies an existing lock before
+emitting output. Provider commands are visible in effective configuration, with
+known credentials and Coterie tokens redacted before JSON encoding.
+
+### `coterie config schema`
+
+```console
+coterie config schema [--target project|global|lock|effective] [--json]
+```
+
+`schema` defaults to the project input schema. Without `--json`, it prints the
+schema directly as pretty JSON, suitable for redirecting to a file. With
+`--json`, it places the schema under the common success envelope's `data` field.
+Available schemas are generated from Rust types:
+
+- [`config-project-v1.schema.json`](../schemas/config-project-v1.schema.json)
+- [`config-global-v1.schema.json`](../schemas/config-global-v1.schema.json)
+- [`config-lock-v1.schema.json`](../schemas/config-lock-v1.schema.json)
+- [`config-effective-v1.schema.json`](../schemas/config-effective-v1.schema.json)
+
+### `coterie config lock`
+
+```console
+coterie config lock [--json]
+```
+
+`lock` explicitly creates or replaces the project root's `coterie.lock`. Its
+JSON data is the newly written lock. It resolves current configuration even when
+the old lock is invalid or mismatched. Locks record the archetype, configuration
+schema, compatible Coterie version range, enabled roles' provider mode and
+permission requirements, and a SHA-256 fingerprint. Commands and arguments,
+environment values, provenance paths, project identity, and installed provider
+versions are excluded. The digest includes the complete selected archetype,
+effective roles, limits, supervision policy, and provider requirements. The
+[configuration design](../DESIGN.md#declarative-configuration) specifies canonical
+encoding; the [example lock](../examples/config/coterie.lock) corresponds to the
+global and project examples in that directory.
+
+The lock is bounded to 1 MiB and published by syncing a private temporary file,
+renaming it atomically, and syncing the directory. Existing symlinks, hard
+links, and nonregular files are refused. A failed or interrupted attempt may
+leave the old or complete new lock and a temporary file for inspection. Retrying
+`config lock` with unchanged inputs writes the same content. This local file
+command does not allocate an orchestration operation ID or mutate run state.
+
+Invalid configuration, unreadable inputs, malformed locks, and mismatches use
+`invalid_configuration` (exit 3). A mismatch lists the affected lock fields and
+suggests restoring the configuration or reviewing its files and running
+`coterie config lock`. A Coterie version mismatch also suggests using a compatible
+release. `check` and `show` never modify a lock. Human validation and creation
+messages go to standard output; human effective reports are pretty JSON.
+Failures use standard error and leave standard output empty.
 
 ### `coterie status`
 
@@ -49,8 +128,8 @@ ownership and permissions, database integrity and migrations, pending operations
 unfinished assignments, uncertain sessions, task cycles, transcript accessibility
 and incomplete tails, and worktree ownership. Provider checks probe the installed
 Codex version and required capabilities without launching a model session.
-Configuration and lock files are reported as unverified when present because M5
-owns external configuration loading.
+Configuration and lock files are reported as unverified when present until M5
+runtime snapshot integration is complete.
 
 Doctor is operator-only and never starts a supervisor, migrates a database,
 changes permissions, signals a process, or removes work. If the supervisor is
@@ -349,8 +428,9 @@ state or user-readable files. Coterie uses private runtime files and scoped
 tokens to prevent accidental authority confusion; stronger isolation requires
 separate operating-system identities or containers and is outside the MVP.
 
-The current operator policy is the sealed `builtin:standard@1` archetype. The
-MVP does not yet load global or project configuration. Its provider executable,
+The current runtime operator policy is the sealed `builtin:standard@1` archetype.
+Configuration inspection loads global and project files, but runtime adoption
+remains separate M5 work. The runtime provider executable,
 role definitions, permission profiles, capabilities, and limits are trusted
 compiled policy. Repository contents, `AGENTS.md`, task and message text,
 provider output, and agent behavior are untrusted data. Coterie passes provider
@@ -431,14 +511,15 @@ The generated JSON Schemas are:
 
 ## Operation IDs
 
-Every mutating CLI command accepts the common
+Every mutating run command accepts the common
 `--operation-id <co-ULID>` option. If it is omitted, the CLI generates an
 operation ID before dispatch. The RPC request carries that ID, and every
 Coterie-rendered response after allocation returns it. The foreground launch
 uses its operation ID to prepare the durable session, but emits no wrapper
 response while Codex owns the terminal. A programmatic caller retries an
 uncertain mutation with the same ID. Read-only commands neither accept nor
-return an operation ID.
+return an operation ID. Local configuration lock creation also has no operation
+ID; it uses explicit atomic file replacement as described above.
 
 New mutations retain a fingerprint of the original request separately from
 redacted request text, so retries survive provider credential changes. Older

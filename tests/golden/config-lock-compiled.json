@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "archetype": "builtin:standard@1",
+  "coterie_version": "^0.1.0",
+  "providers": {
+    "codex": {
+      "lead": {
+        "mode": "interactive",
+        "permission_profile": {
+          "filesystem": "project-write",
+          "network": "provider-default",
+          "approvals": "interactive"
+        }
+      },
+      "reviewer": {
+        "mode": "job",
+        "permission_profile": {
+          "filesystem": "read-only",
+          "network": "deny",
+          "approvals": "never"
+        }
+      },
+      "worker": {
+        "mode": "job",
+        "permission_profile": {
+          "filesystem": "workspace-write",
+          "network": "deny",
+          "approvals": "never"
+        }
+      }
+    }
+  },
+  "fingerprint": "0f5d6ac9f41279ca46abedf02f8926b3cd6abf5ca77b56713d9ae37f31a853a9"
+}

@@ -11,7 +11,9 @@ use super::{
 };
 
 /// The file format version, independent of the archetype's semantic version.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize,
+)]
 #[serde(try_from = "u16", into = "u16")]
 pub(crate) struct ConfigSchemaVersion;
 

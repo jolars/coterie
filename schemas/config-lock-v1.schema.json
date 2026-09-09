@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConfigLock",
+  "description": "The versioned, committable JSON lock format.",
+  "type": "object",
+  "properties": {
+    "archetype": {
+      "type": "string"
+    },
+    "coterie_version": {
+      "type": "string"
+    },
+    "fingerprint": {
+      "description": "SHA-256 of compact, recursively key-sorted portable JSON, encoded as lowercase hex.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/$defs/ProviderRoleRequirement"
+        }
+      }
+    },
+    "schema_version": {
+      "$ref": "#/$defs/ConfigSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "archetype",
+    "coterie_version",
+    "providers",
+    "fingerprint"
+  ],
+  "$defs": {
+    "ApprovalPolicy": {
+      "description": "How a provider process may request operator approval.",
+      "type": "string",
+      "enum": [
+        "interactive",
+        "never"
+      ]
+    },
+    "ConfigSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "FilesystemPolicy": {
+      "description": "Filesystem authority granted to a provider process.",
+      "type": "string",
+      "enum": [
+        "project-write",
+        "workspace-write",
+        "read-only"
+      ]
+    },
+    "NetworkPolicy": {
+      "description": "Network authority granted to a provider process.",
+      "type": "string",
+      "enum": [
+        "provider-default",
+        "deny"
+      ]
+    },
+    "PermissionProfile": {
+      "description": "Provider sandbox policy referenced by a role.",
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "$ref": "#/$defs/ApprovalPolicy"
+        },
+        "filesystem": {
+          "$ref": "#/$defs/FilesystemPolicy"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "filesystem",
+        "network",
+        "approvals"
+      ]
+    },
+    "ProviderRoleRequirement": {
+      "description": "Portable requirements describe policy demands without probing installed providers.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/RoleMode"
+        },
+        "permission_profile": {
+          "$ref": "#/$defs/PermissionProfile"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "permission_profile"
+      ]
+    },
+    "RoleMode": {
+      "description": "The provider interaction style required by a role.",
+      "type": "string",
+      "enum": [
+        "interactive",
+        "job"
+      ]
+    }
+  }
+}
