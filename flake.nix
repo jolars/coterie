@@ -47,6 +47,7 @@
               ./LICENSE-MIT
               ./README.md
               ./docs
+              ./examples
               ./schemas
               ./src
               ./tests

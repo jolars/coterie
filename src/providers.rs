@@ -2117,7 +2117,6 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::process::Command;
     use std::rc::Rc;
@@ -2619,16 +2618,14 @@ mod tests {
         ] {
             let directory = TestDirectory::new();
             let pid_file = directory.0.join("pid");
-            let executable = directory.executable(
+            let mut command = directory.script_command(
                 "probe",
                 &format!("#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\n{script}\n"),
             );
+            command.push(pid_file.clone().into_os_string());
             let started = std::time::Instant::now();
             let result = super::ProcessProbeRunner.run_bounded(
-                &[
-                    executable.into_os_string(),
-                    pid_file.clone().into_os_string(),
-                ],
+                &command,
                 &[],
                 Duration::from_millis(
                     if expected == std::io::ErrorKind::TimedOut {
@@ -2648,7 +2645,7 @@ mod tests {
     #[test]
     fn fake_and_codex_share_phased_termination_conformance() {
         let directory = TestDirectory::new();
-        let executable = directory.executable("controlled-worker", "#!/bin/sh\ntrap ':' INT TERM\nprintf '%s\\n' '{\"type\":\"thread.started\"}'\nwhile :; do :; done\n");
+        let command = directory.script_command("controlled-worker", "#!/bin/sh\ntrap ':' INT TERM\nprintf '%s\\n' '{\"type\":\"thread.started\"}'\nwhile :; do :; done\n");
         let running = SessionObservation {
             lifecycle: LifecycleState::Running,
             activity: super::ActivityState::Busy,
@@ -2658,7 +2655,7 @@ mod tests {
             super::fake::FakeEvent::observation(running),
         ])])
         .ignoring_controls(["interrupt", "terminate"]);
-        let mut codex = CodexProvider::new([executable.as_os_str()]);
+        let mut codex = CodexProvider::new(command);
         for (provider, is_fake) in [
             (&mut fake as &mut dyn Provider, true),
             (&mut codex as &mut dyn Provider, false),
@@ -2713,7 +2710,7 @@ mod tests {
     #[test]
     fn codex_job_stream_preserves_jsonl_and_classifies_process_exit() {
         let directory = TestDirectory::new();
-        let executable = directory.executable(
+        let command = directory.script_command(
             "codex-ok",
             "#!/bin/sh\n\
              if [ \"${HOME+x}\" = x ]; then printf '%s\\n' '{\"type\":\"runtime.home\"}'; fi\n\
@@ -2722,7 +2719,7 @@ mod tests {
              printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{}}'\n\
              exit 23\n",
         );
-        let mut provider = CodexProvider::new([executable.as_os_str()]);
+        let mut provider = CodexProvider::new(command);
         let specification = specification_in(&directory.0);
         let environment = job_environment_in(&directory.0);
 
@@ -2802,13 +2799,13 @@ mod tests {
     #[test]
     fn malformed_codex_jsonl_is_retained_and_quarantines_the_job() {
         let directory = TestDirectory::new();
-        let executable = directory.executable(
+        let command = directory.script_command(
             "codex-malformed",
             "#!/bin/sh\n\
              printf 'not-json\\n'\n\
              while :; do :; done\n",
         );
-        let mut provider = CodexProvider::new([executable.as_os_str()]);
+        let mut provider = CodexProvider::new(command);
         let specification = specification_in(&directory.0);
         let environment = job_environment_in(&directory.0);
 
@@ -2846,7 +2843,7 @@ mod tests {
             ("{\"type\":", true),
         ] {
             let directory = TestDirectory::new();
-            let executable = directory.executable(
+            let command = directory.script_command(
                 "codex-tail",
                 &format!("#!/bin/sh\nprintf '%s' '{tail}'\n"),
             );
@@ -2865,7 +2862,7 @@ mod tests {
             };
             let providers: Vec<Box<dyn Provider>> = vec![
                 Box::new(FakeProvider::new([script])),
-                Box::new(CodexProvider::new([executable.as_os_str()])),
+                Box::new(CodexProvider::new(command)),
             ];
             for mut provider in providers {
                 let handle = provider
@@ -3119,19 +3116,10 @@ mod tests {
             Self(path)
         }
 
-        fn executable(&self, name: &str, contents: &str) -> PathBuf {
+        fn script_command(&self, name: &str, contents: &str) -> Vec<OsString> {
             let path = self.0.join(name);
-            let staging_path = self.0.join(format!(".{name}.tmp"));
-            fs::write(&staging_path, contents)
-                .expect("the fixture should be writable");
-            fs::set_permissions(
-                &staging_path,
-                fs::Permissions::from_mode(0o700),
-            )
-            .expect("the fixture should be executable");
-            fs::rename(staging_path, &path)
-                .expect("the fixture should be installed atomically");
-            path
+            fs::write(&path, contents).expect("the fixture should be writable");
+            vec![OsString::from("sh"), path.into_os_string()]
         }
     }
 
