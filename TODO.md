@@ -196,7 +196,7 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   built-in or global archetype, safe project restrictions, and bounded
   operator overrides in the specified precedence order. Runtime adoption
   follows with snapshot integration below.
-- [ ] Track provenance for every effective value; reject unknown fields,
+- [x] Track provenance for every effective value; reject unknown fields,
   unsupported schemas, recursive includes, cycles, shadowed `builtin:`
   names, and references to missing trusted definitions.
 - [ ] Implement monotone policy intersection so project data can disable roles

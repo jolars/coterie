@@ -64,30 +64,51 @@ pub(crate) fn load(
         || Ok(ProjectConfig::default()),
         |text| parse(&text, &locations.project),
     )?;
-    resolve(&global, &project, overrides).map_err(|mut error| {
-        if let ConfigError::Invalid {
-            layer, field, path, ..
-        } = &mut error
+    let mut effective =
+        resolve(&global, &project, overrides).map_err(|mut error| {
+            if let ConfigError::Invalid {
+                layer, field, path, ..
+            } = &mut error
+            {
+                *path = source_file(*layer, field, &sources, locations);
+            }
+            error
+        })?;
+    for value in effective.provenance.values_mut() {
+        for source in
+            std::iter::once(&mut value.source).chain(value.selected_by.as_mut())
         {
-            *path = match layer {
-                ConfigLayer::Global => {
-                    let mut key = field.as_str();
-                    loop {
-                        if let Some(source) = sources.get(key) {
-                            break Some(source.clone());
-                        }
-                        match key.rsplit_once('.') {
-                            Some((parent, _)) => key = parent,
-                            None => break locations.global.clone(),
-                        }
-                    }
-                }
-                ConfigLayer::Project => Some(locations.project.clone()),
-                ConfigLayer::Operator => None,
-            };
+            source.file =
+                source_file(source.layer, &source.field, &sources, locations);
         }
-        error
-    })
+    }
+    Ok(effective)
+}
+
+fn source_file(
+    layer: ConfigLayer,
+    field: &str,
+    sources: &BTreeMap<String, PathBuf>,
+    locations: &ConfigLocations,
+) -> Option<PathBuf> {
+    match layer {
+        ConfigLayer::Global => {
+            let mut key = field;
+            loop {
+                if let Some(source) = sources.get(key) {
+                    return Some(source.clone());
+                }
+                match key.rsplit_once('.') {
+                    Some((parent, _)) => key = parent,
+                    None => return locations.global.clone(),
+                }
+            }
+        }
+        ConfigLayer::Project => Some(locations.project.clone()),
+        ConfigLayer::Compiled
+        | ConfigLayer::Builtin
+        | ConfigLayer::Operator => None,
+    }
 }
 
 fn read(path: &Path, optional: bool) -> Result<Option<String>, ConfigError> {

@@ -7,8 +7,11 @@ use thiserror::Error;
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum ConfigLayer {
+    Compiled,
+    Builtin,
     Global,
     Project,
     Operator,
@@ -17,6 +20,8 @@ pub(crate) enum ConfigLayer {
 impl std::fmt::Display for ConfigLayer {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::Compiled => "compiled",
+            Self::Builtin => "builtin",
             Self::Global => "global",
             Self::Project => "project",
             Self::Operator => "operator",
@@ -67,16 +72,19 @@ impl ConfigError {
 }
 
 /// Resolved values are distinct from the unmodified, versioned archetype.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct EffectiveConfig {
     pub(crate) archetype: ArchetypeDefinition,
     pub(crate) providers: BTreeMap<String, ProviderBinding>,
     pub(crate) limits: RunLimits,
     pub(crate) supervision: SupervisionPolicy,
     pub(crate) roles: BTreeMap<String, EffectiveRole>,
+    /// Source files are metadata, separate from the resolved policy values.
+    #[serde(skip)]
+    pub(crate) provenance: Provenance,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct EffectiveRole {
     pub(crate) enabled: bool,
     pub(crate) max_instances: Option<u16>,
@@ -96,6 +104,28 @@ pub(crate) fn resolve(
         ));
     }
     let defaults = compiled_defaults();
+    let mut provenance = Provenance::new();
+    provenance::record_tree(
+        &mut provenance,
+        &defaults.providers,
+        "providers",
+        "providers",
+        ConfigLayer::Compiled,
+    );
+    provenance::record_tree(
+        &mut provenance,
+        &defaults.limits,
+        "limits",
+        "limits",
+        ConfigLayer::Compiled,
+    );
+    provenance::record_tree(
+        &mut provenance,
+        &defaults.supervision,
+        "supervision",
+        "supervision",
+        ConfigLayer::Compiled,
+    );
     let mut providers = defaults.providers;
     for (name, input) in &global.providers {
         check_name(name, &format!("providers.{name}"))?;
@@ -120,6 +150,13 @@ pub(crate) fn resolve(
             ));
         }
         providers.insert(name.clone(), ProviderBinding { command });
+        if input.command.is_some() {
+            provenance::record(
+                &mut provenance,
+                format!("providers.{name}.command"),
+                ConfigLayer::Global,
+            );
+        }
     }
     let mut trusted_limits = defaults.limits;
     apply_limits(
@@ -127,9 +164,13 @@ pub(crate) fn resolve(
         &global.limits,
         None,
         ConfigLayer::Global,
+        &mut provenance,
     )?;
-    let supervision =
-        resolve_supervision(defaults.supervision, global.supervision)?;
+    let supervision = resolve_supervision(
+        defaults.supervision,
+        global.supervision,
+        &mut provenance,
+    )?;
     let profiles = resolve_profiles(&global.permission_profiles)?;
     let builtin = builtin_standard();
     let mut archetypes = BTreeMap::from([(builtin.reference.clone(), builtin)]);
@@ -170,6 +211,21 @@ pub(crate) fn resolve(
     let archetype = archetypes
         .remove(reference)
         .expect("all selectors and the compiled default were validated");
+    let selection_layer = if operator.archetype.is_some() {
+        ConfigLayer::Operator
+    } else if project.archetype.is_some() {
+        ConfigLayer::Project
+    } else if global.archetype.is_some() {
+        ConfigLayer::Global
+    } else {
+        ConfigLayer::Compiled
+    };
+    provenance::record_archetype(
+        &mut provenance,
+        &archetype,
+        global.archetypes.get(reference),
+        ConfigSource::new(selection_layer, "archetype"),
+    );
     let roles = archetype
         .roles
         .iter()
@@ -191,12 +247,14 @@ pub(crate) fn resolve(
         limits: trusted_limits,
         supervision,
         roles,
+        provenance,
     };
     apply_limits(
         &mut effective.limits,
         &project.limits,
         Some(trusted_limits),
         ConfigLayer::Project,
+        &mut effective.provenance,
     )?;
     apply_roles(
         &mut effective,
@@ -209,6 +267,7 @@ pub(crate) fn resolve(
         &operator.limits,
         Some(trusted_limits),
         ConfigLayer::Operator,
+        &mut effective.provenance,
     )?;
     apply_roles(
         &mut effective,
@@ -364,6 +423,7 @@ fn apply_limits(
     input: &LimitOverrides,
     ceiling: Option<RunLimits>,
     layer: ConfigLayer,
+    provenance: &mut Provenance,
 ) -> Result<(), ConfigError> {
     macro_rules! apply {
         ($field:ident) => {
@@ -372,6 +432,7 @@ fn apply_limits(
                     return Err(ConfigError::invalid(layer, concat!("limits.", stringify!($field)), "limit must be positive and cannot exceed trusted operator policy"));
                 }
                 effective.$field = value;
+                provenance::record(provenance, concat!("limits.", stringify!($field)), layer);
             }
         };
     }
@@ -384,6 +445,7 @@ fn apply_limits(
 fn resolve_supervision(
     mut policy: SupervisionPolicy,
     input: SupervisionOverrides,
+    provenance: &mut Provenance,
 ) -> Result<SupervisionPolicy, ConfigError> {
     macro_rules! apply {
         ($field:ident) => {
@@ -392,6 +454,7 @@ fn resolve_supervision(
                     return Err(invalid_global(concat!("supervision.", stringify!($field)), "supervision bounds must be positive and fit millisecond arithmetic"));
                 }
                 policy.$field = value;
+                provenance::record(provenance, concat!("supervision.", stringify!($field)), ConfigLayer::Global);
             }
         };
     }
@@ -451,6 +514,11 @@ fn apply_roles(
                 ));
             }
             role.enabled = enabled;
+            provenance::record(
+                &mut effective.provenance,
+                format!("{prefix}.enabled"),
+                layer,
+            );
         }
         if let Some(capacity) = restriction.max_instances {
             if baseline.max_instances.is_some_and(|limit| capacity > limit) {
@@ -461,6 +529,11 @@ fn apply_roles(
                 ));
             }
             role.max_instances = Some(capacity);
+            provenance::record(
+                &mut effective.provenance,
+                format!("{prefix}.max_instances"),
+                layer,
+            );
         }
         if let Some(profile) = &restriction.permission_profile {
             let value = profiles.get(profile).ok_or_else(|| ConfigError::invalid(layer, format!("{prefix}.permission_profile"), "restriction must select an existing trusted global permission profile"))?;
@@ -474,6 +547,21 @@ fn apply_roles(
                 ));
             }
             role.permission_profile = *value;
+            for field in ["filesystem", "network", "approvals"] {
+                effective.provenance.insert(
+                    format!("{prefix}.permission_profile.{field}"),
+                    ValueProvenance {
+                        source: ConfigSource::new(
+                            ConfigLayer::Global,
+                            format!("permission_profiles.{profile}.{field}"),
+                        ),
+                        selected_by: Some(ConfigSource::new(
+                            layer,
+                            format!("{prefix}.permission_profile"),
+                        )),
+                    },
+                );
+            }
         }
     }
     Ok(())

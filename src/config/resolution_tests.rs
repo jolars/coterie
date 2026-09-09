@@ -4,7 +4,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-const CUSTOM: &str = r#"
+pub(super) const CUSTOM: &str = r#"
 archetype = "global:custom@1"
 [permission_profiles.safe]
 filesystem = "read-only"
@@ -27,31 +27,31 @@ max_instances = 5
 capabilities = ["send:coordinator", "task:read"]
 "#;
 
-struct Fixture(PathBuf);
+pub(super) struct Fixture(pub(super) PathBuf);
 
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir()
             .join(format!("coterie-config-{}", ulid::Ulid::generate()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }
 
-    fn write(&self, name: &str, contents: &str) -> PathBuf {
+    pub(super) fn write(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.0.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, contents).unwrap();
         path
     }
 
-    fn locations(&self) -> ConfigLocations {
+    pub(super) fn locations(&self) -> ConfigLocations {
         ConfigLocations {
             global: Some(self.0.join("config.toml")),
             project: self.0.join("coterie.toml"),
         }
     }
 
-    fn load(&self) -> Result<EffectiveConfig, ConfigError> {
+    pub(super) fn load(&self) -> Result<EffectiveConfig, ConfigError> {
         load(&self.locations(), &OperatorOverrides::default())
     }
 }
@@ -435,6 +435,7 @@ fn version_one_is_optional_in_every_file() {
 #[test]
 fn trusted_definitions_are_validated_even_when_not_selected() {
     let fixture = Fixture::new();
+    fixture.write("coterie.toml", "archetype = 'builtin:standard@1'");
     for text in [
         "[archetypes.'builtin:standard@1']",
         "[archetypes.'global:bad@0']",
@@ -475,6 +476,183 @@ fn errors_retain_the_file_that_supplied_the_invalid_field() {
     assert!(
         matches!(fixture.load(), Err(ConfigError::Invalid { path: Some(path), field, .. }) if path == fixture.0.join("parts/first.toml") && field == "limits.max_agents_per_run")
     );
+}
+
+#[test]
+fn every_file_rejects_unknown_fields_and_unsupported_versions() {
+    let fixture = Fixture::new();
+    let invalid_global_inputs = [
+        "schema_version = 0",
+        "schema_version = 2",
+        "unknown = true",
+        "[providers.codex]\nunknown = true",
+        "[limits]\nunknown = true",
+        "[supervision]\nunknown = true",
+        "[permission_profiles.safe]\nunknown = true",
+        "[archetypes.'global:custom@1']\nunknown = true",
+        "[archetypes.'global:custom@1'.roles.builder]\nunknown = true",
+    ];
+    for name in ["config.toml", "part.toml"] {
+        for invalid in invalid_global_inputs {
+            fixture.write(
+                "config.toml",
+                &format!("includes = ['part.toml']\n{CUSTOM}"),
+            );
+            fixture.write("part.toml", "");
+            let expected = fixture.write(name, invalid);
+            let error = fixture.load().unwrap_err();
+            assert!(
+                matches!(error, ConfigError::Parse { path, .. } if path == expected),
+                "{name}: {invalid}"
+            );
+        }
+    }
+    fixture.write("config.toml", "");
+    for invalid in [
+        "schema_version = 0",
+        "schema_version = 2",
+        "unknown = true",
+        "[limits]\nunknown = true",
+        "[roles.worker]\nunknown = true",
+    ] {
+        let expected = fixture.write("coterie.toml", invalid);
+        assert!(
+            matches!(fixture.load(), Err(ConfigError::Parse { path, .. }) if path == expected),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn includes_reject_canonical_alias_duplicates_and_cycles() {
+    let fixture = Fixture::new();
+    fixture.write("parts/part.toml", "");
+    symlink("parts/part.toml", fixture.0.join("alias.toml")).unwrap();
+    for includes in [
+        "['parts/part.toml', 'alias.toml']",
+        "['parts/part.toml', 'parts/../parts/part.toml']",
+    ] {
+        fixture.write("config.toml", &format!("includes = {includes}"));
+        assert!(
+            matches!(fixture.load(), Err(ConfigError::Parse { message, .. }) if message.contains("duplicate or cyclic"))
+        );
+    }
+    fixture.write("config.toml", "includes = ['parts/part.toml']");
+    fixture.write("parts/part.toml", "includes = ['second.toml']");
+    fixture.write("parts/second.toml", "includes = ['part.toml']");
+    assert!(
+        matches!(fixture.load(), Err(ConfigError::Parse { path, message }) if path == fixture.0.join("parts/part.toml") && message.contains("nested includes"))
+    );
+}
+
+#[test]
+fn missing_trusted_definitions_and_builtin_shadowing_identify_the_source() {
+    let fixture = Fixture::new();
+    fixture.write("coterie.toml", "archetype = 'builtin:standard@1'");
+    let operator = OperatorOverrides {
+        archetype: Some("builtin:standard@1".into()),
+        ..OperatorOverrides::default()
+    };
+    fixture.write("config.toml", "includes = ['parts/definitions.toml']");
+    for (text, field, reason) in [
+        (
+            "[archetypes.'builtin:standard@1']".into(),
+            "archetypes.builtin:standard@1",
+            "reserved",
+        ),
+        (
+            "[archetypes.'builtin:other@1']".into(),
+            "archetypes.builtin:other@1",
+            "reserved",
+        ),
+        (
+            "archetype = 'global:missing@1'".into(),
+            "archetype",
+            "unknown archetype",
+        ),
+        (
+            CUSTOM.replace("provider = \"codex\"", "provider = \"absent\""),
+            "archetypes.global:custom@1.roles.builder.provider",
+            "missing provider",
+        ),
+        (
+            CUSTOM.replace(
+                "permission_profile = \"safe\"",
+                "permission_profile = \"absent\"",
+            ),
+            "archetypes.global:custom@1.roles.builder.permission_profile",
+            "missing trusted permission profile",
+        ),
+        (
+            CUSTOM.replace("lead = \"coordinator\"", "lead = \"absent\""),
+            "archetypes.global:custom@1.lead",
+            "must exist",
+        ),
+    ] {
+        let expected = fixture.write("parts/definitions.toml", &text);
+        let error = load(&fixture.locations(), &operator).unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Invalid { layer: ConfigLayer::Global, path: Some(path), field: actual, reason: message } if path == expected && actual == field && message.contains(reason)),
+            "{text}"
+        );
+    }
+    fixture.write("parts/definitions.toml", CUSTOM);
+    for (text, field) in [
+        ("archetype = 'global:missing@1'", "archetype"),
+        ("[roles.missing]", "roles.missing"),
+        (
+            "[roles.worker]\npermission_profile = 'missing'",
+            "roles.worker.permission_profile",
+        ),
+        (
+            "[roles.worker]\npermission_profile = 'worker'",
+            "roles.worker.permission_profile",
+        ),
+    ] {
+        let expected = fixture.write("coterie.toml", text);
+        assert!(
+            matches!(load(&fixture.locations(), &operator), Err(ConfigError::Invalid { layer: ConfigLayer::Project, path: Some(path), field: actual, .. }) if path == expected && actual == field),
+            "{text}"
+        );
+    }
+    fixture.write("coterie.toml", "archetype = 'builtin:standard@1'");
+    for (operator, expected) in [
+        (
+            OperatorOverrides {
+                archetype: Some("global:missing@1".into()),
+                ..OperatorOverrides::default()
+            },
+            "archetype",
+        ),
+        (
+            OperatorOverrides {
+                roles: BTreeMap::from([(
+                    "missing".into(),
+                    RoleRestriction::default(),
+                )]),
+                ..OperatorOverrides::default()
+            },
+            "roles.missing",
+        ),
+        (
+            OperatorOverrides {
+                roles: BTreeMap::from([(
+                    "worker".into(),
+                    RoleRestriction {
+                        permission_profile: Some("missing".into()),
+                        ..RoleRestriction::default()
+                    },
+                )]),
+                ..OperatorOverrides::default()
+            },
+            "roles.worker.permission_profile",
+        ),
+    ] {
+        assert!(
+            matches!(load(&fixture.locations(), &operator), Err(ConfigError::Invalid { layer: ConfigLayer::Operator, path: None, field, .. }) if field == expected),
+            "{expected}"
+        );
+    }
 }
 
 #[test]

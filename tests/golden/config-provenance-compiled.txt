@@ -1,0 +1,58 @@
+archetype.lead <- builtin:-:archetypes.builtin:standard@1.lead
+archetype.permission_profiles.interactive.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.approvals
+archetype.permission_profiles.interactive.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.filesystem
+archetype.permission_profiles.interactive.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.network
+archetype.permission_profiles.review.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.approvals
+archetype.permission_profiles.review.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.filesystem
+archetype.permission_profiles.review.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.network
+archetype.permission_profiles.worker.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.approvals
+archetype.permission_profiles.worker.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.filesystem
+archetype.permission_profiles.worker.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.network
+archetype.reference <- builtin:-:archetypes.builtin:standard@1 (selected by compiled:-:archetype)
+archetype.roles.lead.capabilities <- builtin:-:archetypes.builtin:standard@1.roles.lead.capabilities
+archetype.roles.lead.instructions <- builtin:-:archetypes.builtin:standard@1.roles.lead.instructions
+archetype.roles.lead.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.lead.max_instances
+archetype.roles.lead.mode <- builtin:-:archetypes.builtin:standard@1.roles.lead.mode
+archetype.roles.lead.permission_profile <- builtin:-:archetypes.builtin:standard@1.roles.lead.permission_profile
+archetype.roles.lead.provider <- builtin:-:archetypes.builtin:standard@1.roles.lead.provider
+archetype.roles.lead.workspace <- builtin:-:archetypes.builtin:standard@1.roles.lead.workspace
+archetype.roles.reviewer.capabilities <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.capabilities
+archetype.roles.reviewer.instructions <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.instructions
+archetype.roles.reviewer.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.max_instances
+archetype.roles.reviewer.mode <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.mode
+archetype.roles.reviewer.permission_profile <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.permission_profile
+archetype.roles.reviewer.provider <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.provider
+archetype.roles.reviewer.workspace <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.workspace
+archetype.roles.worker.capabilities <- builtin:-:archetypes.builtin:standard@1.roles.worker.capabilities
+archetype.roles.worker.instructions <- builtin:-:archetypes.builtin:standard@1.roles.worker.instructions
+archetype.roles.worker.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.worker.max_instances
+archetype.roles.worker.mode <- builtin:-:archetypes.builtin:standard@1.roles.worker.mode
+archetype.roles.worker.permission_profile <- builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile
+archetype.roles.worker.provider <- builtin:-:archetypes.builtin:standard@1.roles.worker.provider
+archetype.roles.worker.workspace <- builtin:-:archetypes.builtin:standard@1.roles.worker.workspace
+limits.max_agents_per_run <- compiled:-:limits.max_agents_per_run
+limits.max_concurrent_agents <- compiled:-:limits.max_concurrent_agents
+limits.max_spawns_per_minute <- compiled:-:limits.max_spawns_per_minute
+providers.codex.command <- compiled:-:providers.codex.command
+roles.lead.enabled <- compiled:-:roles.lead.enabled
+roles.lead.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.lead.max_instances
+roles.lead.permission_profile.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.approvals (selected by builtin:-:archetypes.builtin:standard@1.roles.lead.permission_profile)
+roles.lead.permission_profile.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.filesystem (selected by builtin:-:archetypes.builtin:standard@1.roles.lead.permission_profile)
+roles.lead.permission_profile.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.network (selected by builtin:-:archetypes.builtin:standard@1.roles.lead.permission_profile)
+roles.reviewer.enabled <- compiled:-:roles.reviewer.enabled
+roles.reviewer.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.max_instances
+roles.reviewer.permission_profile.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.approvals (selected by builtin:-:archetypes.builtin:standard@1.roles.reviewer.permission_profile)
+roles.reviewer.permission_profile.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.filesystem (selected by builtin:-:archetypes.builtin:standard@1.roles.reviewer.permission_profile)
+roles.reviewer.permission_profile.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.network (selected by builtin:-:archetypes.builtin:standard@1.roles.reviewer.permission_profile)
+roles.worker.enabled <- compiled:-:roles.worker.enabled
+roles.worker.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.worker.max_instances
+roles.worker.permission_profile.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.approvals (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
+roles.worker.permission_profile.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.filesystem (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
+roles.worker.permission_profile.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.network (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
+supervision.interrupt_grace_ms <- compiled:-:supervision.interrupt_grace_ms
+supervision.job_timeout_seconds <- compiled:-:supervision.job_timeout_seconds
+supervision.max_launch_attempts <- compiled:-:supervision.max_launch_attempts
+supervision.restart_backoff_seconds <- compiled:-:supervision.restart_backoff_seconds
+supervision.restart_window_seconds <- compiled:-:supervision.restart_window_seconds
+supervision.shutdown_timeout_ms <- compiled:-:supervision.shutdown_timeout_ms
+supervision.startup_timeout_seconds <- compiled:-:supervision.startup_timeout_seconds

@@ -1,0 +1,40 @@
+archetype.lead <- global:parts/first.toml:archetypes.global:custom@1.lead
+archetype.permission_profiles.safe.approvals <- global:parts/first.toml:permission_profiles.safe.approvals
+archetype.permission_profiles.safe.filesystem <- global:parts/first.toml:permission_profiles.safe.filesystem
+archetype.permission_profiles.safe.network <- global:parts/second.toml:permission_profiles.safe.network
+archetype.reference <- global:config.toml:archetypes.global:custom@1 (selected by global:parts/first.toml:archetype)
+archetype.roles.builder.capabilities <- global:config.toml:archetypes.global:custom@1.roles.builder.capabilities
+archetype.roles.builder.instructions <- global:parts/second.toml:archetypes.global:custom@1.roles.builder.instructions
+archetype.roles.builder.max_instances <- global:config.toml:archetypes.global:custom@1.roles.builder.max_instances
+archetype.roles.builder.mode <- global:parts/first.toml:archetypes.global:custom@1.roles.builder.mode
+archetype.roles.builder.permission_profile <- global:parts/first.toml:archetypes.global:custom@1.roles.builder.permission_profile
+archetype.roles.builder.provider <- global:parts/first.toml:archetypes.global:custom@1.roles.builder.provider
+archetype.roles.builder.workspace <- global:parts/first.toml:archetypes.global:custom@1.roles.builder.workspace
+archetype.roles.coordinator.capabilities <- global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.capabilities
+archetype.roles.coordinator.instructions <- compiled:-:archetypes.global:custom@1.roles.coordinator.instructions
+archetype.roles.coordinator.max_instances <- compiled:-:archetypes.global:custom@1.roles.coordinator.max_instances
+archetype.roles.coordinator.mode <- global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.mode
+archetype.roles.coordinator.permission_profile <- global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile
+archetype.roles.coordinator.provider <- global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.provider
+archetype.roles.coordinator.workspace <- global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.workspace
+limits.max_agents_per_run <- global:parts/first.toml:limits.max_agents_per_run
+limits.max_concurrent_agents <- project:coterie.toml:limits.max_concurrent_agents
+limits.max_spawns_per_minute <- compiled:-:limits.max_spawns_per_minute
+providers.codex.command <- global:config.toml:providers.codex.command
+roles.builder.enabled <- project:coterie.toml:roles.builder.enabled
+roles.builder.max_instances <- operator:-:roles.builder.max_instances
+roles.builder.permission_profile.approvals <- global:parts/first.toml:permission_profiles.safe.approvals (selected by project:coterie.toml:roles.builder.permission_profile)
+roles.builder.permission_profile.filesystem <- global:parts/first.toml:permission_profiles.safe.filesystem (selected by project:coterie.toml:roles.builder.permission_profile)
+roles.builder.permission_profile.network <- global:parts/second.toml:permission_profiles.safe.network (selected by project:coterie.toml:roles.builder.permission_profile)
+roles.coordinator.enabled <- compiled:-:roles.coordinator.enabled
+roles.coordinator.max_instances <- compiled:-:archetypes.global:custom@1.roles.coordinator.max_instances
+roles.coordinator.permission_profile.approvals <- global:parts/first.toml:permission_profiles.safe.approvals (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
+roles.coordinator.permission_profile.filesystem <- global:parts/first.toml:permission_profiles.safe.filesystem (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
+roles.coordinator.permission_profile.network <- global:parts/second.toml:permission_profiles.safe.network (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
+supervision.interrupt_grace_ms <- compiled:-:supervision.interrupt_grace_ms
+supervision.job_timeout_seconds <- global:config.toml:supervision.job_timeout_seconds
+supervision.max_launch_attempts <- compiled:-:supervision.max_launch_attempts
+supervision.restart_backoff_seconds <- compiled:-:supervision.restart_backoff_seconds
+supervision.restart_window_seconds <- compiled:-:supervision.restart_window_seconds
+supervision.shutdown_timeout_ms <- compiled:-:supervision.shutdown_timeout_ms
+supervision.startup_timeout_seconds <- compiled:-:supervision.startup_timeout_seconds

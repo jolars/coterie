@@ -209,10 +209,10 @@ for a run using the built-in tracker.
 Global configuration lives at `$XDG_CONFIG_HOME/coterie/config.toml`, falling
 back to `~/.config/coterie/config.toml`.
 
-The first M5 slice implements the internal loader and resolver. Runtime
-launches and recovery still use compiled defaults until the snapshot and
-runtime integration work is complete. Configuration inspection commands,
-provenance, and lock handling remain separate M5 work.
+The internal M5 loader and resolver retain provenance for every effective
+value. Runtime launches and recovery still use compiled defaults until the
+snapshot and runtime integration work is complete. Configuration inspection
+commands and lock handling remain separate M5 work.
 
 Only absolute `XDG_CONFIG_HOME` and `HOME` values participate in discovery.
 An absent or relative `XDG_CONFIG_HOME` falls back to an absolute `HOME`; if
@@ -394,6 +394,30 @@ earlier scalar and array values, and tables merge recursively. Selecting a
 built-in archetype resolves its sealed definition rather than merging global
 archetype or permission-profile tables into it. Every effective value retains
 provenance identifying its source layer and file.
+
+Provenance distinguishes compiled defaults, sealed built-in definitions,
+trusted global files (including individual includes), project restrictions,
+and operator overrides. Each scalar, optional default, and complete array
+records its input field and source. Arrays have one origin because layers
+replace them atomically. Explicit assignments change the origin even when the
+value equals an earlier value; empty tables do not replace child origins.
+Omitted optional fields in global roles and implicit role enablement come
+from compiled defaults.
+
+The selected archetype reference retains both its definition origin and its
+selector origin. A global reference's definition origin is the last file
+contributing its table. Effective permission-profile components likewise retain
+their individual definition origins and the role setting that selected the
+profile. Selecting a built-in never attributes its sealed fields to global
+definitions with the same names. File sources retain the path used to open
+the file; compiled, built-in, and operator sources have no file. Pure resolution
+without file loading reports layers and fields without inventing file paths.
+Source metadata is separate from effective policy values and does not copy
+command arguments, instructions, or other configuration values.
+
+Golden tests cover complete provenance for compiled and layered configurations.
+Regenerate these snapshots explicitly with
+`cargo test config::provenance_tests::regenerate_provenance_snapshots -- --ignored`.
 
 Archetype selection uses the last explicit selector: operator, project,
 global, then compiled default. Project role restrictions apply to that final
