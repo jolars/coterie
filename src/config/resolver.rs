@@ -425,13 +425,25 @@ fn apply_limits(
     layer: ConfigLayer,
     provenance: &mut Provenance,
 ) -> Result<(), ConfigError> {
+    let requested = RunLimits {
+        max_concurrent_agents: input
+            .max_concurrent_agents
+            .unwrap_or(effective.max_concurrent_agents),
+        max_agents_per_run: input
+            .max_agents_per_run
+            .unwrap_or(effective.max_agents_per_run),
+        max_spawns_per_minute: input
+            .max_spawns_per_minute
+            .unwrap_or(effective.max_spawns_per_minute),
+    };
+    let bounded =
+        ceiling.map_or(requested, |ceiling| requested.intersect(ceiling));
     macro_rules! apply {
         ($field:ident) => {
             if let Some(value) = input.$field {
-                if value == 0 || ceiling.is_some_and(|limits| value > limits.$field) {
+                if value == 0 || value != bounded.$field {
                     return Err(ConfigError::invalid(layer, concat!("limits.", stringify!($field)), "limit must be positive and cannot exceed trusted operator policy"));
                 }
-                effective.$field = value;
                 provenance::record(provenance, concat!("limits.", stringify!($field)), layer);
             }
         };
@@ -439,6 +451,7 @@ fn apply_limits(
     apply!(max_concurrent_agents);
     apply!(max_agents_per_run);
     apply!(max_spawns_per_minute);
+    *effective = bounded;
     Ok(())
 }
 
@@ -474,18 +487,6 @@ fn resolve_supervision(
     Ok(policy)
 }
 
-impl PermissionProfile {
-    /// Write scopes are incomparable because they may refer to different roots.
-    pub(crate) fn no_more_permissive_than(self, ceiling: Self) -> bool {
-        (self.filesystem == ceiling.filesystem
-            || self.filesystem == FilesystemPolicy::ReadOnly)
-            && (self.network == ceiling.network
-                || self.network == NetworkPolicy::Deny)
-            && (self.approvals == ceiling.approvals
-                || self.approvals == ApprovalPolicy::Never)
-    }
-}
-
 fn apply_roles(
     effective: &mut EffectiveConfig,
     restrictions: &BTreeMap<String, RoleRestriction>,
@@ -505,6 +506,7 @@ fn apply_roles(
             .roles
             .get_mut(name)
             .expect("effective roles match their archetype");
+        let mut requested = role.clone();
         if let Some(enabled) = restriction.enabled {
             if !enabled && *name == effective.archetype.lead {
                 return Err(ConfigError::invalid(
@@ -513,40 +515,52 @@ fn apply_roles(
                     "the designated foreground role cannot be disabled",
                 ));
             }
-            role.enabled = enabled;
-            provenance::record(
-                &mut effective.provenance,
-                format!("{prefix}.enabled"),
-                layer,
-            );
+            requested.enabled = enabled;
         }
         if let Some(capacity) = restriction.max_instances {
-            if baseline.max_instances.is_some_and(|limit| capacity > limit) {
-                return Err(ConfigError::invalid(
-                    layer,
-                    format!("{prefix}.max_instances"),
-                    "capacity exceeds the trusted archetype",
-                ));
-            }
-            role.max_instances = Some(capacity);
-            provenance::record(
-                &mut effective.provenance,
-                format!("{prefix}.max_instances"),
-                layer,
-            );
+            requested.max_instances = Some(capacity);
         }
         if let Some(profile) = &restriction.permission_profile {
             let value = profiles.get(profile).ok_or_else(|| ConfigError::invalid(layer, format!("{prefix}.permission_profile"), "restriction must select an existing trusted global permission profile"))?;
-            let ceiling = effective.archetype.permission_profiles
-                [&baseline.permission_profile];
-            if !value.no_more_permissive_than(ceiling) {
-                return Err(ConfigError::invalid(
+            requested.permission_profile = *value;
+        }
+        // Operator overrides may restore project reductions, but only to the
+        // selected trusted archetype. Omitted fields retain project restrictions.
+        let ceiling = EffectiveRole {
+            enabled: true,
+            max_instances: baseline.max_instances,
+            permission_profile: effective.archetype.permission_profiles
+                [&baseline.permission_profile],
+        };
+        let bounded = requested.intersect(&ceiling);
+        if requested.max_instances != bounded.max_instances {
+            return Err(ConfigError::invalid(
+                layer,
+                format!("{prefix}.max_instances"),
+                "capacity exceeds the trusted archetype",
+            ));
+        }
+        if requested.permission_profile != bounded.permission_profile {
+            return Err(ConfigError::invalid(
+                layer,
+                format!("{prefix}.permission_profile"),
+                "permission profile exceeds or is incomparable with the trusted archetype profile",
+            ));
+        }
+        *role = bounded;
+        for (field, supplied) in [
+            ("enabled", restriction.enabled.is_some()),
+            ("max_instances", restriction.max_instances.is_some()),
+        ] {
+            if supplied {
+                provenance::record(
+                    &mut effective.provenance,
+                    format!("{prefix}.{field}"),
                     layer,
-                    format!("{prefix}.permission_profile"),
-                    "permission profile exceeds or is incomparable with the trusted archetype profile",
-                ));
+                );
             }
-            role.permission_profile = *value;
+        }
+        if let Some(profile) = &restriction.permission_profile {
             for field in ["filesystem", "network", "approvals"] {
                 effective.provenance.insert(
                     format!("{prefix}.permission_profile.{field}"),

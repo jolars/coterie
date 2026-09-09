@@ -374,6 +374,15 @@ requesting approvals may replace interactive approvals. Other increases or
 incomparable replacements are errors. Effective role settings remain separate
 from their unmodified archetype definition.
 
+Policy intersection retains shared permissions, requires both role policies to
+enable a role, and takes the smaller capacity or run limit. An omitted role
+capacity is unbounded within the run-wide ceilings. Resolution rejects requests
+whose intersection would remove requested authority or capacity, rather than
+silently clamping them. Lattice tests cover idempotence, commutativity, and
+associativity; combined restriction tests check accepted policies against their
+selected trusted definitions and reject authority injection through project
+tables.
+
 ```toml
 archetype = "builtin:standard@1"
 

@@ -199,7 +199,7 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 - [x] Track provenance for every effective value; reject unknown fields,
   unsupported schemas, recursive includes, cycles, shadowed `builtin:`
   names, and references to missing trusted definitions.
-- [ ] Implement monotone policy intersection so project data can disable roles
+- [x] Implement monotone policy intersection so project data can disable roles
   or reduce authority and capacity but cannot introduce commands,
   instructions, hooks, paths, environment variables, capabilities, or
   permission profiles.
@@ -212,8 +212,10 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 
 ### M5 gate
 
-- [ ] Lattice and property tests prove that an untrusted project override can
-  never increase authority or a resource ceiling.
+- [x] Lattice and property tests prove that an untrusted project override can
+  never increase authority or a resource ceiling. See the
+  [policy tests](src/config/policy_tests.rs) for intersection laws, combined
+  restrictions, trusted selection, operator bounds, and injection rejection.
 - [ ] Golden tests cover schemas, provenance, configuration fingerprints, lock
   portability, includes, and actionable mismatch diagnostics.
 

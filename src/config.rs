@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 mod input;
 mod loader;
+mod policy;
 mod provenance;
 mod resolver;
 
@@ -22,6 +23,8 @@ pub(crate) use loader::{ConfigLocations, load};
 use provenance::{ConfigSource, Provenance, ValueProvenance};
 pub(crate) use resolver::{ConfigError, ConfigLayer, EffectiveConfig, resolve};
 
+#[cfg(test)]
+mod policy_tests;
 #[cfg(test)]
 mod provenance_tests;
 #[cfg(test)]
