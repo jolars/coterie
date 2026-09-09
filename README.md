@@ -182,6 +182,8 @@ binaries and a shell installer to the GitHub release.
 - [`docs/cli-contract.md`](docs/cli-contract.md) defines commands, versioned
   JSON output, operation retries, authentication, recovery, trust boundaries,
   and process exit codes.
+- [`docs/crash-matrix.md`](docs/crash-matrix.md) describes failure injection,
+  recovery evidence, and concurrent stress testing.
 
 ## License
 

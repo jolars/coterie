@@ -177,12 +177,13 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 - [x] Complete `doctor`, conservative stale-state repair, resumable event
   following, transcript-tail handling, credential redaction, and private
   runtime permission checks.
-- [ ] Inject failures at every database/process/filesystem boundary and verify
-  convergence to a recoverable state without duplicated side effects.
+- [x] Inject failures at every database/process/filesystem boundary and verify
+  convergence to a recoverable state without duplicated side effects. See the
+  [crash matrix](docs/crash-matrix.md) for boundaries and recovery evidence.
 
 ### M4 gate
 
-- [ ] The crash matrix, restart tests, cleanup safety tests, and fake-provider
+- [x] The crash matrix, restart tests, cleanup safety tests, and fake-provider
   conformance suite pass repeatedly under concurrency.
 - [ ] No destructive path runs without positive proof of ownership, inactivity,
   and recoverability.

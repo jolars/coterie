@@ -138,10 +138,15 @@ impl TranscriptStore {
         let path = self
             .run_state_directory
             .join(Self::relative_path(session_id));
+        crate::fault::point("transcript.open.before");
         let mut file = crate::private_fs::open(&path, true, true)?;
+        crate::fault::point("transcript.open.after");
         file.seek(SeekFrom::End(0))?;
+        crate::fault::point("transcript.append.before");
         file.write_all(bytes)?;
+        crate::fault::point("transcript.append.after");
         file.sync_data()?;
+        crate::fault::point("transcript.sync.after");
         Ok(())
     }
 }

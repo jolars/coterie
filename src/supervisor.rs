@@ -3,6 +3,9 @@
 mod doctor;
 mod session;
 
+#[cfg(test)]
+mod crash_tests;
+
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -1202,6 +1205,7 @@ async fn serve(
         return Ok(());
     }
     remove_stale_socket(&socket_path).await?;
+    crate::fault::point("socket.bind.before");
     let listener = UnixListener::bind(&socket_path).map_err(|source| {
         SupervisorError::SocketIo {
             action: "bind",
@@ -1209,6 +1213,7 @@ async fn serve(
             source,
         }
     })?;
+    crate::fault::point("socket.bind.after");
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
         .map_err(|source| SupervisorError::SocketIo {
             action: "secure",
@@ -1216,6 +1221,7 @@ async fn serve(
             source,
         })?;
 
+    crate::fault::point("socket.permissions.after");
     let index = ActiveRunIndex::new(&directories);
     index.publish(&active)?;
     let mut sessions = runtime_sessions(&run_directories.state);
@@ -1268,7 +1274,9 @@ async fn serve(
     } else {
         Ok(())
     };
+    crate::fault::point("lease.release.before");
     drop(lease);
+    crate::fault::point("lease.release.after");
 
     serve_result?;
     index_result?;
@@ -1735,6 +1743,17 @@ fn record_operation_reconciliation(
     reconciled_at: i64,
 ) -> Result<(), SupervisorError> {
     store.transaction(|repositories| {
+        let error = error.as_deref().map(crate::redaction::text);
+        if repositories
+            .operation(operation_id)?
+            .is_some_and(|operation| {
+                operation.reconciliation_state == Some(state)
+                    && operation.reconciliation_error == error
+                    && operation.reconciled_at.is_some()
+            })
+        {
+            return Ok(());
+        }
         repositories.record_operation_reconciliation(
             operation_id,
             state,
@@ -5174,6 +5193,7 @@ async fn remove_stale_socket(path: &Path) -> Result<(), SupervisorError> {
                     });
                 }
             }
+            crate::fault::point("socket.stale_remove.before");
             fs::remove_file(path).map_err(|source| SupervisorError::SocketIo {
                 action: "remove stale",
                 path: path.to_owned(),
@@ -5193,8 +5213,12 @@ async fn remove_stale_socket(path: &Path) -> Result<(), SupervisorError> {
 }
 
 fn remove_owned_socket(path: &Path) -> Result<(), SupervisorError> {
+    crate::fault::point("socket.retire.before");
     match fs::remove_file(path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            crate::fault::point("socket.retire.after");
+            Ok(())
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(source) => Err(SupervisorError::SocketIo {
             action: "remove owned",

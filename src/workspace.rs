@@ -640,6 +640,7 @@ impl GitWorkspace {
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    crate::fault::point("workspace.parent.before");
                     fs::DirBuilder::new().mode(0o700).create(&parent).map_err(
                         |source| WorkspaceBackendError::Io {
                             action: "create an assignment workspace parent",
@@ -656,6 +657,7 @@ impl GitWorkspace {
                     });
                 }
             }
+            crate::fault::point("workspace.parent.after");
             require_real_directory(&parent)?;
             let canonical_parent = canonicalize_git_path(
                 "resolve an assignment workspace parent",
@@ -858,6 +860,7 @@ impl WorkspaceBackend for GitWorkspace {
                         });
                     }
                     Err(error) if error.code() == ErrorCode::NotFound => {
+                        crate::fault::point("workspace.reference.before");
                         repository
                             .reference(
                                 &reference_name,
@@ -870,6 +873,7 @@ impl WorkspaceBackend for GitWorkspace {
                                 path: repository.path().to_owned(),
                                 source,
                             })?;
+                        crate::fault::point("workspace.reference.after");
                     }
                     Err(source) => {
                         return Err(WorkspaceBackendError::Git {
@@ -908,6 +912,7 @@ impl WorkspaceBackend for GitWorkspace {
                     })?;
                 let mut options = WorktreeAddOptions::new();
                 options.reference(Some(&reference)).lock(true);
+                crate::fault::point("workspace.worktree.before");
                 repository
                     .worktree(
                         &worktree_name(workspace),
@@ -919,6 +924,7 @@ impl WorkspaceBackend for GitWorkspace {
                         path: workspace.path.clone(),
                         source,
                     })?;
+                crate::fault::point("workspace.worktree.after");
                 Ok(())
             }
             kind => Err(WorkspaceBackendError::UnsupportedKind {
@@ -1131,6 +1137,11 @@ impl WorkspaceBackend for GitWorkspace {
                 })?;
             let mut checkout = CheckoutBuilder::new();
             checkout.safe();
+            #[cfg(test)]
+            checkout.progress(|_, _, _| {
+                crate::fault::point("integration.checkout.progress")
+            });
+            crate::fault::point("integration.checkout.before");
             target
                 .checkout_tree(tree.as_object(), Some(&mut checkout))
                 .map_err(|source| WorkspaceBackendError::Git {
@@ -1138,9 +1149,13 @@ impl WorkspaceBackend for GitWorkspace {
                     path: project.canonical_path.clone(),
                     source,
                 })?;
+            crate::fault::point("integration.checkout.after");
         }
 
+        crate::fault::point("integration.commit.before");
         candidate.write_commit(&target, workspace, plan)?;
+        crate::fault::point("integration.commit.after");
+        crate::fault::point("integration.reference.before");
         target
             .reference_matching(
                 &plan.target_reference,
@@ -1172,6 +1187,7 @@ impl WorkspaceBackend for GitWorkspace {
                     }
                 }
             })?;
+        crate::fault::point("integration.reference.after");
         require_clean_repository(
             &target,
             &project.canonical_path,

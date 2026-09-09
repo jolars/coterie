@@ -857,12 +857,15 @@ impl Store {
 
         for migration in &MIGRATIONS[applied.len()..] {
             let transaction = self.connection.transaction()?;
+            crate::fault::point("db.migration.before");
             transaction.execute_batch(migration.sql)?;
             transaction.execute(
                 "INSERT INTO schema_migrations (version, name, source) VALUES (?1, ?2, ?3)",
                 (migration.version, migration.name, migration.sql),
             )?;
+            crate::fault::point("db.migration.written");
             transaction.commit()?;
+            crate::fault::point("db.migration.committed");
         }
 
         Ok(())
@@ -874,10 +877,22 @@ impl Store {
         operation: impl FnOnce(&Repositories<'_, '_>) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
         let transaction = self.connection.transaction()?;
+        #[cfg(test)]
+        let changes = transaction.total_changes();
         let result = operation(&Repositories {
             transaction: &transaction,
         })?;
+        #[cfg(test)]
+        let changed = transaction.total_changes() != changes;
+        #[cfg(test)]
+        if changed {
+            crate::fault::point("db.transaction.written");
+        }
         transaction.commit()?;
+        #[cfg(test)]
+        if changed {
+            crate::fault::point("db.transaction.committed");
+        }
         Ok(result)
     }
 
@@ -962,6 +977,7 @@ impl Store {
             "UPDATE operations SET request_fingerprint = ?2 WHERE id = ?1",
             params![mutation.id, request_fingerprint],
         )?;
+        crate::fault::point("db.mutation.intent_written");
         let result = apply(&repositories)?;
         let encoded = serde_json::to_string(&result)?;
         repositories.transaction.execute(
@@ -969,7 +985,9 @@ impl Store {
              WHERE id = ?1",
             params![mutation.id, encoded, mutation.created_at],
         )?;
+        crate::fault::point("db.mutation.written");
         transaction.commit()?;
+        crate::fault::point("db.mutation.committed");
         Ok(MutationOutcome::Applied(result))
     }
 

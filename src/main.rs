@@ -6,6 +6,7 @@ mod cli;
 )]
 mod config;
 mod doctor;
+mod fault;
 #[allow(
     dead_code,
     reason = "M1 defines stable identifiers before later milestones consume them"

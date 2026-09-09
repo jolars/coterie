@@ -450,6 +450,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             permission_profile: launch.permission_profile,
             bootstrap_instruction: launch.bootstrap_instruction.clone(),
         };
+        crate::fault::point("session.launch.before");
         let handle = match launch.mode {
             LaunchMode::Interactive => {
                 self.provider.launch_interactive(&specification, None)?
@@ -466,6 +467,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 },
             )?,
         };
+        crate::fault::point("session.launch.after");
         if handle.scope != launch.scope {
             return Err(AgentSessionError::ScopeMismatch {
                 expected: Box::new(launch.scope),
@@ -791,9 +793,11 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         })? {
             return Ok(None);
         }
+        crate::fault::point("session.event.before");
         let Some(event) = self.provider.next_event(&handle)? else {
             return Ok(None);
         };
+        crate::fault::point("session.event.after");
         match &event.kind {
             ProviderEventKind::Observation(observation) => {
                 self.record_observation(
@@ -1033,6 +1037,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             if handle.scope != control.scope {
                 continue;
             }
+            crate::fault::point("session.control.before");
             let observation = match phase {
                 ControlPhase::Interrupt => self.provider.interrupt(&handle),
                 ControlPhase::Terminate => self.provider.terminate(&handle),
@@ -1041,6 +1046,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                     unreachable!()
                 }
             };
+            crate::fault::point("session.control.after");
             // Unproved control remains pending; one failed target must not starve its peers.
             if let Ok(observation) = observation {
                 self.record_observation(

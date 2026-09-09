@@ -48,10 +48,12 @@ pub(crate) fn directory(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(_) => (),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            crate::fault::point("private.directory.before");
             fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
                 .create(path)?;
+            crate::fault::point("private.directory.after");
         }
         Err(error) => return Err(error),
     }
@@ -65,11 +67,16 @@ pub(crate) fn directory(path: &Path) -> io::Result<()> {
             "private directory belongs to another user",
         ));
     }
+    crate::fault::point("private.permissions.before");
     file.set_permissions(fs::Permissions::from_mode(0o700))?;
+    crate::fault::point("private.permissions.after");
     validate(&file.metadata()?, path, true)
 }
 
 pub(crate) fn open(path: &Path, write: bool, create: bool) -> io::Result<File> {
+    if create {
+        crate::fault::point("private.file.before");
+    }
     let file = OpenOptions::new()
         .read(true)
         .write(write)
@@ -77,6 +84,9 @@ pub(crate) fn open(path: &Path, write: bool, create: bool) -> io::Result<File> {
         .mode(0o600)
         .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
         .open(path)?;
+    if create {
+        crate::fault::point("private.file.after");
+    }
     validate(&file.metadata()?, path, false)?;
     Ok(file)
 }

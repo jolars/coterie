@@ -326,6 +326,7 @@ impl ProjectLease {
                 }
             })?;
 
+        crate::fault::point("lease.acquire.before");
         match file.try_lock() {
             Ok(()) => {}
             Err(fs::TryLockError::WouldBlock) => {
@@ -340,6 +341,7 @@ impl ProjectLease {
             }
         }
 
+        crate::fault::point("lease.acquire.after");
         file.set_len(0)
             .and_then(|()| file.rewind())
             .and_then(|()| {
@@ -352,6 +354,7 @@ impl ProjectLease {
                 source,
             })?;
 
+        crate::fault::point("lease.persist.after");
         Ok(LeaseAttempt::Acquired(Self { _file: file }))
     }
 }
@@ -462,6 +465,7 @@ impl ActiveRunIndex {
             RunId::generate()
         ));
         let result = (|| {
+            crate::fault::point("index.temporary.before");
             let mut file = OpenOptions::new()
                 .create_new(true)
                 .write(true)
@@ -472,12 +476,14 @@ impl ActiveRunIndex {
                     path: temporary.clone(),
                     source,
                 })?;
+            crate::fault::point("index.temporary.after");
             serde_json::to_writer(&mut file, entry).map_err(|source| {
                 ProjectError::EncodeIndex {
                     path: temporary.clone(),
                     source,
                 }
             })?;
+            crate::fault::point("index.write.after");
             file.write_all(b"\n")
                 .and_then(|()| file.sync_all())
                 .map_err(|source| ProjectError::IndexIo {
@@ -485,6 +491,7 @@ impl ActiveRunIndex {
                     path: temporary.clone(),
                     source,
                 })?;
+            crate::fault::point("index.sync.after");
             fs::rename(&temporary, &path).map_err(|source| {
                 ProjectError::IndexIo {
                     action: "publish",
@@ -492,7 +499,10 @@ impl ActiveRunIndex {
                     source,
                 }
             })?;
-            sync_directory(&self.directory)
+            crate::fault::point("index.rename.after");
+            sync_directory(&self.directory)?;
+            crate::fault::point("index.directory_sync.after");
+            Ok(())
         })();
 
         if result.is_err() {
@@ -513,8 +523,14 @@ impl ActiveRunIndex {
             return Ok(());
         }
         let path = self.entry_path(&entry.project_key);
+        crate::fault::point("index.retire.before");
         match fs::remove_file(&path) {
-            Ok(()) => sync_directory(&self.directory),
+            Ok(()) => {
+                crate::fault::point("index.retire.after");
+                sync_directory(&self.directory)?;
+                crate::fault::point("index.retire_sync.after");
+                Ok(())
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(source) => Err(ProjectError::IndexIo {
                 action: "retire",

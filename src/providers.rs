@@ -171,6 +171,7 @@ impl CodexInteractiveProcess {
     where
         F: Future<Output = ()>,
     {
+        crate::fault::point("process.foreground.wait.before");
         let mut termination = Box::pin(termination);
         let mut termination_requested = false;
         let mut terminate_deadline = None;
@@ -178,6 +179,7 @@ impl CodexInteractiveProcess {
         loop {
             tokio::select! {
                 status = self.child.wait() => {
+                    crate::fault::point("process.foreground.wait.after");
                     return status
                         .map(|status| (status, termination_requested))
                         .map_err(ProviderError::InteractiveWait);
@@ -262,8 +264,12 @@ fn forward_signal(process_id: u32, signal: i32) -> Result<(), ProviderError> {
     let process_id = i32::try_from(process_id)
         .map(Pid::from_raw)
         .map_err(|_| ProviderError::InvalidProcessId { process_id })?;
+    crate::fault::point("process.signal.before");
     match kill(process_id, signal) {
-        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Ok(()) | Err(Errno::ESRCH) => {
+            crate::fault::point("process.signal.after");
+            Ok(())
+        }
         Err(source) => Err(ProviderError::SignalForward { signal, source }),
     }
 }
@@ -896,9 +902,11 @@ impl CodexProvider {
             environment,
         );
         let executable = command.get_program().to_string_lossy().into_owned();
+        crate::fault::point("process.job.spawn.before");
         let mut child = command.spawn().map_err(|source| {
             ProviderError::JobLaunch { executable, source }
         })?;
+        crate::fault::point("process.job.spawn.after");
         let Some(stdout) = child.stdout.take() else {
             terminate_failed_job_launch(&mut child);
             return Err(ProviderError::MissingJobStdout);
@@ -910,6 +918,7 @@ impl CodexProvider {
                 return Err(error);
             }
         };
+        crate::fault::point("process.job.reader.after");
         Ok(CodexJobProcess {
             child,
             scope: specification.scope,
@@ -937,9 +946,11 @@ impl CodexProvider {
         let signals = SignalMonitor::install()?;
         let command = self.interactive_command(specification, environment)?;
         let executable = command.get_program().to_string_lossy().into_owned();
+        crate::fault::point("process.foreground.spawn.before");
         let child = tokio::process::Command::from(command).spawn().map_err(
             |source| ProviderError::InteractiveLaunch { executable, source },
         )?;
+        crate::fault::point("process.foreground.spawn.after");
         Ok(CodexInteractiveProcess {
             child,
             inherited_terminal,
@@ -1150,6 +1161,7 @@ impl CodexJobProcess {
         if !self.stdout_closed {
             match self.frames.try_recv() {
                 Ok(JobStreamItem::Frame(bytes)) => {
+                    crate::fault::point("process.job.frame.after");
                     return self.classify_frame(provider_id, bytes).map(Some);
                 }
                 Ok(JobStreamItem::ReadFailure(diagnostic)) => {
@@ -1175,6 +1187,7 @@ impl CodexJobProcess {
         let Some(status) = status else {
             return Ok(None);
         };
+        crate::fault::point("process.job.wait.after");
         self.exit_observed = true;
         let observation = SessionObservation::process_exit(status.code());
         self.observation = observation;
@@ -1213,12 +1226,14 @@ impl CodexJobProcess {
             })?
             .is_none()
         {
+            crate::fault::point("process.quarantine.kill.before");
             self.child
                 .kill()
                 .map_err(|source| ProviderError::JobControl {
                     provider_id: provider_id.to_owned(),
                     source,
                 })?;
+            crate::fault::point("process.quarantine.kill.after");
             self.exit_observed =
                 reap_with_deadline(&mut self.child, Duration::from_millis(250))
                     .map_err(|source| ProviderError::JobControl {
@@ -1226,6 +1241,7 @@ impl CodexJobProcess {
                         source,
                     })?
                     .is_some();
+            crate::fault::point("process.quarantine.reap.after");
         }
         let reaped = self
             .child
@@ -1416,12 +1432,14 @@ impl Provider for CodexProvider {
                 })?
                 .is_none()
             {
+                crate::fault::point("process.kill.before");
                 process.child.kill().map_err(|source| {
                     ProviderError::JobControl {
                         provider_id: session.provider_id().to_owned(),
                         source,
                     }
                 })?;
+                crate::fault::point("process.kill.after");
             }
             return Ok(process.observation);
         }
@@ -1478,6 +1496,7 @@ impl ProcessProbeRunner {
                     "empty provider command",
                 )
             })?;
+        crate::fault::point("process.probe.before");
         let mut child = Command::new(program)
             .args(configured_arguments)
             .args(arguments)
@@ -1485,6 +1504,7 @@ impl ProcessProbeRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
+        crate::fault::point("process.probe.spawned");
         let result = (|| {
             let mut stdout = child
                 .stdout
@@ -1513,6 +1533,7 @@ impl ProcessProbeRunner {
                     && stderr_closed
                     && let Some(status) = status
                 {
+                    crate::fault::point("process.probe.observed");
                     output.success = status.success();
                     output.code = status.code();
                     return Ok(output);
