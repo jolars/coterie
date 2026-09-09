@@ -184,6 +184,8 @@ binaries and a shell installer to the GitHub release.
   and process exit codes.
 - [`docs/crash-matrix.md`](docs/crash-matrix.md) describes failure injection,
   recovery evidence, and concurrent stress testing.
+- [`docs/destructive-operations.md`](docs/destructive-operations.md) maps
+  destructive operations to their ownership, inactivity, and recovery guards.
 
 ## License
 

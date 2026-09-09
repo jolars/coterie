@@ -453,6 +453,36 @@ impl GitWorkspace {
                 actual: workspace.path.clone(),
             });
         }
+        if workspace.kind == WORKTREE_WORKSPACE {
+            // Recheck every owned component on observation, not only creation:
+            // a moved parent must never grant authority over its new location.
+            let mut path = self.run_state_directory.clone();
+            for component in [
+                None,
+                Some("workspaces".to_owned()),
+                Some(project.id.to_string()),
+                Some(workspace.assignment_id.to_string()),
+            ] {
+                if let Some(component) = component {
+                    path.push(component);
+                }
+                match fs::symlink_metadata(&path) {
+                    Ok(_) => require_real_directory(&path)?,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        break;
+                    }
+                    Err(source) => {
+                        return Err(WorkspaceBackendError::Io {
+                            action: "inspect the assignment workspace path",
+                            path,
+                            source,
+                        });
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -486,6 +516,10 @@ impl GitWorkspace {
         )?;
         if &observed_common != common_directory
             || &observed_git != git_directory
+            || !repository.workdir().is_some_and(|path| {
+                fs::canonicalize(path)
+                    .is_ok_and(|path| path == project.canonical_path)
+            })
         {
             return Err(WorkspaceBackendError::ProjectIdentityChanged {
                 project_id: project.id,
@@ -554,6 +588,15 @@ impl GitWorkspace {
             Err(_) => return Ok(ExternalResourceState::Unknown),
         };
         if !repository_matches_project(&worktree_repository, project)
+            || !worktree_repository.workdir().is_some_and(|path| {
+                fs::canonicalize(path).is_ok_and(|path| path == expected_path)
+            })
+            || !fs::canonicalize(worktree_repository.path()).is_ok_and(|path| {
+                fs::canonicalize(
+                    repository.commondir().join("worktrees").join(&name),
+                )
+                .is_ok_and(|expected| path == expected)
+            })
             || worktree_repository
                 .head()
                 .ok()
@@ -1136,7 +1179,8 @@ impl WorkspaceBackend for GitWorkspace {
                     }
                 })?;
             let mut checkout = CheckoutBuilder::new();
-            checkout.safe();
+            // Ignored files can contain the operator's only copy of their work.
+            checkout.safe().overwrite_ignored(false);
             #[cfg(test)]
             checkout.progress(|_, _, _| {
                 crate::fault::point("integration.checkout.progress")
@@ -1293,6 +1337,7 @@ fn head_oid(
 fn repository_is_clean(
     repository: &Repository,
 ) -> Result<bool, WorkspaceBackendError> {
+    require_visible_index(repository)?;
     if repository.state() != RepositoryState::Clean {
         return Ok(false);
     }
@@ -1307,6 +1352,31 @@ fn repository_is_clean(
             }
         })?;
     Ok(statuses.is_empty())
+}
+
+fn require_visible_index(
+    repository: &Repository,
+) -> Result<(), WorkspaceBackendError> {
+    let index =
+        repository
+            .index()
+            .map_err(|source| WorkspaceBackendError::Git {
+                action: "check index visibility flags",
+                path: repository.path().to_owned(),
+                source,
+            })?;
+    // Status honors these flags, so an empty status cannot prove a clean tree.
+    if index.iter().any(|entry| {
+        entry.flags & git2::IndexEntryFlag::VALID.bits() != 0
+            || entry.flags_extended
+                & git2::IndexEntryExtendedFlag::SKIP_WORKTREE.bits()
+                != 0
+    }) {
+        return Err(WorkspaceBackendError::UnverifiableIndex {
+            path: repository.path().to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn require_clean_repository(
@@ -1620,6 +1690,7 @@ fn target_matches_candidate(
     repository: &Repository,
     candidate_tree: Oid,
 ) -> Result<bool, WorkspaceBackendError> {
+    require_visible_index(repository)?;
     if repository.state() != RepositoryState::Clean {
         return Ok(false);
     }
@@ -1919,6 +1990,10 @@ pub(crate) mod fake {
 /// A workspace adapter could not perform an external operation safely.
 #[derive(Debug, Error)]
 pub(crate) enum WorkspaceBackendError {
+    #[error(
+        "cannot prove a clean worktree at {path:?}: index entries use assume-unchanged or skip-worktree flags"
+    )]
+    UnverifiableIndex { path: PathBuf },
     #[cfg(test)]
     #[error("the fake workspace creation failed at an injected boundary")]
     InjectedFailure,
@@ -2374,6 +2449,141 @@ mod tests {
                 })
                 .is_err(),
             "a different later observation must not replace the durable result"
+        );
+    }
+
+    #[test]
+    fn guarded_integration_refuses_files_hidden_from_status() {
+        for (flags, extended) in [
+            (git2::IndexEntryFlag::VALID.bits(), 0),
+            (
+                git2::IndexEntryFlag::EXTENDED.bits(),
+                git2::IndexEntryExtendedFlag::SKIP_WORKTREE.bits(),
+            ),
+        ] {
+            let fixture = GitFixture::new();
+            let (mut backend, mut workspace) = fixture.materialized_workspace();
+            workspace.result_commit = Some(commit_file(
+                &workspace.path,
+                "README.md",
+                "worker result\n",
+                "worker result",
+            ));
+            let plan = backend
+                .prepare_integration(&workspace, &fixture.project, 11)
+                .unwrap();
+            let target =
+                Repository::open(&fixture.project.canonical_path).unwrap();
+            let mut index = target.index().unwrap();
+            let mut entry = index.get_path(Path::new("README.md"), 0).unwrap();
+            entry.flags |= flags;
+            entry.flags_extended |= extended;
+            index.add(&entry).unwrap();
+            index.write().unwrap();
+            let path = fixture.project.canonical_path.join("README.md");
+            fs::write(&path, "hidden operator edits\n").unwrap();
+            assert!(matches!(
+                backend.prepare_integration(&workspace, &fixture.project, 11),
+                Err(WorkspaceBackendError::UnverifiableIndex { .. })
+            ));
+            assert!(
+                backend
+                    .integrate(&workspace, &fixture.project, &plan)
+                    .is_err()
+            );
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                "hidden operator edits\n"
+            );
+            assert_eq!(
+                head_commit(&fixture.project.canonical_path),
+                fixture.base
+            );
+        }
+    }
+
+    #[test]
+    fn guarded_integration_preserves_ignored_target_files() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        workspace.result_commit = Some(commit_file(
+            &workspace.path,
+            "result.txt",
+            "worker result\n",
+            "worker result",
+        ));
+        let plan = backend
+            .prepare_integration(&workspace, &fixture.project, 11)
+            .unwrap();
+        let target = Repository::open(&fixture.project.canonical_path).unwrap();
+        fs::write(target.path().join("info/exclude"), "result.txt\n").unwrap();
+        let ignored = fixture.project.canonical_path.join("result.txt");
+        fs::write(&ignored, "operator's ignored work\n").unwrap();
+        assert!(
+            backend
+                .integrate(&workspace, &fixture.project, &plan)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(ignored).unwrap(),
+            "operator's ignored work\n"
+        );
+        assert_eq!(head_commit(&fixture.project.canonical_path), fixture.base);
+    }
+
+    #[test]
+    fn guarded_integration_refuses_a_redirected_target_worktree() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        workspace.result_commit = Some(commit_file(
+            &workspace.path,
+            "result.txt",
+            "worker result\n",
+            "worker result",
+        ));
+        let plan = backend
+            .prepare_integration(&workspace, &fixture.project, 11)
+            .unwrap();
+        let outside = fixture.root.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::copy(
+            fixture.project.canonical_path.join("README.md"),
+            outside.join("README.md"),
+        )
+        .unwrap();
+        let repository =
+            Repository::open(&fixture.project.canonical_path).unwrap();
+        repository
+            .config()
+            .unwrap()
+            .set_str("core.worktree", outside.to_str().unwrap())
+            .unwrap();
+        assert!(
+            backend
+                .integrate(&workspace, &fixture.project, &plan)
+                .is_err()
+        );
+        assert!(!outside.join("result.txt").exists());
+        assert_eq!(head_commit(&fixture.project.canonical_path), fixture.base);
+    }
+
+    #[test]
+    fn workspace_observation_refuses_a_relocated_state_parent() {
+        let fixture = GitFixture::new();
+        let (backend, workspace) = fixture.materialized_workspace();
+        let parent = workspace.path.parent().unwrap();
+        let outside = fixture.root.join("relocated");
+        fs::rename(parent, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, parent).unwrap();
+        assert!(!matches!(
+            backend.observe(&workspace, &fixture.project),
+            Ok(ExternalResourceState::Observed)
+        ));
+        assert!(
+            outside
+                .join(workspace.assignment_id.to_string())
+                .join("README.md")
+                .exists()
         );
     }
 

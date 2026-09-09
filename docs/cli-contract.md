@@ -151,6 +151,10 @@ recorded result to be the assignment tip with a linear history from its base,
 captures the target branch and tip, and preflights any merge without changing
 the target. Applying the plan uses a compare-and-set reference update, so a
 changed target, conflict, or ambiguous history is refused without resolution.
+Checkout preserves ignored files, including files that collide with the result.
+Assume-unchanged or skip-worktree index flags cause a conflict diagnostic because
+they prevent proof of cleanliness. A redirected Git working directory or a
+symlink substituted into an owned workspace path also blocks integration.
 
 The success response records the target reference, base commit, result commit,
 target commit before integration, and resulting target commit. Integration does

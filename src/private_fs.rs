@@ -114,12 +114,40 @@ pub(crate) fn check_socket(path: &Path) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_socket()
         || metadata.uid() != geteuid().as_raw()
+        || metadata.nlink() != 1
         || metadata.mode() & 0o7777 != 0o600
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "socket {} must be owned by the current user and have mode 0600",
+                "socket {} must be owned by the current user and have mode 0600 and one link",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Pins the socket's filesystem inode while its listener can be replaced or closed.
+pub(crate) fn socket(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_PATH | OFlag::O_NOFOLLOW).bits())
+        .open(path)?;
+    check_socket(path)?;
+    same_file(&file, path)?;
+    Ok(file)
+}
+
+/// Requires the pathname to still identify the inspected, open inode.
+pub(crate) fn same_file(file: &File, path: &Path) -> io::Result<()> {
+    let expected = file.metadata()?;
+    let actual = fs::symlink_metadata(path)?;
+    if expected.dev() != actual.dev() || expected.ino() != actual.ino() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "path {} no longer identifies the owned file",
                 path.display()
             ),
         ));

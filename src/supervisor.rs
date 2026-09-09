@@ -1200,8 +1200,11 @@ async fn serve(
             .is_some_and(|run| run.status == "stopped"))
     })? {
         remove_stale_socket(&socket_path).await?;
-        ActiveRunIndex::new(&directories)
-            .retire(&project.identity, active.run_id)?;
+        ActiveRunIndex::new(&directories).retire(
+            &project.identity,
+            active.run_id,
+            &lease,
+        )?;
         return Ok(());
     }
     remove_stale_socket(&socket_path).await?;
@@ -1222,8 +1225,16 @@ async fn serve(
         })?;
 
     crate::fault::point("socket.permissions.after");
+    let owned_socket =
+        crate::private_fs::socket(&socket_path).map_err(|source| {
+            SupervisorError::SocketIo {
+                action: "record owned",
+                path: socket_path.clone(),
+                source,
+            }
+        })?;
     let index = ActiveRunIndex::new(&directories);
-    index.publish(&active)?;
+    index.publish(&active, &lease)?;
     let mut sessions = runtime_sessions(&run_directories.state);
     let mut workspaces = runtime_workspaces(&run_directories.state);
     let reconciled_at = unix_timestamp()?;
@@ -1268,9 +1279,9 @@ async fn serve(
         &mut workspaces,
     )
     .await;
-    let socket_result = remove_owned_socket(&socket_path);
+    let socket_result = remove_owned_socket(&socket_path, &owned_socket).await;
     let index_result = if serve_result.is_ok() && socket_result.is_ok() {
-        index.retire(&project.identity, active.run_id)
+        index.retire(&project.identity, active.run_id, &lease)
     } else {
         Ok(())
     };
@@ -4883,6 +4894,7 @@ fn rpc_workspace_failure(error: WorkspaceError) -> RpcFailure {
     match error {
         WorkspaceError::Backend(
             WorkspaceBackendError::DirtyWorkspace { .. }
+            | WorkspaceBackendError::UnverifiableIndex { .. }
             | WorkspaceBackendError::DirtyTarget { .. }
             | WorkspaceBackendError::UnexpectedWorkspaceTip { .. }
             | WorkspaceBackendError::AmbiguousTarget { .. }
@@ -5168,31 +5180,14 @@ fn unix_timestamp() -> Result<i64, SupervisorError> {
 async fn remove_stale_socket(path: &Path) -> Result<(), SupervisorError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => {
-            crate::private_fs::check_socket(path).map_err(|source| {
+            let socket = crate::private_fs::socket(path).map_err(|source| {
                 SupervisorError::SocketIo {
                     action: "validate stale",
                     path: path.to_owned(),
                     source,
                 }
             })?;
-            match tokio::time::timeout(
-                STARTUP_TIMEOUT,
-                UnixStream::connect(path),
-            )
-            .await
-            {
-                Ok(Err(error))
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound
-                            | io::ErrorKind::ConnectionRefused
-                    ) => {}
-                _ => {
-                    return Err(SupervisorError::UnsafeSocketPath {
-                        path: path.to_owned(),
-                    });
-                }
-            }
+            require_inactive_socket(path, &socket).await?;
             crate::fault::point("socket.stale_remove.before");
             fs::remove_file(path).map_err(|source| SupervisorError::SocketIo {
                 action: "remove stale",
@@ -5212,7 +5207,48 @@ async fn remove_stale_socket(path: &Path) -> Result<(), SupervisorError> {
     }
 }
 
-fn remove_owned_socket(path: &Path) -> Result<(), SupervisorError> {
+async fn require_inactive_socket(
+    path: &Path,
+    socket: &fs::File,
+) -> Result<(), SupervisorError> {
+    let validate = || {
+        crate::private_fs::check_directory(
+            path.parent()
+                .ok_or_else(|| io::Error::other("socket has no parent"))?,
+        )?;
+        crate::private_fs::check_socket(path)?;
+        crate::private_fs::same_file(socket, path)
+    };
+    validate().map_err(|source| SupervisorError::SocketIo {
+        action: "validate owned",
+        path: path.to_owned(),
+        source,
+    })?;
+    match tokio::time::timeout(STARTUP_TIMEOUT, UnixStream::connect(path)).await
+    {
+        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => {}
+        _ => {
+            return Err(SupervisorError::UnsafeSocketPath {
+                path: path.to_owned(),
+            });
+        }
+    }
+    // The connection attempt yields; never unlink a replacement at this name.
+    validate().map_err(|source| SupervisorError::SocketIo {
+        action: "recheck owned",
+        path: path.to_owned(),
+        source,
+    })
+}
+
+async fn remove_owned_socket(
+    path: &Path,
+    socket: &fs::File,
+) -> Result<(), SupervisorError> {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        _ => require_inactive_socket(path, socket).await?,
+    }
     crate::fault::point("socket.retire.before");
     match fs::remove_file(path) {
         Ok(()) => {
@@ -7912,8 +7948,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_socket_retirement_preserves_unverified_paths() {
+        for replacement in [
+            "regular", "symlink", "socket", "hardlink", "public", "parent",
+        ] {
+            let fixture = TestDirectory::new();
+            fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let path = fixture.join("owned.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let owned = crate::private_fs::socket(&path).unwrap();
+            assert!(super::remove_owned_socket(&path, &owned).await.is_err());
+            drop(listener);
+            let preserved = fixture.join("preserved");
+            fs::rename(&path, &preserved).unwrap();
+            match replacement {
+                "regular" => fs::write(&path, "recoverable work").unwrap(),
+                "symlink" => {
+                    std::os::unix::fs::symlink(&preserved, &path).unwrap()
+                }
+                "socket" => {
+                    drop(UnixListener::bind(&path).unwrap());
+                    fs::set_permissions(
+                        &path,
+                        fs::Permissions::from_mode(0o600),
+                    )
+                    .unwrap();
+                }
+                "hardlink" => fs::hard_link(&preserved, &path).unwrap(),
+                "public" => {
+                    fs::rename(&preserved, &path).unwrap();
+                    fs::set_permissions(
+                        &path,
+                        fs::Permissions::from_mode(0o666),
+                    )
+                    .unwrap();
+                }
+                "parent" => {
+                    fs::rename(&preserved, &path).unwrap();
+                    fs::set_permissions(
+                        &fixture.0,
+                        fs::Permissions::from_mode(0o777),
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                super::remove_owned_socket(&path, &owned).await.is_err(),
+                "{replacement}"
+            );
+            assert!(fs::symlink_metadata(&path).is_ok(), "{replacement}");
+            if replacement == "regular" {
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    "recoverable work"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_socket_retirement_requires_listener_inactivity() {
+        let fixture = TestDirectory::new();
+        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let path = fixture.join("owned.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let owned = crate::private_fs::socket(&path).unwrap();
+        assert!(super::remove_owned_socket(&path, &owned).await.is_err());
+        assert!(path.exists());
+        drop(listener);
+        super::remove_owned_socket(&path, &owned).await.unwrap();
+        super::remove_owned_socket(&path, &owned).await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
     async fn stale_socket_repair_preserves_responsive_or_insecure_paths() {
         let fixture = TestDirectory::new();
+        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700))
+            .unwrap();
         let path = fixture.join("owned.sock");
         let listener = UnixListener::bind(&path).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();

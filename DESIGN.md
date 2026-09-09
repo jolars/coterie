@@ -650,7 +650,11 @@ requested by the lead or operator. It uses the workspace backend to apply a
 submitted result to that task's target project and records exact
 before-and-after identities. It preflights the operation without changing the
 target and refuses dirty targets, unexpected target tips, ambiguous histories,
-and conflicts. Coterie does not autonomously choose an integration order or
+and conflicts. The Git working directory must still resolve to the attached
+project, and every owned workspace path component must remain a real directory.
+Checkout preserves ignored files. Index entries marked assume-unchanged or
+skip-worktree make cleanliness unprovable, so integration refuses them with a
+diagnostic. Coterie does not autonomously choose an integration order or
 resolve conflicts.
 
 ## Providers and session state
@@ -880,6 +884,13 @@ compatibility until M5 implements those layers. Recovery remains the existing
 lease-protected startup and desired-state reconciliation path. An indexed run
 must have a matching durable database; a responsive socket or ambiguous file
 ownership is never discarded as stale.
+
+Socket retirement verifies the original filesystem inode, private ownership,
+one link, and listener inactivity before unlinking. Stale socket repair pins
+the inspected inode and rechecks it after the connection probe. Active-run index
+publication and retirement require the matching, still-held project lease and
+validate the existing entry before replacement or removal. Conflicting entries
+remain intact. Failed publication preserves its temporary file for inspection.
 
 Event following emits bounded pages with sequence cursors. New events must fit
 the 900 KiB page budget before their mutations commit. Older, larger events are

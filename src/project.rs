@@ -306,7 +306,10 @@ pub(crate) enum LeaseAttempt {
 
 /// An exclusive lease retained for as long as its backing file remains open.
 pub(crate) struct ProjectLease {
-    _file: File,
+    file: File,
+    path: PathBuf,
+    key: ProjectKey,
+    run_id: RunId,
 }
 
 impl ProjectLease {
@@ -342,6 +345,13 @@ impl ProjectLease {
         }
 
         crate::fault::point("lease.acquire.after");
+        crate::private_fs::same_file(&file, &path).map_err(|source| {
+            ProjectError::LeaseIo {
+                action: "verify locked",
+                path: path.clone(),
+                source,
+            }
+        })?;
         file.set_len(0)
             .and_then(|()| file.rewind())
             .and_then(|()| {
@@ -355,7 +365,38 @@ impl ProjectLease {
             })?;
 
         crate::fault::point("lease.persist.after");
-        Ok(LeaseAttempt::Acquired(Self { _file: file }))
+        Ok(LeaseAttempt::Acquired(Self {
+            file,
+            path,
+            key,
+            run_id,
+        }))
+    }
+
+    fn verify(
+        &self,
+        identity: &ProjectIdentity,
+        run_id: RunId,
+    ) -> Result<(), ProjectError> {
+        if self.key != ProjectKey::for_identity(identity)
+            || self.run_id != run_id
+        {
+            return Err(ProjectError::LeaseOwnershipConflict {
+                path: self.path.clone(),
+            });
+        }
+        (|| {
+            crate::private_fs::check_directory(
+                self.path.parent().expect("lease has a parent"),
+            )?;
+            crate::private_fs::open(&self.path, false, false)?;
+            crate::private_fs::same_file(&self.file, &self.path)
+        })()
+        .map_err(|source| ProjectError::LeaseIo {
+            action: "verify owner of",
+            path: self.path.clone(),
+            source,
+        })
     }
 }
 
@@ -405,6 +446,13 @@ impl ActiveRunIndex {
         &self,
         identity: &ProjectIdentity,
     ) -> Result<Option<ActiveRunEntry>, ProjectError> {
+        Ok(self.lookup_file(identity)?.map(|(entry, _)| entry))
+    }
+
+    fn lookup_file(
+        &self,
+        identity: &ProjectIdentity,
+    ) -> Result<Option<(ActiveRunEntry, File)>, ProjectError> {
         let key = ProjectKey::for_identity(identity);
         let path = self.entry_path(&key);
         let mut file = match crate::private_fs::open(&path, false, false) {
@@ -443,13 +491,22 @@ impl ActiveRunIndex {
         if entry.project_key != key || entry.project_identity != *identity {
             return Err(ProjectError::IndexIdentityMismatch { path });
         }
-        Ok(Some(entry))
+        Ok(Some((entry, file)))
     }
 
     pub(crate) fn publish(
         &self,
         entry: &ActiveRunEntry,
+        lease: &ProjectLease,
     ) -> Result<(), ProjectError> {
+        lease.verify(&entry.project_identity, entry.run_id)?;
+        crate::private_fs::check_directory(&self.directory).map_err(
+            |source| ProjectError::IndexIo {
+                action: "validate directory for",
+                path: self.directory.clone(),
+                source,
+            },
+        )?;
         let expected_key = ProjectKey::for_identity(&entry.project_identity);
         if entry.schema_version != ACTIVE_RUN_INDEX_VERSION
             || entry.project_key != expected_key
@@ -458,71 +515,115 @@ impl ActiveRunIndex {
         }
 
         let path = self.entry_path(&entry.project_key);
+        let existing = self.lookup_file(&entry.project_identity)?;
+        if existing
+            .as_ref()
+            .is_some_and(|(previous, _)| previous != entry)
+        {
+            return Err(ProjectError::IndexOwnershipConflict { path });
+        }
         let temporary = self.directory.join(format!(
             ".{}.{}.{}.tmp",
             entry.project_key,
             entry.run_id,
             RunId::generate()
         ));
-        let result = (|| {
-            crate::fault::point("index.temporary.before");
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .mode(0o600)
-                .open(&temporary)
-                .map_err(|source| ProjectError::IndexIo {
-                    action: "create temporary",
-                    path: temporary.clone(),
-                    source,
-                })?;
-            crate::fault::point("index.temporary.after");
-            serde_json::to_writer(&mut file, entry).map_err(|source| {
-                ProjectError::EncodeIndex {
-                    path: temporary.clone(),
-                    source,
-                }
+        // A failed publication keeps its private temporary file for inspection.
+        // Cleanup must not guess ownership from a generated pathname.
+        crate::fault::point("index.temporary.before");
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|source| ProjectError::IndexIo {
+                action: "create temporary",
+                path: temporary.clone(),
+                source,
             })?;
-            crate::fault::point("index.write.after");
-            file.write_all(b"\n")
-                .and_then(|()| file.sync_all())
-                .map_err(|source| ProjectError::IndexIo {
-                    action: "persist temporary",
-                    path: temporary.clone(),
-                    source,
-                })?;
-            crate::fault::point("index.sync.after");
-            fs::rename(&temporary, &path).map_err(|source| {
-                ProjectError::IndexIo {
-                    action: "publish",
-                    path: path.clone(),
-                    source,
-                }
+        crate::fault::point("index.temporary.after");
+        serde_json::to_writer(&mut file, entry).map_err(|source| {
+            ProjectError::EncodeIndex {
+                path: temporary.clone(),
+                source,
+            }
+        })?;
+        crate::fault::point("index.write.after");
+        file.write_all(b"\n")
+            .and_then(|()| file.sync_all())
+            .map_err(|source| ProjectError::IndexIo {
+                action: "persist temporary",
+                path: temporary.clone(),
+                source,
             })?;
-            crate::fault::point("index.rename.after");
-            sync_directory(&self.directory)?;
-            crate::fault::point("index.directory_sync.after");
-            Ok(())
-        })();
-
-        if result.is_err() {
-            let _ignored = fs::remove_file(&temporary);
+        crate::fault::point("index.sync.after");
+        lease.verify(&entry.project_identity, entry.run_id)?;
+        crate::private_fs::same_file(&file, &temporary).map_err(|source| {
+            ProjectError::IndexIo {
+                action: "verify temporary",
+                path: temporary.clone(),
+                source,
+            }
+        })?;
+        match existing.as_ref() {
+            Some((_, previous)) => crate::private_fs::same_file(
+                previous, &path,
+            )
+            .map_err(|source| ProjectError::IndexIo {
+                action: "verify publication target",
+                path: path.clone(),
+                source,
+            })?,
+            None => match fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                _ => {
+                    return Err(ProjectError::IndexOwnershipConflict {
+                        path: path.clone(),
+                    });
+                }
+            },
         }
-        result
+        fs::rename(&temporary, &path).map_err(|source| {
+            ProjectError::IndexIo {
+                action: "publish",
+                path: path.clone(),
+                source,
+            }
+        })?;
+        crate::fault::point("index.rename.after");
+        sync_directory(&self.directory)?;
+        crate::fault::point("index.directory_sync.after");
+        Ok(())
     }
 
     pub(crate) fn retire(
         &self,
         identity: &ProjectIdentity,
         run_id: RunId,
+        lease: &ProjectLease,
     ) -> Result<(), ProjectError> {
-        let Some(entry) = self.lookup(identity)? else {
+        lease.verify(identity, run_id)?;
+        crate::private_fs::check_directory(&self.directory).map_err(
+            |source| ProjectError::IndexIo {
+                action: "validate retirement directory for",
+                path: self.directory.clone(),
+                source,
+            },
+        )?;
+        let Some((entry, file)) = self.lookup_file(identity)? else {
             return Ok(());
         };
         if entry.run_id != run_id {
             return Ok(());
         }
         let path = self.entry_path(&entry.project_key);
+        crate::private_fs::same_file(&file, &path).map_err(|source| {
+            ProjectError::IndexIo {
+                action: "verify retirement target",
+                path: path.clone(),
+                source,
+            }
+        })?;
         crate::fault::point("index.retire.before");
         match fs::remove_file(&path) {
             Ok(()) => {
@@ -547,6 +648,10 @@ impl ActiveRunIndex {
 
 #[derive(Debug, Error)]
 pub(crate) enum ProjectError {
+    #[error("project lease no longer proves ownership: {path:?}")]
+    LeaseOwnershipConflict { path: PathBuf },
+    #[error("active-run index belongs to another owner: {path:?}")]
+    IndexOwnershipConflict { path: PathBuf },
     #[error("could not canonicalize {purpose} at {path:?}: {source}")]
     Canonicalize {
         purpose: &'static str,
@@ -1204,9 +1309,15 @@ mod tests {
             project_identity: identity.clone(),
         };
         let index = ActiveRunIndex::new(&directories);
+        let LeaseAttempt::Acquired(lease) =
+            ProjectLease::try_acquire(&directories, &identity, entry.run_id)
+                .unwrap()
+        else {
+            panic!("the fixture lease must be available");
+        };
 
         index
-            .publish(&entry)
+            .publish(&entry, &lease)
             .expect("the entry should be published");
         assert_eq!(
             index
@@ -1215,21 +1326,172 @@ mod tests {
             Some(entry.clone())
         );
 
-        index
-            .retire(&identity, RunId::generate())
-            .expect("a non-owner retirement should be harmless");
+        let foreign = ActiveRunEntry::new(
+            RunId::generate(),
+            ProjectId::generate(),
+            identity.clone(),
+        );
+        assert!(index.publish(&foreign, &lease).is_err());
+        assert_eq!(index.lookup(&identity).unwrap(), Some(entry.clone()));
+        let different_project = ActiveRunEntry::new(
+            entry.run_id,
+            ProjectId::generate(),
+            identity.clone(),
+        );
+        assert!(matches!(
+            index.publish(&different_project, &lease),
+            Err(ProjectError::IndexOwnershipConflict { .. })
+        ));
+
+        assert!(index.retire(&identity, RunId::generate(), &lease).is_err());
         assert_eq!(
             index.lookup(&identity).expect("the entry should remain"),
             Some(entry.clone())
         );
 
         index
-            .retire(&identity, entry.run_id)
+            .retire(&identity, entry.run_id, &lease)
             .expect("the owner should retire its entry");
         assert_eq!(
             index.lookup(&identity).expect("the lookup should succeed"),
             None
         );
+    }
+
+    #[test]
+    fn index_mutation_requires_the_original_held_lease() {
+        let fixture = TestDirectory::new();
+        let runtime = fixture.join("runtime");
+        create_directory(&runtime, 0o700);
+        let directories = CoterieDirectories::from_base_directories(
+            &runtime,
+            fixture.join("state"),
+        )
+        .unwrap();
+        directories.prepare().unwrap();
+        let identity = ProjectIdentity::Directory {
+            canonical_directory: fixture.join("project"),
+        };
+        let entry = ActiveRunEntry::new(
+            RunId::generate(),
+            ProjectId::generate(),
+            identity.clone(),
+        );
+        let LeaseAttempt::Acquired(lease) =
+            ProjectLease::try_acquire(&directories, &identity, entry.run_id)
+                .unwrap()
+        else {
+            panic!("lease unavailable")
+        };
+        let index = ActiveRunIndex::new(&directories);
+        index.publish(&entry, &lease).unwrap();
+        let path = index.entry_path(&entry.project_key);
+        let original = fs::read(&path).unwrap();
+        fs::rename(&lease.path, fixture.join("old-lease")).unwrap();
+        let LeaseAttempt::Acquired(replacement) = ProjectLease::try_acquire(
+            &directories,
+            &identity,
+            RunId::generate(),
+        )
+        .unwrap() else {
+            panic!("replacement lease unavailable")
+        };
+        assert!(index.publish(&entry, &lease).is_err());
+        assert!(index.retire(&identity, entry.run_id, &lease).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        let foreign = ActiveRunEntry::new(
+            replacement.run_id,
+            ProjectId::generate(),
+            identity.clone(),
+        );
+        assert!(matches!(
+            index.publish(&foreign, &replacement),
+            Err(ProjectError::IndexOwnershipConflict { .. })
+        ));
+        index
+            .retire(&identity, replacement.run_id, &replacement)
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn index_mutation_preserves_unverifiable_entries() {
+        for invalid in
+            ["symlink", "hardlink", "public", "malformed", "directory"]
+        {
+            let fixture = TestDirectory::new();
+            let runtime = fixture.join("runtime");
+            create_directory(&runtime, 0o700);
+            let directories = CoterieDirectories::from_base_directories(
+                &runtime,
+                fixture.join("state"),
+            )
+            .unwrap();
+            directories.prepare().unwrap();
+            let identity = ProjectIdentity::Directory {
+                canonical_directory: fixture.join("project"),
+            };
+            let entry = ActiveRunEntry::new(
+                RunId::generate(),
+                ProjectId::generate(),
+                identity.clone(),
+            );
+            let LeaseAttempt::Acquired(lease) = ProjectLease::try_acquire(
+                &directories,
+                &identity,
+                entry.run_id,
+            )
+            .unwrap() else {
+                panic!("lease unavailable")
+            };
+            let index = ActiveRunIndex::new(&directories);
+            index.publish(&entry, &lease).unwrap();
+            let path = index.entry_path(&entry.project_key);
+            let preserved = fixture.join("preserved");
+            let original = fs::read(&path).unwrap();
+            match invalid {
+                "symlink" => {
+                    fs::rename(&path, &preserved).unwrap();
+                    std::os::unix::fs::symlink(&preserved, &path).unwrap();
+                }
+                "hardlink" => fs::hard_link(&path, &preserved).unwrap(),
+                "public" => fs::set_permissions(
+                    &path,
+                    fs::Permissions::from_mode(0o666),
+                )
+                .unwrap(),
+                "malformed" => {
+                    fs::write(&path, "recoverable metadata").unwrap()
+                }
+                "directory" => {
+                    fs::rename(&path, &preserved).unwrap();
+                    fs::create_dir(&path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(index.publish(&entry, &lease).is_err(), "{invalid}");
+            assert!(
+                index.retire(&identity, entry.run_id, &lease).is_err(),
+                "{invalid}"
+            );
+            assert!(fs::symlink_metadata(&path).is_ok());
+            if invalid == "malformed" {
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    "recoverable metadata"
+                );
+            } else {
+                assert_eq!(
+                    fs::read(if preserved.exists() {
+                        &preserved
+                    } else {
+                        &path
+                    })
+                    .unwrap(),
+                    original
+                );
+            }
+        }
     }
 
     #[test]

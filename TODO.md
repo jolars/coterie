@@ -185,8 +185,9 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 
 - [x] The crash matrix, restart tests, cleanup safety tests, and fake-provider
   conformance suite pass repeatedly under concurrency.
-- [ ] No destructive path runs without positive proof of ownership, inactivity,
-  and recoverability.
+- [x] No destructive path runs without positive proof of ownership, inactivity,
+  and recoverability. See the [safety audit](docs/destructive-operations.md) for
+  the operation inventory, guards, and regression evidence.
 
 ## M5: Full declarative configuration
 

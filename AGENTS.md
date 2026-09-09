@@ -8,11 +8,11 @@ milestone acceptance criteria.
 
 ## Current status
 
-Coterie has completed the M0 development foundation. The repository contains a
-behavior-free Rust binary and the canonical Task, devenv, pre-commit, CI,
-documentation, and release-configuration gates. M1 in `TODO.md` owns the first
-runtime contracts and durable state; do not imply that orchestration behavior
-exists before its acceptance criteria pass.
+Coterie implements the single-project operator loop and has passed the M4
+reliability and safety gates. The first MVP release gate remains separate in
+`TODO.md`. M5 and later milestones own full declarative configuration,
+attached projects, and the remaining initial product scope. Do not imply that
+those features exist before their acceptance criteria pass.
 
 ## Project priorities
 
