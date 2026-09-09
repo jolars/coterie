@@ -263,3 +263,17 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   inspection.
 - [ ] Every non-goal remains absent or explicitly proposed as a later design
   change rather than entering the implementation accidentally.
+
+## Future work to scope
+
+- [ ] Design exclusive resource reservations for performance measurements:
+  allow parallel implementation while serializing benchmark windows across
+  Coterie runs on the same machine. Agents request and release reservations;
+  Rust enforces admission after competing workers acknowledge safe stopping
+  points and their builds, tests, and other competing subprocesses have
+  finished. Prevent competing work from starting until release, and make
+  reservation ownership, timeouts, and crash recovery durable and inspectable.
+  Define enforcement and subprocess tracking in `DESIGN.md` before
+  implementation, with tests for concurrent requests, interrupted acquisition,
+  and recovery. Scope the guarantee to Coterie-managed workloads; unrelated
+  host processes require separate handling.
