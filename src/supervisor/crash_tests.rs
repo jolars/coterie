@@ -475,20 +475,56 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let mut provider = crate::providers::CodexProvider::new([root.join("codex").into_os_string()]);
-            let specification = LaunchSpecification { scope, working_directory: root.join("project"),
-                permission_profile: builtin_standard().permission_profiles["interactive"], bootstrap_instruction };
-            let environment = InteractiveEnvironment { project_id: PROJECT.parse().unwrap(), primary_project_root: root.join("project"),
-                role: agent.role, socket_path: fixture.socket.clone(), token };
-            let handle = provider.launch_interactive(&specification, Some(&environment)).unwrap();
-            observe_foreground_started(&mut fixture.store, run_id, &AuthenticatedCaller::Operator, scope, provider.foreground_process_id(&handle).unwrap()).unwrap();
+            let mut provider = crate::providers::CodexProvider::new([root
+                .join("codex")
+                .into_os_string()]);
+            let specification = LaunchSpecification {
+                scope,
+                working_directory: root.join("project"),
+                permission_profile: crate::config::builtin_standard()
+                    .permission_profiles["interactive"],
+                bootstrap_instruction,
+            };
+            let environment = InteractiveEnvironment {
+                project_id: PROJECT.parse().unwrap(),
+                primary_project_root: root.join("project"),
+                role: agent.role,
+                socket_path: fixture.socket.clone(),
+                token,
+            };
+            let handle = provider
+                .launch_interactive(&specification, Some(&environment))
+                .unwrap();
+            observe_foreground_started(
+                &mut fixture.store,
+                run_id,
+                &AuthenticatedCaller::Operator,
+                scope,
+                provider.foreground_process_id(&handle).unwrap(),
+            )
+            .unwrap();
             if case == "foreground-exit" {
                 wait_for_file(&root.join("codex.launches"));
                 fs::write(root.join("codex.release"), "").unwrap();
                 injection::arm(&root.join("trace"), boundary);
-                let (status, _) = provider.wait_foreground_until_termination(&handle, std::future::pending()).await.unwrap();
-                observe_foreground_ended(&mut fixture.store, run_id, &AuthenticatedCaller::Operator, scope,
-                    ForegroundEnd::Exited { code: status.code(), signal: status.signal() }).unwrap();
+                let (status, _) = provider
+                    .wait_foreground_until_termination(
+                        &handle,
+                        std::future::pending(),
+                    )
+                    .await
+                    .unwrap();
+                observe_foreground_ended(
+                    &mut fixture.store,
+                    run_id,
+                    &AuthenticatedCaller::Operator,
+                    scope,
+                    ForegroundEnd::Exited {
+                        code: status.code(),
+                        signal: status.signal(),
+                    },
+                )
+                .unwrap();
             }
             injection::disarm();
         });
@@ -919,7 +955,23 @@ impl Fixture {
         );
         let run = root.join("run");
         crate::private_fs::directory(&run).unwrap();
-        let store = initialize_store(&run, &active, &project).unwrap();
+        let mut configuration = crate::config::resolve(
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        if root.join("codex").exists() {
+            configuration.providers.get_mut("codex").unwrap().command =
+                vec![root.join("codex").to_str().unwrap().into()];
+        }
+        let store = initialize_store_with_configuration(
+            &run,
+            &active,
+            &project,
+            &configuration,
+        )
+        .unwrap();
         let sessions = runtime_sessions(&run);
         let workspaces = WorkspaceSupervisor::new(GitWorkspace::new(&run));
         Self {

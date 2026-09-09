@@ -9,10 +9,11 @@ milestone acceptance criteria.
 ## Current status
 
 Coterie implements the single-project operator loop and has passed the M4
-reliability and safety gates. The first MVP release gate remains separate in
-`TODO.md`. M5 and later milestones own full declarative configuration,
-attached projects, and the remaining initial product scope. Do not imply that
-those features exist before their acceptance criteria pass.
+reliability and safety gates and the M5 declarative configuration gate. Runs
+snapshot resolved policy for launches and recovery. The first MVP release gate
+remains separate in `TODO.md`. M6 and later milestones own attached projects
+and the remaining initial product scope. Do not imply that those features
+exist before their acceptance criteria pass.
 
 ## Project priorities
 

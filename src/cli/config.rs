@@ -15,6 +15,117 @@ use crate::supervisor::SupervisorError;
 
 use super::{ExitCategory, RenderError};
 
+/// Operator requests use the same bounded policy fields as project restrictions.
+#[derive(Clone, Debug, Default, Args)]
+pub(crate) struct Overrides {
+    /// Select a trusted, versioned archetype for the run or configuration command.
+    #[arg(long, global = true)]
+    archetype: Option<String>,
+    /// Bound simultaneously active agents within trusted global policy.
+    #[arg(long, global = true)]
+    max_concurrent_agents: Option<u16>,
+    /// Bound the total agents created in the run within trusted global policy.
+    #[arg(long, global = true)]
+    max_agents_per_run: Option<u16>,
+    /// Bound explicit spawns in a rolling minute within trusted global policy.
+    #[arg(long, global = true)]
+    max_spawns_per_minute: Option<u16>,
+    /// Override a role's enabled, max_instances, or permission_profile setting.
+    #[arg(long = "role", global = true, value_name = "ROLE.FIELD=VALUE", value_parser = parse_role_override)]
+    roles: Vec<RoleOverride>,
+}
+
+#[derive(Clone, Debug)]
+struct RoleOverride {
+    text: String,
+    role: String,
+    restriction: crate::config::RoleRestriction,
+}
+
+fn parse_role_override(text: &str) -> Result<RoleOverride, String> {
+    let invalid = || {
+        "expected ROLE.enabled=true|false, ROLE.max_instances=N, or ROLE.permission_profile=NAME".to_owned()
+    };
+    let (field, value) = text.split_once('=').ok_or_else(invalid)?;
+    let (role, field) = field.rsplit_once('.').ok_or_else(invalid)?;
+    if role.is_empty() {
+        return Err(invalid());
+    }
+    let mut restriction = crate::config::RoleRestriction::default();
+    match field {
+        "enabled" => {
+            restriction.enabled = Some(value.parse().map_err(|_| invalid())?)
+        }
+        "max_instances" => {
+            restriction.max_instances =
+                Some(value.parse().map_err(|_| invalid())?)
+        }
+        "permission_profile" if !value.is_empty() => {
+            restriction.permission_profile = Some(value.into())
+        }
+        _ => return Err(invalid()),
+    }
+    Ok(RoleOverride {
+        text: text.into(),
+        role: role.into(),
+        restriction,
+    })
+}
+
+impl Overrides {
+    pub(crate) fn policy(&self) -> OperatorOverrides {
+        let mut result = OperatorOverrides {
+            archetype: self.archetype.clone(),
+            limits: crate::config::LimitOverrides {
+                max_concurrent_agents: self.max_concurrent_agents,
+                max_agents_per_run: self.max_agents_per_run,
+                max_spawns_per_minute: self.max_spawns_per_minute,
+            },
+            ..Default::default()
+        };
+        for value in &self.roles {
+            let role = result.roles.entry(value.role.clone()).or_default();
+            if let Some(enabled) = value.restriction.enabled {
+                role.enabled = Some(enabled);
+            }
+            if let Some(capacity) = value.restriction.max_instances {
+                role.max_instances = Some(capacity);
+            }
+            if let Some(profile) = &value.restriction.permission_profile {
+                role.permission_profile = Some(profile.clone());
+            }
+        }
+        result
+    }
+
+    pub(crate) fn arguments(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for (flag, value) in [
+            ("--archetype", self.archetype.clone()),
+            (
+                "--max-concurrent-agents",
+                self.max_concurrent_agents.map(|n| n.to_string()),
+            ),
+            (
+                "--max-agents-per-run",
+                self.max_agents_per_run.map(|n| n.to_string()),
+            ),
+            (
+                "--max-spawns-per-minute",
+                self.max_spawns_per_minute.map(|n| n.to_string()),
+            ),
+        ] {
+            if let Some(value) = value {
+                args.extend([flag.into(), value]);
+            }
+        }
+        for role in &self.roles {
+            args.extend(["--role".into(), role.text.clone()]);
+        }
+        args
+    }
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ConfigArguments {
     #[command(subcommand)]
@@ -83,6 +194,7 @@ pub(crate) struct EffectiveReport<'a> {
 pub(crate) fn run(
     arguments: ConfigArguments,
     json: bool,
+    overrides: &Overrides,
 ) -> Result<ExitCategory, SupervisorError> {
     if let ConfigCommand::Schema { target } = arguments.command {
         return render(json, &target.generate());
@@ -92,7 +204,7 @@ pub(crate) fn run(
     let project = DiscoveredProject::discover(&cwd)?;
     let config = load(
         &ConfigLocations::from_environment(&project),
-        &OperatorOverrides::default(),
+        &overrides.policy(),
     )?;
     let lock = ConfigLock::for_config(&config);
     let path = project.canonical_path.join("coterie.lock");

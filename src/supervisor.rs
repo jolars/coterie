@@ -33,8 +33,8 @@ use crate::cli::{
     InboxCommand, TaskCommand, WorkspaceCommand,
 };
 use crate::config::{
-    AuthorizationDecision, Capability, RoleMode, WorkspacePolicy,
-    builtin_standard, compiled_defaults,
+    AuthorizationDecision, Capability, ConfigLocations, ConfigLock,
+    EffectiveConfig, RoleMode, RunConfiguration, WorkspacePolicy, load,
 };
 use crate::id::{
     AgentId, AssignmentId, MessageId, OperationId, ProjectId, RunId, SessionId,
@@ -101,13 +101,32 @@ const MAXIMUM_LINUX_SOCKET_PATH_LENGTH: usize = 107;
 pub(crate) async fn run(
     arguments: Arguments,
 ) -> Result<crate::cli::ExitCategory, SupervisorError> {
+    let overrides = arguments.configuration;
+    if !overrides.arguments().is_empty()
+        && !matches!(
+            &arguments.command,
+            None | Some(
+                CliCommand::Config(_)
+                    | CliCommand::Doctor
+                    | CliCommand::Supervisor(_)
+                    | CliCommand::SupervisorConnect
+            )
+        )
+    {
+        return Err(SupervisorError::ConfigurationOverridesWithCommand);
+    }
     let json_output = arguments.json;
     let foreground_operation_id = arguments.operation_id;
     match arguments.command {
         Some(CliCommand::SupervisorConnect) => {
             let project = discover_current_project()?;
             let directories = CoterieDirectories::from_environment()?;
-            let mut client = connect_or_start(&project, &directories).await?;
+            let mut client = connect_or_start_with_overrides(
+                &project,
+                &directories,
+                &overrides,
+            )
+            .await?;
             let response = client.ping().await?;
             if response
                 != (RpcResponse::Pong {
@@ -126,7 +145,8 @@ pub(crate) async fn run(
                 project.identity.clone(),
             );
             let directories = CoterieDirectories::from_environment()?;
-            serve(entry, project, directories).await?;
+            serve_with_overrides(entry, project, directories, &overrides)
+                .await?;
             Ok(crate::cli::ExitCategory::Success)
         }
         Some(CliCommand::SupervisorShutdown) => {
@@ -165,14 +185,19 @@ pub(crate) async fn run(
             let directories = CoterieDirectories::from_environment()
                 .map_err(SupervisorError::from)
                 .map_err(|error| error.for_operation(operation_id))?;
-            let mut client = connect_or_start(&project, &directories)
-                .await
-                .map_err(|error| error.for_operation(operation_id))?;
+            let mut client = connect_or_start_with_overrides(
+                &project,
+                &directories,
+                &overrides,
+            )
+            .await
+            .map_err(|error| error.for_operation(operation_id))?;
             launch_foreground_codex(
                 &project,
                 &directories,
                 &mut client,
                 operation_id,
+                &overrides,
             )
             .await
             .map_err(|error| error.for_operation(operation_id))
@@ -181,13 +206,13 @@ pub(crate) async fn run(
             if foreground_operation_id.is_some() {
                 return Err(SupervisorError::ForegroundOperationIdWithCommand);
             }
-            crate::cli::config::run(arguments, json_output)
+            crate::cli::config::run(arguments, json_output, &overrides)
         }
         Some(CliCommand::Doctor) => {
             if foreground_operation_id.is_some() {
                 return Err(SupervisorError::ForegroundOperationIdWithCommand);
             }
-            doctor::run(json_output).await
+            doctor::run(json_output, &overrides).await
         }
         Some(command) => {
             let follow = matches!(&command, CliCommand::Events(args) if args.follow)
@@ -450,21 +475,16 @@ async fn launch_foreground_codex(
     directories: &CoterieDirectories,
     client: &mut SupervisorClient,
     operation_id: OperationId,
+    overrides: &crate::cli::config::Overrides,
 ) -> Result<crate::cli::ExitCategory, SupervisorError> {
-    let defaults = compiled_defaults();
-    let binding = defaults
-        .providers
-        .get("codex")
-        .expect("the compiled default archetype binds the Codex provider");
-    let archetype = builtin_standard();
-    let lead = archetype
-        .role(&archetype.lead)
-        .expect("the built-in archetype has its designated lead role");
-    let permission_profile = *archetype
-        .permission_profiles
-        .get(&lead.permission_profile)
-        .expect("the built-in lead references a permission profile");
-    let mut provider = CodexProvider::new(&binding.command);
+    let configuration =
+        read_configuration(directories, client.run_id())?.restore();
+    let role = &configuration.archetype.lead;
+    let lead = &configuration.archetype.roles[role];
+    let binding = &configuration.providers[&lead.provider];
+    let permission_profile = configuration.roles[role].permission_profile;
+    let mut provider = CodexProvider::new(&binding.command)
+        .with_supervision(configuration.supervision);
     let probe = provider.probe().map_err(AgentSessionError::from)?;
     validate_provider_capabilities(
         &probe,
@@ -547,6 +567,7 @@ async fn launch_foreground_codex(
         directories.clone(),
         run_id,
         scope,
+        overrides.clone(),
     );
     let (status, termination_requested) = match provider
         .wait_foreground_until_termination(&session, termination)
@@ -571,6 +592,7 @@ async fn launch_foreground_codex(
         },
         scope,
         termination_requested,
+        overrides,
     )
     .await?;
     Ok(if status.success() {
@@ -580,11 +602,33 @@ async fn launch_foreground_codex(
     })
 }
 
+async fn connect_for_observation(
+    project: &DiscoveredProject,
+    directories: &CoterieDirectories,
+    entry: &ActiveRunEntry,
+    overrides: &crate::cli::config::Overrides,
+) -> Result<SupervisorClient, SupervisorError> {
+    match SupervisorClient::connect_operator_at(
+        &checked_socket_path(directories, entry.run_id)?,
+        entry,
+    )
+    .await
+    {
+        Ok(client) => Ok(client),
+        Err(error) if error.is_transient_connection_failure() => {
+            connect_or_start_with_overrides(project, directories, overrides)
+                .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn wait_for_foreground_termination(
     project: DiscoveredProject,
     directories: CoterieDirectories,
     run_id: RunId,
     scope: SessionScope,
+    overrides: crate::cli::config::Overrides,
 ) {
     loop {
         let Some(entry) = ActiveRunIndex::new(&directories)
@@ -599,7 +643,9 @@ async fn wait_for_foreground_termination(
             sleep(STARTUP_RETRY_INTERVAL).await;
             continue;
         }
-        let Ok(mut control) = connect_or_start(&project, &directories).await
+        let Ok(mut control) =
+            connect_for_observation(&project, &directories, &entry, &overrides)
+                .await
         else {
             sleep(STARTUP_RETRY_INTERVAL).await;
             continue;
@@ -627,6 +673,7 @@ async fn record_foreground_exit(
     request: RpcRequest,
     scope: SessionScope,
     termination_requested: bool,
+    overrides: &crate::cli::config::Overrides,
 ) -> Result<(), SupervisorError> {
     match client.request(request.clone()).await {
         Ok(response) => {
@@ -649,7 +696,9 @@ async fn record_foreground_exit(
         if entry.run_id != scope.run_id {
             return Err(SupervisorError::InvalidProof);
         }
-        match connect_or_start(project, directories).await {
+        match connect_for_observation(project, directories, &entry, overrides)
+            .await
+        {
             Ok(mut reconnected) => match reconnected
                 .request(request.clone())
                 .await
@@ -1007,11 +1056,118 @@ fn discover_current_project() -> Result<DiscoveredProject, SupervisorError> {
     DiscoveredProject::discover(current).map_err(Into::into)
 }
 
-/// Connects to the indexed run or starts exactly one supervisor for the project.
-pub(crate) async fn connect_or_start(
+#[cfg(test)]
+fn load_configuration(
+    project: &DiscoveredProject,
+) -> Result<EffectiveConfig, SupervisorError> {
+    load_configuration_with_overrides(
+        project,
+        &crate::cli::config::Overrides::default(),
+    )
+}
+
+fn load_configuration_with_overrides(
+    project: &DiscoveredProject,
+    overrides: &crate::cli::config::Overrides,
+) -> Result<EffectiveConfig, SupervisorError> {
+    let configuration = load(
+        &ConfigLocations::from_environment(project),
+        &overrides.policy(),
+    )?;
+    ConfigLock::for_config(&configuration)
+        .verify(&project.canonical_path.join("coterie.lock"))?;
+    let document =
+        serde_json::to_value(RunConfiguration::new(configuration.clone()))
+            .map_err(StoreError::from)?;
+    if configuration_contains_credentials(&document) {
+        return Err(SupervisorError::ConfigurationContainsCredentials);
+    }
+    Ok(configuration)
+}
+
+fn configuration_contains_credentials(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => {
+            crate::redaction::text(value) != *value
+        }
+        serde_json::Value::Array(values) => {
+            values.iter().any(configuration_contains_credentials)
+        }
+        serde_json::Value::Object(values) => {
+            values.iter().any(|(key, value)| {
+                crate::redaction::text(key) != *key
+                    || configuration_contains_credentials(value)
+            })
+        }
+        _ => false,
+    }
+}
+
+fn open_configuration_store(
+    directories: &CoterieDirectories,
+    run_id: RunId,
+) -> Result<Store, SupervisorError> {
+    let root = directories.runs.join(run_id.to_string());
+    let path = root.join(DATABASE_FILE);
+    crate::private_fs::check_directory(&root)
+        .and_then(|()| crate::private_fs::database(&path, false).map(|_| ()))
+        .map_err(|source| SupervisorError::StateFileIo {
+            action: "validate configuration in",
+            path: path.clone(),
+            source,
+        })?;
+    Ok(Store::open_read_only(&path)?)
+}
+
+fn read_configuration(
+    directories: &CoterieDirectories,
+    run_id: RunId,
+) -> Result<RunConfiguration, SupervisorError> {
+    Ok(open_configuration_store(directories, run_id)?
+        .transaction(|repositories| repositories.run_configuration(run_id))?)
+}
+
+fn ensure_configuration_compatible(
+    run_id: RunId,
+    snapshot: &RunConfiguration,
+    current: &EffectiveConfig,
+) -> Result<(), SupervisorError> {
+    let fields = snapshot.differences(current);
+    if fields.is_empty() {
+        return Ok(());
+    }
+    Err(SupervisorError::ConfigurationConflict {
+        run_id,
+        fingerprint: snapshot.fingerprint(),
+        fields: fields.join(", "),
+    })
+}
+
+fn verify_configuration(
+    directories: &CoterieDirectories,
+    run_id: RunId,
+    current: &EffectiveConfig,
+) -> Result<(), SupervisorError> {
+    let (run, snapshot) = open_configuration_store(directories, run_id)?
+        .transaction(|repositories| {
+            Ok((
+                repositories.run(run_id)?,
+                repositories.run_configuration(run_id)?,
+            ))
+        })?;
+    if run.is_some_and(|run| run.status == "stopped") {
+        return Ok(());
+    }
+    ensure_configuration_compatible(run_id, &snapshot, current)
+}
+
+/// Resolves startup policy before creating a run or reconnecting for a new launch.
+async fn connect_or_start_with_overrides(
     project: &DiscoveredProject,
     directories: &CoterieDirectories,
+    overrides: &crate::cli::config::Overrides,
 ) -> Result<SupervisorClient, SupervisorError> {
+    let configuration = load_configuration_with_overrides(project, overrides)?;
     directories.prepare()?;
     let index = ActiveRunIndex::new(directories);
     let indexed = index.lookup(&project.identity)?;
@@ -1022,7 +1178,14 @@ pub(crate) async fn connect_or_start(
         )
         .await
         {
-            Ok(client) => return Ok(client),
+            Ok(client) => {
+                verify_configuration(
+                    directories,
+                    entry.run_id,
+                    &configuration,
+                )?;
+                return Ok(client);
+            }
             Err(error) if error.is_transient_connection_failure() => {}
             Err(error) => return Err(error),
         }
@@ -1041,6 +1204,12 @@ pub(crate) async fn connect_or_start(
                 source,
             })?;
         let mut store = Store::open_read_only(&path)?;
+        let snapshot_exists = store.transaction(|repositories| {
+            repositories.has_run_configuration(entry.run_id)
+        })?;
+        if snapshot_exists {
+            verify_configuration(directories, entry.run_id, &configuration)?;
+        }
         if !store.transaction(|repositories| {
             Ok(repositories.run(entry.run_id)?.is_some()
                 && repositories.project(entry.project_id)?.is_some_and(
@@ -1065,17 +1234,22 @@ pub(crate) async fn connect_or_start(
             project.identity.clone(),
         )
     });
-    let child = spawn_supervisor(&candidate, &project.canonical_path)?;
-    await_startup(project, directories, child).await
+    let child =
+        spawn_supervisor(&candidate, &project.canonical_path, overrides)?;
+    let client = await_startup(project, directories, child, overrides).await?;
+    verify_configuration(directories, client.run_id(), &configuration)?;
+    Ok(client)
 }
 
 fn spawn_supervisor(
     entry: &ActiveRunEntry,
     project_path: &Path,
+    overrides: &crate::cli::config::Overrides,
 ) -> Result<SpawnedSupervisor, SupervisorError> {
     let executable =
         std::env::current_exe().map_err(SupervisorError::CurrentExecutable)?;
     let mut child = Command::new(&executable)
+        .args(overrides.arguments())
         .arg(INTERNAL_SUPERVISOR_ARGUMENT)
         .arg(entry.run_id.to_string())
         .arg(entry.project_id.to_string())
@@ -1110,6 +1284,7 @@ async fn await_startup(
     project: &DiscoveredProject,
     directories: &CoterieDirectories,
     mut supervisor: SpawnedSupervisor,
+    overrides: &crate::cli::config::Overrides,
 ) -> Result<SupervisorClient, SupervisorError> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let index = ActiveRunIndex::new(directories);
@@ -1149,7 +1324,11 @@ async fn await_startup(
                 ProjectId::generate(),
                 project.identity.clone(),
             );
-            supervisor = spawn_supervisor(&candidate, &project.canonical_path)?;
+            supervisor = spawn_supervisor(
+                &candidate,
+                &project.canonical_path,
+                overrides,
+            )?;
             child_status = None;
             continued_after_retirement = true;
         }
@@ -1185,11 +1364,28 @@ fn reap_child(mut child: Child) {
     });
 }
 
+#[cfg(test)]
 async fn serve(
     active: ActiveRunEntry,
     project: DiscoveredProject,
     directories: CoterieDirectories,
 ) -> Result<(), SupervisorError> {
+    serve_with_overrides(
+        active,
+        project,
+        directories,
+        &crate::cli::config::Overrides::default(),
+    )
+    .await
+}
+
+async fn serve_with_overrides(
+    active: ActiveRunEntry,
+    project: DiscoveredProject,
+    directories: CoterieDirectories,
+    overrides: &crate::cli::config::Overrides,
+) -> Result<(), SupervisorError> {
+    let configuration = load_configuration_with_overrides(&project, overrides)?;
     directories.prepare()?;
     let lease = match ProjectLease::try_acquire(
         &directories,
@@ -1200,8 +1396,12 @@ async fn serve(
         LeaseAttempt::Held => return Ok(()),
     };
     let run_directories = directories.prepare_run(active.run_id)?;
-    let mut store =
-        initialize_store(&run_directories.state, &active, &project)?;
+    let mut store = initialize_store_with_configuration(
+        &run_directories.state,
+        &active,
+        &project,
+        &configuration,
+    )?;
     let socket_path = checked_socket_path(&directories, active.run_id)?;
     if store.transaction(|repositories| {
         Ok(repositories
@@ -1425,13 +1625,8 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
 fn runtime_sessions(
     run_state_directory: &Path,
 ) -> AgentSessionSupervisor<CodexProvider> {
-    let defaults = compiled_defaults();
-    let binding = defaults
-        .providers
-        .get("codex")
-        .expect("the compiled defaults bind the Codex provider");
     AgentSessionSupervisor::new(
-        CodexProvider::new(&binding.command),
+        CodexProvider::new(["codex"]),
         run_state_directory,
     )
 }
@@ -1445,8 +1640,10 @@ fn runtime_sessions(
         activity: ActivityState::Idle,
         exit: None,
     };
-    let scripts =
-        (0..compiled_defaults().limits.max_agents_per_run).map(|_| {
+    let scripts = (0..crate::config::compiled_defaults()
+        .limits
+        .max_agents_per_run)
+        .map(|_| {
             FakeScript::new([
                 FakeEvent::observation(running),
                 FakeEvent::output(b"{\"type\":\"session.ready\"}\n"),
@@ -1641,8 +1838,9 @@ fn reconcile_spawn_operation<P: Provider, B: WorkspaceBackend>(
             reconciled_at,
         );
     };
-    let archetype = builtin_standard();
-    let Some(role_definition) = archetype.role(role) else {
+    let configuration = runtime.store.configuration(runtime.run_id)?;
+    let archetype = &configuration.archetype;
+    let Some(_role_definition) = archetype.role(role) else {
         return record_operation_reconciliation(
             runtime.store,
             operation.id,
@@ -1651,10 +1849,10 @@ fn reconcile_spawn_operation<P: Provider, B: WorkspaceBackend>(
             reconciled_at,
         );
     };
-    let Some(permission_profile) = archetype
-        .permission_profiles
-        .get(&role_definition.permission_profile)
-        .copied()
+    let Some(permission_profile) = configuration
+        .roles
+        .get(role)
+        .map(|role| role.permission_profile)
     else {
         return record_operation_reconciliation(
             runtime.store,
@@ -1939,12 +2137,13 @@ fn begin_shutdown<P: Provider, B: WorkspaceBackend>(
     response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
     foreground: &mut ForegroundCoordination,
 ) {
-    let policy = compiled_defaults().supervision;
     let result = unix_timestamp_ms()
         .map_err(supervisor_rpc_failure)
         .and_then(|now_ms| {
             store
                 .transaction(|repositories| {
+                    let policy =
+                        repositories.configuration(run_id)?.supervision;
                     repositories.begin_run_shutdown(
                         run_id,
                         operation_id,
@@ -2543,7 +2742,9 @@ fn launch_foreground(
         caller,
         "only the operator can launch the foreground agent",
     )?;
-    let archetype = builtin_standard();
+    let configuration =
+        store.configuration(run_id).map_err(rpc_state_failure)?;
+    let archetype = &configuration.archetype;
     let role = archetype.lead.to_owned();
     let role_definition = archetype.role(&role).ok_or_else(|| {
         RpcFailure::new(
@@ -2558,7 +2759,8 @@ fn launch_foreground(
         ));
     }
     let provider = role_definition.provider.to_owned();
-    let bootstrap_instruction = bootstrap_instruction(run_id, &role);
+    let bootstrap_instruction =
+        bootstrap_instruction(run_id, &role, &configuration);
     let now = rpc_timestamp()?;
     let quarantine_until = store
         .transaction(|repositories| {
@@ -2581,6 +2783,31 @@ fn launch_foreground(
         return Err(conflict(format!(
             "the foreground session is quarantined after repeated failures; retry after Unix timestamp {until} and inspect its events"
         )));
+    }
+    let (replaying, agents) = store
+        .transaction(|repositories| {
+            Ok((
+                repositories.operation(operation_id)?.is_some(),
+                repositories.agents(run_id)?,
+            ))
+        })
+        .map_err(rpc_state_failure)?;
+    if !replaying
+        && !agents
+            .iter()
+            .any(|agent| agent.role == role && !agent.state.is_terminal())
+    {
+        let limits = configuration.limits;
+        if (!agents.iter().any(|agent| agent.role == role)
+            && agents.len() >= usize::from(limits.max_agents_per_run))
+            || agents
+                .iter()
+                .filter(|agent| !agent.state.is_terminal())
+                .count()
+                >= usize::from(limits.max_concurrent_agents)
+        {
+            return Err(conflict("the run has reached its agent limit"));
+        }
     }
     let agent_id = AgentId::generate();
     let session_id = SessionId::generate();
@@ -3005,7 +3232,7 @@ fn observe_foreground_ended(
             }
             let failed = matches!(end, ForegroundEnd::LaunchFailed) || matches!(end, ForegroundEnd::Exited { code, signal } if code != Some(0) && signal != Some(signal_hook::consts::signal::SIGINT) && signal != Some(signal_hook::consts::signal::SIGTERM));
             let stopping = repositories.run_shutdown(run_id)?.is_some() || repositories.session_controls(run_id)?.iter().any(|control| control.scope == scope);
-            let lifecycle = if failed && !stopping && !session.state.is_terminal() && repositories.record_session_failure(scope, observed_at, compiled_defaults().supervision)? { LifecycleState::Quarantined } else { lifecycle };
+            let lifecycle = if failed && !stopping && !session.state.is_terminal() && repositories.record_session_failure(scope, observed_at, repositories.configuration(run_id)?.supervision)? { LifecycleState::Quarantined } else { lifecycle };
             record_foreground_lifecycle(
                 repositories,
                 &session,
@@ -3165,7 +3392,14 @@ fn status(
         run_id,
         status: run.status,
         projects: projects.into_iter().map(project_summary).collect(),
-        agents: summarize_agents(&agents),
+        agents: summarize_agents(
+            &agents,
+            &store
+                .configuration(run_id)
+                .map_err(rpc_state_failure)?
+                .archetype
+                .lead,
+        ),
         tasks: task_counts(&tasks),
     })
 }
@@ -3210,10 +3444,17 @@ fn prime(
         })
         .map_err(rpc_state_failure)?;
     let project_map = project_aliases(&projects);
-    let peers = summarize_agents(&agents)
-        .into_iter()
-        .filter(|agent| Some(agent.id) != caller.agent_id())
-        .collect();
+    let peers = summarize_agents(
+        &agents,
+        &store
+            .configuration(run_id)
+            .map_err(rpc_state_failure)?
+            .archetype
+            .lead,
+    )
+    .into_iter()
+    .filter(|agent| Some(agent.id) != caller.agent_id())
+    .collect();
     let ready_tasks = summarize_tasks(store, &project_map, ready)?;
     let tasks = summarize_tasks(store, &project_map, tasks)?;
     let active_task = active_task
@@ -3500,22 +3741,19 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         run_id,
     } = runtime;
     require_capability(store, run_id, caller, "spawn", &role)?;
-    let archetype = builtin_standard();
+    let configuration =
+        store.configuration(run_id).map_err(rpc_state_failure)?;
+    let archetype = &configuration.archetype;
     let role_definition = archetype
         .role(&role)
         .ok_or_else(|| not_found(format!("role `{role}` is not configured")))?;
-    let permission_profile = *archetype
-        .permission_profiles
-        .get(&role_definition.permission_profile)
-        .ok_or_else(|| {
-            RpcFailure::new(
-                RpcFailureCode::Internal,
-                format!(
-                    "role `{role}` references missing permission profile `{}`",
-                    role_definition.permission_profile
-                ),
-            )
-        })?;
+    let effective_role = &configuration.roles[&role];
+    if !effective_role.enabled {
+        return Err(conflict(format!(
+            "role `{role}` is disabled by the run configuration"
+        )));
+    }
+    let permission_profile = effective_role.permission_profile;
     if role_definition.mode != RoleMode::Job {
         return Err(conflict(format!(
             "role `{role}` is not a background job role"
@@ -3556,11 +3794,22 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         if !readiness.is_some_and(|readiness| readiness.is_ready()) {
             return Err(conflict(format!("task `{task_id}` is not ready")));
         }
+        let now = rpc_timestamp()?;
+        let recent_spawns = store
+            .transaction(|repositories| repositories.recent_spawns(run_id, now))
+            .map_err(rpc_state_failure)?;
+        if recent_spawns
+            >= i64::from(configuration.limits.max_spawns_per_minute)
+        {
+            return Err(conflict(
+                "the run has reached its spawn rate limit; retry after the rolling minute window",
+            ));
+        }
         let active_role_instances = agents
             .iter()
             .filter(|agent| agent.role == role && !agent.state.is_terminal())
             .count();
-        if role_definition
+        if effective_role
             .max_instances
             .is_some_and(|limit| active_role_instances >= usize::from(limit))
         {
@@ -3568,7 +3817,7 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
                 "role `{role}` has reached its active instance limit"
             )));
         }
-        let limits = compiled_defaults().limits;
+        let limits = configuration.limits;
         if agents.len() >= usize::from(limits.max_agents_per_run)
             || agents
                 .iter()
@@ -3781,7 +4030,8 @@ fn attempt_spawn_operation<P: Provider, B: WorkspaceBackend>(
                         Some(&failure.message),
                         reconciled_at,
                     )?;
-                    if repositories.session(session_id)?.is_none() && repositories.operation(operation_id)?.is_some_and(|operation| operation.reconciliation_attempt_count >= compiled_defaults().supervision.max_launch_attempts) {
+                    let max_launch_attempts = repositories.configuration(runtime.run_id)?.supervision.max_launch_attempts;
+                    if repositories.session(session_id)?.is_none() && repositories.operation(operation_id)?.is_some_and(|operation| operation.reconciliation_attempt_count >= max_launch_attempts) {
                         repositories.quarantine_unstarted_agent(runtime.run_id, agent_id, operation_id, reconciled_at)?;
                         repositories.record_operation_reconciliation(operation_id, ExternalResourceState::Observed, Some("launch quarantined after repeated preflight failures; no provider session was created"), reconciled_at)?;
                     }
@@ -3888,7 +4138,11 @@ fn complete_spawn_operation<P: Provider, B: WorkspaceBackend>(
         task_id: intent.task_id,
         socket_path: socket_path.to_path_buf(),
         permission_profile,
-        bootstrap_instruction: bootstrap_instruction(run_id, role),
+        bootstrap_instruction: bootstrap_instruction(
+            run_id,
+            role,
+            &store.configuration(run_id).map_err(rpc_state_failure)?,
+        ),
         created_at,
     };
     if let Some(launched) = sessions
@@ -4221,7 +4475,9 @@ fn send_message(
             ));
         }
         let sender = agent_record(store, run_id, sender_id)?;
-        let archetype = builtin_standard();
+        let configuration =
+            store.configuration(run_id).map_err(rpc_state_failure)?;
+        let archetype = &configuration.archetype;
         let action = if recipient.role == archetype.lead {
             "lead"
         } else if recipient.role == sender.role {
@@ -4229,7 +4485,12 @@ fn send_message(
         } else {
             recipient.role.as_str()
         };
-        require_capability(store, run_id, caller, "send", action)?;
+        if archetype
+            .authorize(&sender.role, Capability::new("send", &recipient.role))
+            != AuthorizationDecision::Allowed
+        {
+            require_capability(store, run_id, caller, "send", action)?;
+        }
     }
     let now = rpc_timestamp()?;
     let message_id = MessageId::generate();
@@ -4522,7 +4783,10 @@ fn require_capability(
         return Ok(());
     };
     let agent = agent_record(store, run_id, agent_id)?;
-    if builtin_standard()
+    if store
+        .configuration(run_id)
+        .map_err(rpc_state_failure)?
+        .archetype
         .authorize(&agent.role, Capability::new(namespace, action))
         == AuthorizationDecision::Allowed
     {
@@ -4569,10 +4833,17 @@ fn summary_for_agent(
     let agents = store
         .transaction(|repositories| repositories.agents(run_id))
         .map_err(rpc_state_failure)?;
-    summarize_agents(&agents)
-        .into_iter()
-        .find(|agent| agent.id == agent_id)
-        .ok_or_else(|| not_found(format!("agent `{agent_id}` does not exist")))
+    summarize_agents(
+        &agents,
+        &store
+            .configuration(run_id)
+            .map_err(rpc_state_failure)?
+            .archetype
+            .lead,
+    )
+    .into_iter()
+    .find(|agent| agent.id == agent_id)
+    .ok_or_else(|| not_found(format!("agent `{agent_id}` does not exist")))
 }
 
 fn resolve_agent(
@@ -4583,7 +4854,14 @@ fn resolve_agent(
     let agents = store
         .transaction(|repositories| repositories.agents(run_id))
         .map_err(rpc_state_failure)?;
-    let summaries = summarize_agents(&agents);
+    let summaries = summarize_agents(
+        &agents,
+        &store
+            .configuration(run_id)
+            .map_err(rpc_state_failure)?
+            .archetype
+            .lead,
+    );
     if let Ok(agent_id) = name_or_id.parse::<AgentId>() {
         summaries
             .into_iter()
@@ -4601,8 +4879,10 @@ fn resolve_agent(
     }
 }
 
-fn summarize_agents(agents: &[AgentRecord]) -> Vec<AgentSummary> {
-    let lead_role = builtin_standard().lead;
+fn summarize_agents(
+    agents: &[AgentRecord],
+    lead_role: &str,
+) -> Vec<AgentSummary> {
     let mut role_counts = BTreeMap::<&str, usize>::new();
     agents
         .iter()
@@ -4746,7 +5026,10 @@ fn available_commands(
             ("logs", "*", "logs"),
             ("workspace", "integrate", "workspace integrate"),
         ] {
-            if builtin_standard()
+            if store
+                .configuration(run_id)
+                .map_err(rpc_state_failure)?
+                .archetype
                 .authorize(&agent.role, Capability::new(namespace, action))
                 == AuthorizationDecision::Allowed
             {
@@ -4857,9 +5140,19 @@ fn assignment_workspace_path(
     }
 }
 
-fn bootstrap_instruction(run_id: RunId, role: &str) -> String {
+fn bootstrap_instruction(
+    run_id: RunId,
+    role: &str,
+    configuration: &EffectiveConfig,
+) -> String {
+    let instructions = configuration
+        .archetype
+        .roles
+        .get(role)
+        .and_then(|role| role.instructions.as_deref())
+        .unwrap_or_default();
     format!(
-        "You are a {role} agent for Coterie run {run_id}. Run `coterie prime` now for current orchestration context. Follow the repository's AGENTS.md instructions."
+        "You are a {role} agent for Coterie run {run_id}. Run `coterie prime` now for current orchestration context. Follow the repository's AGENTS.md instructions.\n{instructions}"
     )
 }
 
@@ -4934,7 +5227,8 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
             RpcFailureCode::Conflict
         }
         StoreError::EventTooLarge { .. } => RpcFailureCode::InvalidArgument,
-        StoreError::Database(_)
+        StoreError::InvalidConfigurationSnapshot { .. }
+        | StoreError::Database(_)
         | StoreError::EncodeJson(_)
         | StoreError::ModifiedMigration { .. }
         | StoreError::UnsupportedSchema { .. }
@@ -5069,10 +5363,26 @@ fn persist_shutdown(
     })
 }
 
+#[cfg(test)]
 fn initialize_store(
     run_state_directory: &Path,
     active: &ActiveRunEntry,
     project: &DiscoveredProject,
+) -> Result<Store, SupervisorError> {
+    let configuration = load_configuration(project)?;
+    initialize_store_with_configuration(
+        run_state_directory,
+        active,
+        project,
+        &configuration,
+    )
+}
+
+fn initialize_store_with_configuration(
+    run_state_directory: &Path,
+    active: &ActiveRunEntry,
+    project: &DiscoveredProject,
+    configuration: &EffectiveConfig,
 ) -> Result<Store, SupervisorError> {
     let database_path = run_state_directory.join(DATABASE_FILE);
     let _file = crate::private_fs::database(&database_path, true).map_err(
@@ -5105,6 +5415,11 @@ fn initialize_store(
                     created_at: now,
                     stopped_at: None,
                 })?;
+                repositories.snapshot_configuration(
+                    active.run_id,
+                    configuration,
+                    now,
+                )?;
                 let run_event = repositories.append_event(&NewEvent {
                     run_id: active.run_id,
                     kind: EventKind::RunStarted,
@@ -5159,7 +5474,19 @@ fn initialize_store(
                 && stored_project.run_id == active.run_id
                 && stored_project.is_primary
                 && stored_project.canonical_path == project.canonical_path
-                && stored_project.identity == project.identity => {}
+                && stored_project.identity == project.identity =>
+        {
+            let snapshot = store.transaction(|repositories| {
+                repositories.run_configuration(active.run_id)
+            })?;
+            if run.status == "active" {
+                ensure_configuration_compatible(
+                    active.run_id,
+                    &snapshot,
+                    configuration,
+                )?;
+            }
+        }
         _ => {
             return Err(SupervisorError::RunStateMismatch {
                 run_id: active.run_id,
@@ -5790,6 +6117,22 @@ async fn reject(
 /// A failure while locating, starting, or communicating with a supervisor.
 #[derive(Debug, Error)]
 pub(crate) enum SupervisorError {
+    #[error(
+        "configuration overrides apply only to foreground startup, config commands, and doctor; an active run uses its saved snapshot"
+    )]
+    ConfigurationOverridesWithCommand,
+    #[error(
+        "run {run_id} configuration conflicts with its active snapshot {fingerprint} (changed: {fields}); restore the run configuration, or stop the run with `coterie stop` before starting with the new configuration"
+    )]
+    ConfigurationConflict {
+        run_id: RunId,
+        fingerprint: String,
+        fields: String,
+    },
+    #[error(
+        "run configuration contains credential material; remove literal credentials from configuration and use the provider authentication environment before starting a run"
+    )]
+    ConfigurationContainsCredentials,
     #[error(transparent)]
     Config(#[from] crate::config::ConfigError),
     #[error(transparent)]
@@ -5968,11 +6311,15 @@ impl SupervisorError {
                 | RpcFailureCode::InvalidRequestSequence
                 | RpcFailureCode::Internal => crate::cli::ErrorCode::Internal,
             },
-            Self::Config(_) | Self::ConfigLock(_) => {
+            Self::Config(_)
+            | Self::ConfigLock(_)
+            | Self::ConfigurationConflict { .. }
+            | Self::ConfigurationContainsCredentials => {
                 crate::cli::ErrorCode::InvalidConfiguration
             }
             Self::NoActiveRun => crate::cli::ErrorCode::NotFound,
-            Self::ForegroundOperationIdWithCommand => {
+            Self::ForegroundOperationIdWithCommand
+            | Self::ConfigurationOverridesWithCommand => {
                 crate::cli::ErrorCode::InvalidArgument
             }
             Self::ForegroundJsonOutputUnsupported => {
@@ -6334,7 +6681,7 @@ mod tests {
         let mut store = Store::open(&database).unwrap();
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: active.run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -6453,7 +6800,7 @@ mod tests {
             Store::open(&fixture.join("state.sqlite3")).expect("store");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -6642,7 +6989,7 @@ mod tests {
             .expect("the store should open");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: active.run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -6811,7 +7158,7 @@ mod tests {
             .expect("the store should open");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: active.run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -6926,7 +7273,7 @@ mod tests {
             .expect("the store should open");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: active.run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -7066,7 +7413,7 @@ mod tests {
             .expect("the store should open");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: active.run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -7204,7 +7551,7 @@ mod tests {
             .expect("the store should open");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: active.run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -7389,7 +7736,7 @@ mod tests {
             .expect("the store should open");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: active.run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -7850,7 +8197,7 @@ mod tests {
         let run_id = RunId::generate();
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: run_id,
                     status: "active".into(),
                     created_at: 10,
@@ -8071,7 +8418,7 @@ mod tests {
         let run_id = RunId::generate();
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: run_id,
                     status: "active".into(),
                     created_at: 10,
@@ -8207,7 +8554,7 @@ mod tests {
         let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -8264,7 +8611,7 @@ mod tests {
             SESSION_ID.parse::<SessionId>().expect("valid session ID");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -8341,7 +8688,7 @@ mod tests {
         let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: run_id,
                     status: "active".to_owned(),
                     created_at: 10,

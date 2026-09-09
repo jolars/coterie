@@ -134,6 +134,7 @@ pub(crate) struct CodexInteractiveProcess {
     child: tokio::process::Child,
     inherited_terminal: bool,
     signals: SignalMonitor,
+    supervision: crate::config::SupervisionPolicy,
 }
 
 struct CodexJobProcess {
@@ -199,7 +200,7 @@ impl CodexInteractiveProcess {
                 () = &mut termination, if !termination_requested => {
                     forward_signal(self.process_id(), SIGINT)?;
                     termination_requested = true;
-                    let policy = crate::config::compiled_defaults().supervision;
+                    let policy = self.supervision;
                     terminate_deadline = Some(Instant::now() + Duration::from_millis(policy.interrupt_grace_ms as u64));
                     kill_deadline = Some(Instant::now() + Duration::from_millis((policy.shutdown_timeout_ms / 2) as u64));
                 }
@@ -522,6 +523,9 @@ pub(crate) enum ProviderRecovery {
 
 /// The process boundary used by the session supervisor.
 pub(crate) trait Provider {
+    /// Selects the trusted binding for the next preflight and launch. Existing handles keep their processes.
+    fn configure(&mut self, binding: &crate::config::ProviderBinding);
+
     fn probe(&self) -> Result<ProviderProbe, ProviderError>;
 
     fn launch_interactive(
@@ -685,6 +689,7 @@ const CODEX_VERSION_REQUIREMENT: &str = ">=0.151.0 and <1.0.0";
 
 /// The installed Codex CLI, invoked only through its documented process boundary.
 pub(crate) struct CodexProvider {
+    supervision: crate::config::SupervisionPolicy,
     command: Vec<OsString>,
     probe_runner: Box<dyn ProbeCommandRunner>,
     interactive_sessions:
@@ -693,10 +698,19 @@ pub(crate) struct CodexProvider {
 }
 
 impl CodexProvider {
+    pub(crate) fn with_supervision(
+        mut self,
+        policy: crate::config::SupervisionPolicy,
+    ) -> Self {
+        self.supervision = policy;
+        self
+    }
+
     pub(crate) fn new(
         command: impl IntoIterator<Item = impl Into<OsString>>,
     ) -> Self {
         Self {
+            supervision: crate::config::compiled_defaults().supervision,
             command: command.into_iter().map(Into::into).collect(),
             probe_runner: Box::new(ProcessProbeRunner),
             interactive_sessions: BTreeMap::new(),
@@ -711,6 +725,7 @@ impl CodexProvider {
     ) -> Self {
         Self {
             command: command.into_iter().map(Into::into).collect(),
+            supervision: crate::config::compiled_defaults().supervision,
             probe_runner: Box::new(runner),
             interactive_sessions: BTreeMap::new(),
             job_sessions: BTreeMap::new(),
@@ -952,6 +967,7 @@ impl CodexProvider {
         )?;
         crate::fault::point("process.foreground.spawn.after");
         Ok(CodexInteractiveProcess {
+            supervision: self.supervision,
             child,
             inherited_terminal,
             signals,
@@ -1270,6 +1286,10 @@ impl CodexJobProcess {
 }
 
 impl Provider for CodexProvider {
+    fn configure(&mut self, binding: &crate::config::ProviderBinding) {
+        self.command = binding.command.iter().map(OsString::from).collect();
+    }
+
     fn probe(&self) -> Result<ProviderProbe, ProviderError> {
         self.probe_codex()
     }
@@ -1969,6 +1989,8 @@ pub(crate) mod fake {
     }
 
     impl Provider for FakeProvider {
+        fn configure(&mut self, _binding: &crate::config::ProviderBinding) {}
+
         fn probe(&self) -> Result<ProviderProbe, ProviderError> {
             Ok(ProviderProbe {
                 name: "fake".to_owned(),

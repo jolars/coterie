@@ -69,7 +69,7 @@ pub(crate) struct ProjectConfig {
     pub(crate) roles: BTreeMap<String, RoleRestriction>,
 }
 
-/// Explicit operator input, supplied by a future CLI boundary rather than a file.
+/// Explicit operator input from CLI flags rather than an untrusted file.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct OperatorOverrides {
     pub(crate) archetype: Option<String>,

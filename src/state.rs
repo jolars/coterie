@@ -1,5 +1,6 @@
 //! SQLite migrations, transactions, operations, messages, and events.
 
+mod configuration;
 mod diagnostics;
 pub(crate) mod supervision;
 
@@ -87,6 +88,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "request_fingerprints",
         sql: include_str!("state/migrations/0010_request_fingerprints.sql"),
     },
+    Migration {
+        version: 11,
+        name: "configuration_snapshots",
+        sql: include_str!("state/migrations/0011_configuration_snapshots.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -99,6 +105,10 @@ struct Migration {
 /// A failure to open, migrate, or access durable run state.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
+    #[error(
+        "run {run_id} has a missing or invalid configuration snapshot; preserve the run state and inspect it with `coterie doctor`"
+    )]
+    InvalidConfigurationSnapshot { run_id: RunId },
     #[error("event `{id}` exceeds the {maximum}-byte event limit; shorten the request text", maximum = MAXIMUM_EVENT_PAGE_LENGTH)]
     EventTooLarge { id: EventId },
     /// SQLite rejected an operation.
@@ -5216,6 +5226,19 @@ mod tests {
 
             let store =
                 Store::open(&database.0).expect("the database should upgrade");
+            let mut store = store;
+            let configuration = store
+                .configuration(RUN_ID.parse().unwrap())
+                .expect("upgrades pin the historical compiled runtime policy");
+            assert_eq!(
+                configuration,
+                crate::config::resolve(
+                    &Default::default(),
+                    &Default::default(),
+                    &Default::default()
+                )
+                .unwrap()
+            );
             let applied = store
                 .connection
                 .query_row(

@@ -1,4 +1,4 @@
-# These inputs exercise the M5 loader; runtime adoption is a later M5 slice.
+# A trusted two-role archetype for foreground coordination and background work.
 schema_version = 1
 archetype = "global:pair@1"
 

@@ -5,6 +5,7 @@ use crate::doctor::{CheckStatus, DoctorReport};
 
 pub(super) async fn run(
     json_output: bool,
+    overrides: &crate::cli::config::Overrides,
 ) -> Result<crate::cli::ExitCategory, SupervisorError> {
     if [
         "COTERIE_AGENT_ID",
@@ -39,31 +40,44 @@ pub(super) async fn run(
             private &= secure;
         }
     }
-    let global_config = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .map(|path| path.join(".config"))
-        })
-        .map(|path| path.join("coterie/config.toml"));
-    let paths = [
-        project.canonical_path.join("coterie.toml"),
-        project.canonical_path.join("coterie.lock"),
-    ];
-    for path in paths.into_iter().chain(global_config) {
-        if fs::symlink_metadata(&path).is_ok() {
-            report.add("configuration", CheckStatus::Warning, Some(path.display().to_string()), "External configuration and lock files are not loaded in this milestone; compatibility is unverified. The run uses compiled operator policy.");
+    let current = match load_configuration_with_overrides(&project, overrides) {
+        Ok(config) => {
+            report.add(
+                "configuration",
+                CheckStatus::Ok,
+                None,
+                format!(
+                    "Resolved configuration {} and any project lock are valid.",
+                    ConfigLock::for_config(&config).fingerprint
+                ),
+            );
+            inspect_provider(&mut report, &config);
+            Some(config)
         }
-    }
-    report.add("configuration", CheckStatus::Ok, None, "Current runtime policy is the compiled builtin:standard@1 definition; external configuration compatibility requires M5.");
-    inspect_provider(&mut report);
+        Err(error) => {
+            report.add(
+                "configuration",
+                CheckStatus::Error,
+                None,
+                error.to_string(),
+            );
+            None
+        }
+    };
     if private {
         match ActiveRunIndex::new(&directories).lookup(&project.identity) {
             Ok(Some(entry)) => {
                 report.run_id = Some(entry.run_id);
+                match read_configuration(&directories, entry.run_id) {
+                    Ok(snapshot) => {
+                        report.add("configuration_snapshot", CheckStatus::Ok, None, format!("Active run snapshot {}.", snapshot.fingerprint()));
+                        if let Some(current) = &current
+                            && let Err(error) = ensure_configuration_compatible(entry.run_id, &snapshot, current) {
+                            report.add("configuration", CheckStatus::Error, None, error.to_string());
+                        }
+                    }
+                    Err(error) => report.add("configuration_snapshot", CheckStatus::Error, None, error.to_string()),
+                }
                 inspect_run(&mut report, &directories, &entry, &project).await;
             }
             Ok(None) => report.add("supervisor", CheckStatus::Unavailable, None, "No active run is indexed. Launch coterie to start one."),
@@ -75,51 +89,60 @@ pub(super) async fn run(
     render_public_response(json_output, None, &RpcResponse::Doctor { report })
 }
 
-fn inspect_provider(report: &mut DoctorReport) {
-    let defaults = compiled_defaults();
-    let binding = &defaults.providers["codex"];
-    let provider = CodexProvider::new(&binding.command);
-    match provider.probe() {
-        Ok(probe) => {
-            let archetype = builtin_standard();
-            let mut errors = Vec::new();
-            for role in archetype.roles.values() {
-                let profile =
-                    archetype.permission_profiles[&role.permission_profile];
-                let mut required = vec![
-                    ProviderCapability::StartupInstructions,
-                    if role.mode == RoleMode::Interactive {
-                        ProviderCapability::ForegroundInteractive
-                    } else {
-                        ProviderCapability::BackgroundJobs
-                    },
-                ];
-                if role.mode != RoleMode::Interactive {
-                    required.extend([
-                        ProviderCapability::StructuredLifecycleEvents,
-                        ProviderCapability::TranscriptStreaming,
+fn inspect_provider(report: &mut DoctorReport, config: &EffectiveConfig) {
+    let providers = config
+        .archetype
+        .roles
+        .iter()
+        .filter(|(name, _)| config.roles[*name].enabled)
+        .map(|(_, role)| role.provider.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for name in providers {
+        let provider = CodexProvider::new(&config.providers[name].command);
+        match provider.probe() {
+            Ok(probe) => {
+                let mut errors = Vec::new();
+                for (role_name, role) in &config.archetype.roles {
+                    if role.provider != name || !config.roles[role_name].enabled
+                    {
+                        continue;
+                    }
+                    let profile = config.roles[role_name].permission_profile;
+                    let mut required = vec![
+                        ProviderCapability::StartupInstructions,
                         ProviderCapability::Interrupt,
                         ProviderCapability::Termination,
-                    ]);
+                        if role.mode == RoleMode::Interactive {
+                            ProviderCapability::ForegroundInteractive
+                        } else {
+                            ProviderCapability::BackgroundJobs
+                        },
+                    ];
+                    if role.mode == RoleMode::Job {
+                        required.extend([
+                            ProviderCapability::StructuredLifecycleEvents,
+                            ProviderCapability::TranscriptStreaming,
+                        ]);
+                    }
+                    if let Err(error) = validate_provider_capabilities(
+                        &probe,
+                        required
+                            .into_iter()
+                            .chain(required_permission_capabilities(profile)),
+                    ) {
+                        errors.push(error.to_string());
+                    }
                 }
-                if let Err(error) = validate_provider_capabilities(
-                    &probe,
-                    required
-                        .into_iter()
-                        .chain(required_permission_capabilities(profile)),
-                ) {
-                    errors.push(error.to_string());
-                }
+                report.add("provider", if errors.is_empty() { CheckStatus::Ok } else { CheckStatus::Error }, Some(name.into()),
+                    if errors.is_empty() { format!("Installed version {} supports the effective role capabilities.", probe.version) } else { errors.join("; ") });
             }
-            report.add("provider", if errors.is_empty() { CheckStatus::Ok } else { CheckStatus::Error }, Some(probe.name),
-                if errors.is_empty() { format!("Installed version {} supports the required compiled role capabilities.", probe.version) } else { errors.join("; ") });
+            Err(error) => report.add(
+                "provider",
+                CheckStatus::Unavailable,
+                Some(name.into()),
+                error.to_string(),
+            ),
         }
-        Err(error) => report.add(
-            "provider",
-            CheckStatus::Unavailable,
-            None,
-            error.to_string(),
-        ),
     }
 }
 

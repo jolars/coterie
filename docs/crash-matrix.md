@@ -21,7 +21,7 @@ point to have a scenario.
 
 | Boundary | Scenarios | Required evidence |
 | --- | --- | --- |
-| Database migrations and commits | Initialization, task creation with a dependency and group, atomic claim and assignment creation, submission, closure, messages, acknowledgments, lifecycle observations, and shutdown | SQLite integrity and foreign keys remain valid. Uncommitted mutations roll back, committed operation IDs replay, and correlated records and events agree. |
+| Database migrations and commits | Initialization with the immutable configuration snapshot, legacy policy upgrades, task creation with a dependency and group, atomic claim and assignment creation, submission, closure, messages, acknowledgments, lifecycle observations, and shutdown | SQLite integrity and foreign keys remain valid. Uncommitted mutations roll back, committed operation IDs replay, and correlated records and events agree. |
 | Provider launch | Fake and actual subprocess launch, capability probes, stdout reader setup, foreground launch claims, and process observations | At most one provider execution per session, verified by a separate executable's launch ledger. Ambiguous launches retain their task and workspace and become `unknown`. |
 | Provider output and exit | Event receipt, JSONL ingestion, malformed-frame quarantine, process reaping, and foreground exit reporting | Already stored output survives, incomplete tails remain readable, and provider exit never closes a task. |
 | Process control | Durable shutdown and control phases, interrupt, terminate, and kill | Control intent precedes delivery. An independent signal ledger detects repeated delivery, and replacement processes never signal an unproved process. |

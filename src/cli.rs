@@ -32,6 +32,9 @@ pub(crate) struct Arguments {
     #[arg(long)]
     pub(crate) operation_id: Option<OperationId>,
 
+    #[command(flatten)]
+    pub(crate) configuration: config::Overrides,
+
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }

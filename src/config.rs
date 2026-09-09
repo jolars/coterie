@@ -11,6 +11,7 @@ mod lock;
 mod policy;
 mod provenance;
 mod resolver;
+mod snapshot;
 
 pub(crate) use input::*;
 pub(crate) use loader::{ConfigLocations, load};
@@ -18,6 +19,7 @@ pub(crate) use lock::{ConfigLock, LockError, LockStatus};
 pub(crate) use provenance::Provenance;
 use provenance::{ConfigSource, ValueProvenance};
 pub(crate) use resolver::{ConfigError, ConfigLayer, EffectiveConfig, resolve};
+pub(crate) use snapshot::RunConfiguration;
 
 #[cfg(test)]
 mod policy_tests;
@@ -39,7 +41,9 @@ pub(crate) struct CompiledDefaults {
 }
 
 /// Trusted bounds on provider quota and process control, independent of roles.
-#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
 pub(crate) struct SupervisionPolicy {
     pub(crate) restart_window_seconds: i64,
     pub(crate) max_launch_attempts: i64,
@@ -51,13 +55,15 @@ pub(crate) struct SupervisionPolicy {
 }
 
 /// A trusted command binding for an out-of-process provider.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct ProviderBinding {
     pub(crate) command: Vec<String>,
 }
 
 /// Operator ceilings that apply across archetypes.
-#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
 pub(crate) struct RunLimits {
     pub(crate) max_concurrent_agents: u16,
     pub(crate) max_agents_per_run: u16,
@@ -65,7 +71,7 @@ pub(crate) struct RunLimits {
 }
 
 /// A sealed, versioned declaration of roles and provider policy.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct ArchetypeDefinition {
     pub(crate) reference: String,
     pub(crate) lead: String,
@@ -95,7 +101,7 @@ impl ArchetypeDefinition {
 }
 
 /// A configured type of agent with no runtime-defined role semantics.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct RoleDefinition {
     pub(crate) provider: String,
     pub(crate) mode: RoleMode,
@@ -205,7 +211,7 @@ pub(crate) enum AuthorizationDecision {
     Denied,
 }
 
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 struct CapabilityGrant {
     namespace: String,
     action: String,

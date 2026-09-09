@@ -99,6 +99,438 @@ fi
 exit 0
 "#;
 
+fn write_global(fixture: &TestEnvironment, text: &str) {
+    let directory = fixture.root.join("config/coterie");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("config.toml"), text).unwrap();
+}
+
+fn rejected(fixture: &TestEnvironment, arguments: &[&str], message: &str) {
+    let output = run({
+        let mut command = fixture.command();
+        command.args(arguments);
+        command
+    });
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(message),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn configured_capabilities_authorize_calls_and_concrete_recipient_roles() {
+    let fixture = TestEnvironment::new();
+    let provider = fixture.root.join("bin/codex");
+    let script = FAKE_CODEX.replace("is_job=false", r#"
+if [ "${COTERIE_ROLE-}" = coordinator ]; then
+  "${0%/*}/coterie" task create Forbidden --json > "$0.stdout" 2> "$0.denied"
+  [ "$?" = 6 ] || exit 91
+fi
+if [ "${COTERIE_ROLE-}" = builder ]; then
+  "${0%/*}/coterie" send coordinator 'Configured recipient' --json > "$0.sent" || exit 92
+fi
+is_job=false"#);
+    fs::write(&provider, script).unwrap();
+    write_global(
+        &fixture,
+        &include_str!("../examples/config/global.toml")
+            .replace(", \"task:*\"", ""),
+    );
+    fixture.launch(&[]);
+    let denied: Value = serde_json::from_slice(
+        &fs::read(provider.with_extension("denied")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(denied["error"]["code"], "permission_denied");
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Allowed operator task",
+        "--json",
+    ]);
+    fixture.run_json(&[
+        "spawn",
+        "builder",
+        "--task",
+        task["data"]["task"]["id"].as_str().unwrap(),
+        "--json",
+    ]);
+    wait_until("message to configured foreground role", || {
+        fs::read(provider.with_extension("sent"))
+            .is_ok_and(|bytes| serde_json::from_slice::<Value>(&bytes).is_ok())
+    });
+    let sent: Value = serde_json::from_slice(
+        &fs::read(provider.with_extension("sent")).unwrap(),
+    )
+    .unwrap();
+    assert!(sent["data"].is_object());
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn operator_overrides_are_bounded_snapshotted_and_reused_on_reconnect() {
+    let fixture = TestEnvironment::new();
+    write_global(&fixture, include_str!("../examples/config/global.toml"));
+    fs::write(
+        fixture.project.join("coterie.toml"),
+        "archetype = 'builtin:standard@1'\n[roles.worker]\nmax_instances = 1",
+    )
+    .unwrap();
+    let args = [
+        "--archetype",
+        "builtin:standard@1",
+        "--role",
+        "worker.max_instances=2",
+        "--max-agents-per-run",
+        "5",
+    ];
+    fixture.launch(&args);
+    fixture.launch(&args);
+    let status = fixture.run_json(&["status", "--json"]);
+    let run_id = status["data"]["run_id"].as_str().unwrap();
+    let connection = rusqlite::Connection::open(
+        fixture
+            .state
+            .join("coterie/runs")
+            .join(run_id)
+            .join("state.sqlite3"),
+    )
+    .unwrap();
+    let document: String = connection.query_row("SELECT document_json FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
+    let snapshot: Value = serde_json::from_str(&document).unwrap();
+    assert_eq!(snapshot["effective"]["roles"]["worker"]["max_instances"], 2);
+    assert_eq!(snapshot["effective"]["limits"]["max_agents_per_run"], 5);
+    assert_eq!(
+        snapshot["provenance"]["roles.worker.max_instances"]["source"]["layer"],
+        "operator"
+    );
+    assert_eq!(run(fixture.command()).status.code(), Some(3));
+    fixture.run_json(&["stop", "--json"]);
+    let mut invalid = fixture.command();
+    invalid.args(["--role", "worker.max_instances=4"]);
+    assert_eq!(run(invalid).status.code(), Some(3));
+    let mut invalid = fixture.command();
+    invalid.args(["--max-agents-per-run", "13"]);
+    assert_eq!(run(invalid).status.code(), Some(3));
+    let mut invalid = fixture.command();
+    invalid.args(["--role", "worker.instructions=untrusted"]);
+    assert_eq!(run(invalid).status.code(), Some(2));
+    let mut invalid = fixture.command();
+    invalid.args(["status", "--max-agents-per-run", "3", "--json"]);
+    assert_eq!(run(invalid).status.code(), Some(2));
+}
+
+#[test]
+fn foreground_controls_remain_available_when_configuration_files_change() {
+    let fixture = TestEnvironment::new();
+    let ready = fixture.root.join("ready");
+    let capture = fixture.root.join("signals");
+    let mut command = fixture.command();
+    command
+        .args(["--role", "worker.max_instances=1"])
+        .env("COTERIE_FAKE_MODE", "stop")
+        .env("COTERIE_FAKE_READY", &ready)
+        .env("COTERIE_FAKE_CAPTURE", &capture)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut foreground = command.spawn().unwrap();
+    wait_until("foreground with overrides", || ready.exists());
+    fs::write(fixture.project.join("coterie.toml"), "invalid = true").unwrap();
+    fixture.run_json(&["stop", "--json"]);
+    wait_until("foreground reaped", || {
+        foreground.try_wait().unwrap().is_some()
+    });
+    assert!(fs::read_to_string(capture).unwrap().contains("term"));
+}
+
+#[test]
+fn runtime_snapshots_refuse_known_credentials_without_creating_state() {
+    let fixture = TestEnvironment::new();
+    let secret = "credential\nwith\"escaping";
+    let global = format!(
+        "[providers.codex]\ncommand = ['codex', {}]",
+        serde_json::to_string(secret).unwrap()
+    );
+    write_global(&fixture, &global);
+    let mut command = fixture.command();
+    command.env("OPENAI_API_KEY", secret);
+    let output = run(command);
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("escaping"));
+    assert!(!fixture.state.exists());
+}
+
+#[test]
+fn configured_bindings_instructions_permissions_and_role_names_reach_providers()
+{
+    let fixture = TestEnvironment::new();
+    let lead = fixture.root.join("bin/configured-lead");
+    let job = fixture.root.join("bin/configured-job");
+    let script = FAKE_CODEX.replace("#!/bin/sh", "#!/bin/sh\n[ \"$1\" = \"--binding-marker\" ] || exit 90\nshift\nif [ -n \"${COTERIE_RUN_ID-}\" ]; then printf '%s\\n' \"$@\" > \"$0.capture\"; fi");
+    for executable in [&lead, &job] {
+        fs::write(executable, &script).unwrap();
+        fs::set_permissions(executable, fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let global = include_str!("../examples/config/global.toml")
+        .replace("[providers.codex]\ncommand = [\"codex\"]", &format!("[providers.codex]\ncommand = ['{}', '--binding-marker']\n[providers.jobs]\ncommand = ['{}', '--binding-marker']", lead.display(), job.display()))
+        .replace("roles.builder]\nprovider = \"codex\"", "roles.builder]\nprovider = \"jobs\"")
+        .replace("max_instances = 3", "max_instances = 3\ninstructions = 'Check the recorded acceptance criteria.'");
+    write_global(&fixture, &global);
+    fs::write(
+        fixture.project.join("coterie.toml"),
+        "[roles.builder]\nmax_instances = 1\npermission_profile = 'inspect'\n",
+    )
+    .unwrap();
+    fixture.launch(&[]);
+    let status = fixture.run_json(&["status", "--json"]);
+    assert_eq!(status["data"]["agents"][0]["name"], "coordinator");
+    let capture = fs::read_to_string(lead.with_extension("capture")).unwrap();
+    assert!(
+        capture.contains("Coordinate tasks through Coterie."),
+        "{capture}"
+    );
+    let task = fixture.run_json(&["task", "create", "Inspect", "--json"]);
+    let task_id = task["data"]["task"]["id"].as_str().unwrap();
+    let spawned =
+        fixture.run_json(&["spawn", "builder", "--task", task_id, "--json"]);
+    assert_eq!(spawned["data"]["agent"]["name"], "builder-1");
+    wait_until("configured job launch", || {
+        job.with_extension("capture").exists()
+    });
+    let capture = fs::read_to_string(job.with_extension("capture")).unwrap();
+    assert!(
+        capture.contains("Check the recorded acceptance criteria."),
+        "{capture}"
+    );
+    assert!(capture.contains("read-only"), "{capture}");
+    assert!(capture.contains("never"), "{capture}");
+    let next = fixture.run_json(&["task", "create", "Second", "--json"]);
+    rejected(
+        &fixture,
+        &[
+            "spawn",
+            "builder",
+            "--task",
+            next["data"]["task"]["id"].as_str().unwrap(),
+            "--json",
+        ],
+        "instance limit",
+    );
+    // Editing the file cannot raise the ceiling in the supervisor's saved policy.
+    fs::write(
+        fixture.project.join("coterie.toml"),
+        "[roles.builder]\nmax_instances = 2\npermission_profile = 'inspect'\n",
+    )
+    .unwrap();
+    rejected(
+        &fixture,
+        &[
+            "spawn",
+            "builder",
+            "--task",
+            next["data"]["task"]["id"].as_str().unwrap(),
+            "--json",
+        ],
+        "instance limit",
+    );
+    let report = fixture.run_json(&["doctor", "--json"]);
+    assert!(
+        report["data"]["report"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["check"] == "configuration"
+                && check["status"] == "error")
+    );
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn disabled_roles_run_limits_and_spawn_rates_use_effective_policy() {
+    for (restriction, role, expected, first) in [
+        (
+            "[roles.worker]\nenabled = false",
+            "worker",
+            "disabled",
+            false,
+        ),
+        (
+            "[limits]\nmax_agents_per_run = 1",
+            "worker",
+            "agent limit",
+            false,
+        ),
+        (
+            "[limits]\nmax_concurrent_agents = 1",
+            "worker",
+            "agent limit",
+            true,
+        ),
+        (
+            "[limits]\nmax_spawns_per_minute = 1",
+            "reviewer",
+            "spawn rate",
+            true,
+        ),
+    ] {
+        let fixture = TestEnvironment::new();
+        fs::write(fixture.project.join("coterie.toml"), restriction).unwrap();
+        fixture.launch(&[]);
+        if first {
+            let task = fixture.run_json(&["task", "create", "First", "--json"]);
+            fixture.run_json(&[
+                "spawn",
+                "worker",
+                "--task",
+                task["data"]["task"]["id"].as_str().unwrap(),
+                "--json",
+            ]);
+        }
+        let task = fixture.run_json(&["task", "create", "Next", "--json"]);
+        rejected(
+            &fixture,
+            &[
+                "spawn",
+                role,
+                "--task",
+                task["data"]["task"]["id"].as_str().unwrap(),
+                "--json",
+            ],
+            expected,
+        );
+        if first && expected == "agent limit" {
+            rejected(&fixture, &[], "agent limit");
+        }
+        fixture.run_json(&["stop", "--json"]);
+    }
+}
+
+#[test]
+fn changed_host_bindings_are_incompatible_even_with_the_same_portable_lock() {
+    let fixture = TestEnvironment::new();
+    fixture.run_json(&["config", "lock", "--json"]);
+    fixture.launch(&[]);
+    write_global(&fixture, "[providers.codex]\ncommand = ['another-codex']");
+    fixture.run_json(&["config", "check", "--json"]);
+    let output = run(fixture.command());
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("providers"));
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn recovery_rejects_changed_policy_and_preserves_the_original_snapshot() {
+    let fixture = TestEnvironment::new();
+    write_global(&fixture, include_str!("../examples/config/global.toml"));
+    let mut command = fixture.command();
+    command
+        .args(["__supervisor", RUN_ID, PROJECT_ID])
+        .arg(&fixture.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut supervisor = command.spawn().unwrap();
+    wait_until("configured supervisor", || fixture.index_entry_count() == 1);
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(RUN_ID)
+        .join("state.sqlite3");
+    let snapshot = || {
+        rusqlite::Connection::open(&database).unwrap().query_row("SELECT document_json FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get::<_, String>(0)).unwrap()
+    };
+    let original = snapshot();
+    fs::write(
+        fixture.project.join("coterie.toml"),
+        "[roles.builder]\nenabled = false",
+    )
+    .unwrap();
+    let output = run(fixture.connect_command());
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(snapshot(), original);
+    fs::remove_file(fixture.project.join("coterie.toml")).unwrap();
+    fixture.launch(&[]);
+    assert_eq!(
+        fixture.run_json(&["status", "--json"])["data"]["agents"][0]["name"],
+        "coordinator"
+    );
+    assert_eq!(snapshot(), original);
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn runtime_configuration_is_snapshotted_and_conflicting_restarts_fail() {
+    let fixture = TestEnvironment::new();
+    fs::write(
+        fixture.project.join("coterie.toml"),
+        "[roles.worker]\nmax_instances = 1\n",
+    )
+    .unwrap();
+    fixture.launch(&[]);
+    let status = fixture.run_json(&["status", "--json"])["data"].clone();
+    let run_id = status["run_id"].as_str().unwrap();
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(run_id)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let document: String = connection.query_row(
+        "SELECT document_json FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)
+    ).unwrap();
+    let snapshot: Value = serde_json::from_str(&document).unwrap();
+    assert_eq!(snapshot["effective"]["roles"]["worker"]["max_instances"], 1);
+    assert_eq!(
+        snapshot["provenance"]["roles.worker.max_instances"]["source"]["layer"],
+        "project"
+    );
+    fs::write(
+        fixture.project.join("coterie.toml"),
+        "schema_version = 1\n[roles.worker]\nmax_instances = 1\n",
+    )
+    .unwrap();
+    fixture.launch(&[]);
+    let unchanged: String = connection.query_row("SELECT document_json FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
+    assert_eq!(unchanged, document);
+    fs::write(
+        fixture.project.join("coterie.toml"),
+        "[roles.worker]\nmax_instances = 2\n",
+    )
+    .unwrap();
+    let output = run(fixture.command());
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("snapshot"),
+        "{output:?}"
+    );
+    assert_eq!(
+        fixture.run_json(&["status", "--json"])["data"].clone()["run_id"],
+        run_id
+    );
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn invalid_configuration_and_lock_fail_before_run_creation() {
+    for text in ["[roles.worker]\nmax_instances = 4", "unknown = true"] {
+        let fixture = TestEnvironment::new();
+        fs::write(fixture.project.join("coterie.toml"), text).unwrap();
+        let output = run(fixture.command());
+        assert_eq!(output.status.code(), Some(3), "{output:?}");
+        assert!(!fixture.state.exists());
+    }
+    let fixture = TestEnvironment::new();
+    fs::write(fixture.project.join("coterie.lock"), "{}").unwrap();
+    let output = run(fixture.command());
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(!fixture.state.exists());
+}
+
 #[test]
 fn public_help_lists_the_minimum_delegation_commands() {
     let fixture = TestEnvironment::new();
@@ -1684,6 +2116,11 @@ fn completed_shutdown_retires_stale_coordination_before_a_new_run() {
             }),
         "{report}"
     );
+    fs::write(
+        fixture.project.join("coterie.toml"),
+        "[roles.worker]\nmax_instances = 1",
+    )
+    .unwrap();
     let result = run(fixture.connect_command());
     assert!(result.status.success(), "{result:?}");
     let current: Value =
@@ -2805,6 +3242,7 @@ impl TestEnvironment {
             .current_dir(&self.project)
             .env("XDG_RUNTIME_DIR", &self.runtime)
             .env("XDG_STATE_HOME", &self.state)
+            .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("PATH", &self.path);
         command
     }

@@ -107,6 +107,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 .launch_session(store, launch, true, assignment_id)
                 .map(Some);
         };
+        self.configure_provider(store, launch.scope.run_id, &launch.role)?;
         let probe = self.provider.probe()?;
         if !store.transaction(|repositories| {
             repositories.session_scope_is_current(launch.scope)
@@ -153,6 +154,23 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         }
     }
 
+    fn configure_provider(
+        &mut self,
+        store: &mut Store,
+        run_id: crate::id::RunId,
+        role: &str,
+    ) -> Result<(), AgentSessionError> {
+        let config = store.configuration(run_id)?;
+        let binding = config
+            .archetype
+            .roles
+            .get(role)
+            .and_then(|role| config.providers.get(&role.provider))
+            .ok_or(StoreError::InvalidConfigurationSnapshot { run_id })?;
+        self.provider.configure(binding);
+        Ok(())
+    }
+
     fn launch_session(
         &mut self,
         store: &mut Store,
@@ -176,7 +194,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         token: AgentToken,
         attempted_at: i64,
     ) -> Result<LaunchedAgent, AgentSessionError> {
-        let policy = crate::config::compiled_defaults().supervision;
+        let policy = store.configuration(launch.scope.run_id)?.supervision;
         let admission = store.transaction(|repositories| {
             repositories.admit_session_launch(
                 launch.scope,
@@ -279,6 +297,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         agent_exists: bool,
         assignment_id: Option<AssignmentId>,
     ) -> Result<AgentToken, AgentSessionError> {
+        self.configure_provider(store, launch.scope.run_id, &launch.role)?;
         let probe = self.provider.probe()?;
         validate_provider_probe(&probe, launch)?;
 
@@ -609,6 +628,13 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 )?;
                 continue;
             };
+            let role = store
+                .transaction(|repositories| {
+                    repositories.agent(session.agent_id)
+                })?
+                .ok_or(StoreError::InvalidConfigurationSnapshot { run_id })?
+                .role;
+            self.configure_provider(store, run_id, &role)?;
             match self.provider.recover(&provider_session_id, scope) {
                 Ok(ProviderRecovery::Observed {
                     handle,
@@ -932,7 +958,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         now_ms: i64,
     ) -> Result<(), AgentSessionError> {
         use crate::state::supervision::{ControlPhase, ControlReason};
-        let policy = crate::config::compiled_defaults().supervision;
+        let policy = store.configuration(run_id)?.supervision;
         store.transaction(|repositories| {
             let shutdown = repositories.run_shutdown(run_id)?;
             for session in repositories.sessions(run_id)? {
@@ -1085,7 +1111,9 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 && repositories.record_session_failure(
                     handle.scope,
                     observed_at,
-                    crate::config::compiled_defaults().supervision,
+                    repositories
+                        .configuration(handle.scope.run_id)?
+                        .supervision,
                 )?
             {
                 observation.lifecycle = LifecycleState::Quarantined;
@@ -1373,6 +1401,64 @@ mod tests {
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
     const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
     const TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAZ";
+
+    #[test]
+    fn configured_supervision_deadlines_survive_recovery() {
+        use crate::state::supervision::ControlReason;
+        let directory = TestDirectory::new();
+        let global = toml::from_str("[supervision]\nstartup_timeout_seconds = 2\njob_timeout_seconds = 3\ninterrupt_grace_ms = 20\nshutdown_timeout_ms = 200").unwrap();
+        let config = crate::config::resolve(
+            &global,
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let mut store = store_with_configuration(&directory, &config);
+        let launch = launch(RUN_ID.parse().unwrap());
+        let provider =
+            FakeProvider::new([FakeScript::new([FakeEvent::observation(
+                SessionObservation {
+                    lifecycle: LifecycleState::Running,
+                    activity: ActivityState::Unknown,
+                    exit: None,
+                },
+            )])])
+            .ignoring_controls(["interrupt", "terminate"]);
+        let mut supervisor =
+            AgentSessionSupervisor::new(provider, &directory.0);
+        supervisor.launch(&mut store, &launch).unwrap();
+        let mut supervisor =
+            AgentSessionSupervisor::new(supervisor.provider, &directory.0);
+        supervisor
+            .reconcile_after_restart(&mut store, launch.scope.run_id, 11)
+            .unwrap();
+        supervisor
+            .advance(&mut store, launch.scope.session_id, 11)
+            .unwrap();
+        supervisor
+            .drive_controls(&mut store, launch.scope.run_id, 12_999)
+            .unwrap();
+        assert!(supervisor.provider.controls.is_empty());
+        for now in [13_000, 13_019, 13_020, 13_100] {
+            supervisor
+                .drive_controls(&mut store, launch.scope.run_id, now)
+                .unwrap();
+        }
+        assert_eq!(
+            supervisor.provider.controls,
+            [
+                (launch.scope, "interrupt"),
+                (launch.scope, "terminate"),
+                (launch.scope, "kill")
+            ]
+        );
+        let controls = store
+            .transaction(|repositories| {
+                repositories.session_controls(launch.scope.run_id)
+            })
+            .unwrap();
+        assert_eq!(controls[0].reason, ControlReason::ExecutionTimeout);
+    }
 
     #[test]
     fn replaced_sessions_cannot_append_output_or_apply_late_exits() {
@@ -2158,7 +2244,7 @@ mod tests {
         let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -2361,7 +2447,15 @@ mod tests {
         .expect("the fake Codex executable should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
             .expect("the fake Codex executable should be private");
-        let mut store = store_with_run(&directory);
+        let mut config = crate::config::resolve(
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        config.providers.get_mut("codex").unwrap().command =
+            vec![executable.to_str().unwrap().into()];
+        let mut store = store_with_configuration(&directory, &config);
         let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
         let mut supervisor = AgentSessionSupervisor::new(
             CodexProvider::new([executable.as_os_str()]),
@@ -2467,7 +2561,7 @@ mod tests {
         let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
         store
             .transaction(|repositories| {
-                repositories.insert_run(&RunRecord {
+                repositories.insert_test_run(&RunRecord {
                     id: run_id,
                     status: "active".to_owned(),
                     created_at: 10,
@@ -2515,7 +2609,7 @@ mod tests {
             let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
             store
                 .transaction(|repositories| {
-                    repositories.insert_run(&RunRecord {
+                    repositories.insert_test_run(&RunRecord {
                         id: run_id,
                         status: "active".to_owned(),
                         created_at: 10,
@@ -2607,19 +2701,33 @@ mod tests {
     }
 
     fn store_with_run(directory: &TestDirectory) -> Store {
-        let mut store = Store::open(&directory.0.join("state.sqlite3"))
-            .expect("the store should open");
-        let run_id = RUN_ID.parse::<RunId>().expect("valid run ID");
+        let configuration = crate::config::resolve(
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        store_with_configuration(directory, &configuration)
+    }
+
+    fn store_with_configuration(
+        directory: &TestDirectory,
+        configuration: &crate::config::EffectiveConfig,
+    ) -> Store {
+        let mut store =
+            Store::open(&directory.0.join("state.sqlite3")).expect("store");
+        let run_id = RUN_ID.parse::<RunId>().expect("run ID");
         store
             .transaction(|repositories| {
                 repositories.insert_run(&RunRecord {
                     id: run_id,
-                    status: "active".to_owned(),
+                    status: "active".into(),
                     created_at: 10,
                     stopped_at: None,
-                })
+                })?;
+                repositories.snapshot_configuration(run_id, configuration, 10)
             })
-            .expect("the run should commit");
+            .expect("configured run");
         store
     }
 

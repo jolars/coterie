@@ -7,7 +7,9 @@ use thiserror::Error;
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ConfigLayer {
     Compiled,
@@ -72,7 +74,7 @@ impl ConfigError {
 }
 
 /// Resolved values are distinct from the unmodified, versioned archetype.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct EffectiveConfig {
     pub(crate) archetype: ArchetypeDefinition,
     pub(crate) providers: BTreeMap<String, ProviderBinding>,
@@ -84,7 +86,7 @@ pub(crate) struct EffectiveConfig {
     pub(crate) provenance: Provenance,
 }
 
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub(crate) struct EffectiveRole {
     pub(crate) enabled: bool,
     pub(crate) max_instances: Option<u16>,
@@ -275,6 +277,21 @@ pub(crate) fn resolve(
         &profiles,
         ConfigLayer::Operator,
     )?;
+    for (name, role) in &effective.archetype.roles {
+        if effective.roles[name].enabled
+            && role.workspace == WorkspacePolicy::ReadOnly
+            && effective.roles[name].permission_profile.filesystem
+                != FilesystemPolicy::ReadOnly
+        {
+            return Err(invalid_global(
+                format!(
+                    "archetypes.{}.roles.{name}.workspace",
+                    effective.archetype.reference
+                ),
+                "a read-only workspace requires an effective read-only filesystem permission profile",
+            ));
+        }
+    }
     Ok(effective)
 }
 
@@ -408,6 +425,12 @@ fn resolve_archetype(
         return Err(invalid_global(
             format!("{prefix}.lead"),
             "designated foreground role must exist and use interactive mode",
+        ));
+    }
+    if roles[&lead].workspace == WorkspacePolicy::Worktree {
+        return Err(invalid_global(
+            format!("{prefix}.roles.{lead}.workspace"),
+            "the initial foreground agent has no task assignment; use project or read-only, and assign worktree roles to background tasks",
         ));
     }
     Ok(ArchetypeDefinition {

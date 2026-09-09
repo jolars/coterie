@@ -29,8 +29,9 @@ contract](docs/cli-contract.md) for programmatic output and retry rules.
 Configuration inspection supports `config check`,
 `config show --effective --provenance`, `config schema`, and explicit
 `config lock` creation. These commands resolve layered configuration and verify
-portable locks without starting a run or probing providers. Launch and recovery
-adoption of that configuration remains separate M5 work. See the
+portable locks without starting a run or probing providers. Launches snapshot
+the resolved configuration, and recovery reuses that policy. Incompatible
+configuration changes require restoring the saved policy or stopping the run. See the
 [configuration command contract](docs/cli-contract.md#coterie-config-check)
 and [examples](examples/config).
 

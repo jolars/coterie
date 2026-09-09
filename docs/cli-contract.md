@@ -15,7 +15,7 @@ commands also accept
 ### `coterie`
 
 ```console
-coterie [--operation-id <co-ULID>]
+coterie [--operation-id <co-ULID>] [--archetype <REFERENCE>] [CONFIGURATION OPTIONS]
 ```
 
 Discover the current project, start or reconnect to its supervisor, and launch
@@ -23,7 +23,35 @@ the foreground Codex TUI. Codex inherits the working directory and terminal
 streams, so Coterie prints no wrapper response while the TUI owns the terminal.
 Coterie injects its orchestration bootstrap through Codex's
 `developer_instructions` setting, while leaving normal project instruction
-discovery—including `AGENTS.md`—intact.
+discovery—including `AGENTS.md`—intact. Configured role instructions are included
+in that provider bootstrap.
+
+Startup and recovery use a durable snapshot of the resolved run configuration.
+An incompatible file or operator override produces `invalid_configuration`
+(exit 3), identifying the run, snapshot fingerprint, and changed effective fields.
+Restore the original configuration and overrides, or stop the active run before
+starting with new policy. Provider command changes conflict even when a portable
+lock still verifies; provenance-only changes are compatible. Existing run
+commands and foreground process control remain available if files change.
+
+Startup, `config`, and `doctor` accept these configuration options:
+
+| Option | Effective setting |
+| --- | --- |
+| `--archetype REFERENCE` | A trusted versioned archetype. |
+| `--max-concurrent-agents N` | Simultaneously active agent ceiling. |
+| `--max-agents-per-run N` | Total agent ceiling. |
+| `--max-spawns-per-minute N` | Explicit spawns in a rolling 60-second window. |
+| `--role ROLE.enabled=true\|false` | Enable or disable a declared role. |
+| `--role ROLE.max_instances=N` | Active instances of a declared role. |
+| `--role ROLE.permission_profile=NAME` | A trusted permission profile. |
+
+Repeat `--role` to set multiple fields; the last assignment to a field wins.
+Overrides may restore project restrictions only within trusted global and
+archetype bounds. Other commands reject these flags with `invalid_argument`
+(exit 2). Known credentials and Coterie tokens in launch configuration are
+rejected before creating state; pass provider credentials through its supported
+authentication environment.
 
 The foreground launch does not accept `--json`. A foreground operation ID is
 only for retrying an uncertain launch and cannot be combined with a subcommand.
@@ -39,9 +67,8 @@ coterie config check [--json]
 Configuration commands run without an active run, runtime directories, or an
 installed provider. They discover the project root and resolve compiled defaults,
 trusted global configuration and includes, the selected archetype, and project
-restrictions. `schema` does not discover a project or read configuration.
-Launches, recovery, and `doctor` configuration compatibility still use the
-existing compiled runtime policy until M5 snapshot integration is complete.
+restrictions, followed by bounded operator overrides. `schema` does not discover
+a project or read configuration.
 
 `check` validates configuration and verifies `coterie.lock` if present. Its JSON
 data contains `archetype`, the portable `fingerprint`, and `lock` (`absent` or
@@ -128,8 +155,9 @@ ownership and permissions, database integrity and migrations, pending operations
 unfinished assignments, uncertain sessions, task cycles, transcript accessibility
 and incomplete tails, and worktree ownership. Provider checks probe the installed
 Codex version and required capabilities without launching a model session.
-Configuration and lock files are reported as unverified when present until M5
-runtime snapshot integration is complete.
+Configuration and lock files are resolved and verified. An active run adds a
+`configuration_snapshot` check and a compatibility check against current effective
+values. These checks report errors without replacing the snapshot.
 
 Doctor is operator-only and never starts a supervisor, migrates a database,
 changes permissions, signals a process, or removes work. If the supervisor is
@@ -387,7 +415,7 @@ remains available for inspection. Recovery adopts a provider handle only when
 its provider identity and complete session scope match the current durable
 ownership; a PID alone does not establish that proof.
 
-The compiled restart policy allows three launch attempts within 60 seconds,
+The default restart policy allows three launch attempts within 60 seconds,
 with exponential retry delays starting at one second. Automatic retries require
 proof that the failed attempt created no process. Exhausting this budget
 quarantines the session and records `session.restart_limited`; repeated failures
@@ -405,7 +433,8 @@ timeouts use the interrupt, terminate, and kill phases described above and emit
 `session.control_changed` events. Shutdown phases emit `run.shutdown_changed`.
 Handshake waits are bounded to five seconds, and ordinary RPC responses to ten
 seconds; the foreground process-control subscription remains a long poll.
-External configuration of these compiled limits belongs to M5.
+Trusted global `supervision` settings override these defaults at run creation.
+The resulting timeouts and restart bounds remain fixed in the run snapshot.
 
 Coterie never automatically deletes a dirty, unintegrated, running, lost, or
 ambiguously owned assignment worktree. Use `status`, `prime`, `logs`, and
@@ -428,11 +457,15 @@ state or user-readable files. Coterie uses private runtime files and scoped
 tokens to prevent accidental authority confusion; stronger isolation requires
 separate operating-system identities or containers and is outside the MVP.
 
-The current runtime operator policy is the sealed `builtin:standard@1` archetype.
-Configuration inspection loads global and project files, but runtime adoption
-remains separate M5 work. The runtime provider executable,
-role definitions, permission profiles, capabilities, and limits are trusted
-compiled policy. Repository contents, `AGENTS.md`, task and message text,
+The default runtime archetype is the sealed `builtin:standard@1` definition.
+Trusted global configuration may select other declared archetypes and provider
+bindings. Project configuration can only select trusted definitions and reduce
+authority or limits; explicit operator overrides remain within trusted bounds.
+Each run snapshots its resolved policy before launching providers. The initial
+foreground role uses the primary project with `project` or `read-only` workspace
+policy; task assignments own isolated worktrees. A `read-only` workspace requires
+a read-only filesystem profile. The following
+table describes the built-in default roles. Repository contents, `AGENTS.md`, task and message text,
 provider output, and agent behavior are untrusted data. Coterie passes provider
 arguments as arrays, never through `sh -c`, and performs its own repository
 operations with `git2`.

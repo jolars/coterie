@@ -58,6 +58,74 @@ fn configuration_error(output: &Output) -> Value {
 }
 
 #[test]
+fn workspace_policy_requires_an_enforceable_launch() {
+    for global in [
+        include_str!("../examples/config/global.toml").replacen(
+            "workspace = \"project\"",
+            "workspace = \"worktree\"",
+            1,
+        ),
+        include_str!("../examples/config/global.toml")
+            .replace("workspace = \"worktree\"", "workspace = \"read-only\""),
+    ] {
+        let fixture = Fixture::new();
+        fixture.write("config/coterie/config.toml", &global);
+        let error =
+            configuration_error(&fixture.run(&["config", "check", "--json"]));
+        assert!(error["message"].as_str().unwrap().contains("workspace"));
+    }
+}
+
+#[test]
+fn inspection_and_locks_include_bounded_operator_overrides() {
+    let fixture = Fixture::new();
+    fixture.write("project/coterie.toml", "[roles.worker]\nmax_instances = 1");
+    let flags = [
+        "--role",
+        "worker.max_instances=2",
+        "--role",
+        "worker.enabled=false",
+        "--max-agents-per-run",
+        "7",
+    ];
+    let shown = success(
+        &fixture.run(
+            &[
+                flags.as_slice(),
+                &["config", "show", "--provenance", "--json"],
+            ]
+            .concat(),
+        ),
+    );
+    assert_eq!(shown["effective"]["roles"]["worker"]["max_instances"], 2);
+    assert_eq!(shown["effective"]["roles"]["worker"]["enabled"], false);
+    assert_eq!(
+        shown["provenance"]["roles.worker.max_instances"]["source"]["layer"],
+        "operator"
+    );
+    success(
+        &fixture
+            .run(&[flags.as_slice(), &["config", "lock", "--json"]].concat()),
+    );
+    assert_eq!(
+        success(
+            &fixture.run(
+                &[flags.as_slice(), &["config", "check", "--json"]].concat()
+            )
+        )["lock"],
+        "verified"
+    );
+    configuration_error(&fixture.run(&["config", "check", "--json"]));
+    configuration_error(&fixture.run(&[
+        "--role",
+        "worker.max_instances=4",
+        "config",
+        "check",
+        "--json",
+    ]));
+}
+
+#[test]
 fn inspection_works_without_a_run_or_provider_and_creates_no_files() {
     let fixture = Fixture::new();
     let checked = success(&fixture.run(&["config", "check", "--json"]));

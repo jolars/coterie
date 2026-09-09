@@ -210,9 +210,9 @@ Global configuration lives at `$XDG_CONFIG_HOME/coterie/config.toml`, falling
 back to `~/.config/coterie/config.toml`.
 
 The M5 loader, resolver, and inspection commands retain provenance for every
-effective value and verify portable configuration locks. Runtime launches and
-recovery still use compiled defaults until the snapshot and runtime integration
-work is complete.
+effective value and verify portable configuration locks. Launches and recovery
+use an immutable snapshot of that resolved configuration. Provider bindings
+currently select commands implementing the Codex adapter contract.
 
 Only absolute `XDG_CONFIG_HOME` and `HOME` values participate in discovery.
 An absent or relative `XDG_CONFIG_HOME` falls back to an absolute `HOME`; if
@@ -342,8 +342,10 @@ capabilities = ["send:lead", "task:read", "task:comment"]
 The archetype version pins its designated lead, role names, provider identities
 and modes, instructions, capabilities, workspace policies, permission-profile
 values, and per-role capacities. The `lead` selector creates exactly one
-initial foreground agent; `max_instances` bounds explicitly spawned role
-instances and does not request an idle pool. The supervisor rejects spawns that
+initial foreground agent in the primary project directory; that role uses
+`project` or `read-only` workspace policy because it has no task assignment.
+`worktree` roles require an assigned background task. `max_instances` bounds
+explicitly spawned role instances and does not request an idle pool. The supervisor rejects spawns that
 exceed either the role capacity or the effective run-wide ceilings. Automatic
 demand-based pool scaling is not part of the initial product target.
 
@@ -539,6 +541,44 @@ snapshotted when it is attached. The initial product target does not hot-apply
 configuration changes to an active run. Starting Coterie or attaching a project
 with a conflicting archetype or configuration reports the active snapshot and
 requires an explicit resolution.
+
+Startup resolves configuration and verifies any lock before creating run state.
+The supervisor records a versioned snapshot, portable fingerprint, and provenance
+in the same transaction as the run and primary project. The private snapshot
+includes host provider command arrays, which portable locks exclude. Recovery
+and every runtime policy decision use this snapshot. Database migration 11 pins
+the historical compiled policy for older runs without a snapshot; it never
+adopts current files as those runs' original policy. Missing or invalid snapshots
+in the current schema fail closed.
+
+Compatibility compares all effective values, including command bindings, while
+ignoring provenance changes. Moving a source file or explicitly reassigning an
+equal value is compatible. Changing a binding is incompatible even if its
+portable lock still verifies. New foreground invocations and supervisor recovery
+reject conflicting policy before launching or reconciling external resources.
+The diagnostic identifies the run, saved fingerprint, and changed fields. Restore
+the configuration and operator overrides used for that run, or stop a reachable
+run before launching with new policy. Status, logs, events, stop, and existing
+foreground control connections remain usable while files conflict. Doctor checks
+current configuration and lock validity against the saved snapshot without
+migrating or rewriting state.
+
+Operator startup, configuration inspection, and doctor accept `--archetype`,
+`--max-concurrent-agents`, `--max-agents-per-run`, `--max-spawns-per-minute`, and
+repeatable `--role ROLE.FIELD=VALUE` options. Role fields are `enabled`,
+`max_instances`, and `permission_profile`. Repeated fields use the last value.
+These requests remain bounded by trusted policy and appear as operator provenance.
+Reconnecting with a different effective override reports a snapshot conflict.
+Other commands reject configuration overrides because they use the active run's
+snapshot. Known credential literals and Coterie tokens in configuration cannot
+be persisted as launch policy; use the provider authentication environment.
+
+The supervisor enforces effective role enablement, profiles, capacities,
+run-wide agent ceilings, and a rolling 60-second explicit-spawn ceiling. Retrying
+an operation does not consume another spawn. Role instructions join Coterie's
+bootstrap at the provider boundary without changing repository instruction files.
+Effective supervision policy controls launch admission, restart quarantine,
+session deadlines, and foreground and worker shutdown escalation.
 
 ## Runtime architecture
 
@@ -906,7 +946,8 @@ Workspace policy is declared per role:
 - `worktree`: use an isolated Git worktree belonging to the task's target
   project, normally used by implementation workers;
 - `read-only`: inspect the target project or worktree under an enforceable
-  provider permission profile.
+  provider permission profile. Its effective filesystem policy must be
+  `read-only`; configuration validation rejects a writable profile.
 
 Every assignment resolves its workspace from its task's project identity, never
 from the supervisor's or caller's current directory. This rule keeps
@@ -974,7 +1015,7 @@ unknown rather than killed or adopted.
 
 Restarts are bounded. Repeated failures within a configured window quarantine
 the session and emit a visible event. The supervisor does not spin indefinitely
-or consume unbounded provider quota. The compiled policy allows three launch
+or consume unbounded provider quota. The default policy allows three launch
 attempts in a 60-second window, with exponential retry delays starting at one
 second. Only a failure proved to precede process creation permits automatic
 retry of that launch intent. Exhausted launch retries quarantine the session;
@@ -991,7 +1032,7 @@ bounds, not inferences about semantic activity. Timeouts initiate the same
 bounded process-control phases as shutdown. Restart admission, quarantine,
 control intent, and deadlines survive supervisor replacement; uncertain
 in-flight launches remain unknown. Trusted operator configuration owns these
-bounds; until M5, the compiled policy supplies them.
+bounds; trusted global policy sets them when the run snapshot is created.
 
 Shutdown proceeds in phases:
 
@@ -1005,7 +1046,7 @@ Shutdown proceeds in phases:
 
 The shutdown intent and draining assignments commit before any process control.
 Both foreground launches and worker spawns are rejected while draining,
-including launches attempted by reconciliation. The compiled policy interrupts
+including launches attempted by reconciliation. The default supervision policy interrupts
 first, sends `SIGTERM` after 250 milliseconds, and sends `SIGKILL` to verified
 survivors after 2.5 seconds. The foreground wrapper controls its own child;
 the supervisor never signals an ambiguous PID. The overall grace and
@@ -1048,8 +1089,8 @@ configuration and lock compatibility, provider versions and capabilities,
 abandoned operations, stale assignments, task cycles, transcript accessibility,
 and worktree ownership. Inspection is read-only, including when the supervisor
 is unreachable: an offline reader may open an existing private database without
-migrations or mutations. It reports unverified external configuration and lock
-compatibility until M5 implements those layers. Recovery remains the existing
+migrations or mutations. It verifies external configuration and locks and compares current effective
+policy with the active snapshot. Recovery remains the existing
 lease-protected startup and desired-state reconciliation path. An indexed run
 must have a matching durable database; a responsive socket or ambiguous file
 ownership is never discarded as stale.
