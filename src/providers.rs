@@ -1709,7 +1709,7 @@ fn diagnostic_output(primary: &[u8], fallback: &[u8]) -> String {
     } else {
         primary
     };
-    let output = String::from_utf8_lossy(bytes);
+    let output = crate::redaction::text(&String::from_utf8_lossy(bytes));
     let output = output.trim();
     if output.is_empty() {
         "no diagnostic output".to_owned()
@@ -2062,6 +2062,13 @@ pub(crate) mod fake {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn diagnostic_redaction_precedes_output_truncation() {
+        let input = format!("{}cot1_{}", "x".repeat(505), "ab".repeat(32));
+        let diagnostic = super::diagnostic_output(input.as_bytes(), b"");
+        assert!(!diagnostic.contains("cot1_"));
+        assert!(diagnostic.chars().count() <= 512);
+    }
     use std::cell::RefCell;
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::ffi::{OsStr, OsString};
@@ -2790,6 +2797,66 @@ mod tests {
     }
 
     #[test]
+    fn providers_preserve_final_fragments_without_inferred_success() {
+        for (tail, malformed) in [
+            ("{\"type\":\"turn.completed\"}", false),
+            ("{\"type\":", true),
+        ] {
+            let directory = TestDirectory::new();
+            let executable = directory.executable(
+                "codex-tail",
+                &format!("#!/bin/sh\nprintf '%s' '{tail}'\n"),
+            );
+            let script = if malformed {
+                FakeScript::new([FakeEvent::malformed(
+                    tail.as_bytes(),
+                    "truncated fixture",
+                )])
+            } else {
+                FakeScript::new([
+                    FakeEvent::output(tail.as_bytes()),
+                    FakeEvent::observation(SessionObservation::process_exit(
+                        Some(0),
+                    )),
+                ])
+            };
+            let providers: Vec<Box<dyn Provider>> = vec![
+                Box::new(FakeProvider::new([script])),
+                Box::new(CodexProvider::new([executable.as_os_str()])),
+            ];
+            for mut provider in providers {
+                let handle = provider
+                    .launch_job(
+                        &specification_in(&directory.0),
+                        &job_environment_in(&directory.0),
+                    )
+                    .unwrap();
+                let events = collect_job_events(provider.as_mut(), &handle);
+                let bytes: Vec<u8> = events
+                    .iter()
+                    .flat_map(|event| match &event.kind {
+                        ProviderEventKind::Output(bytes)
+                        | ProviderEventKind::MalformedOutput {
+                            bytes, ..
+                        } => bytes.as_slice(),
+                        _ => &[],
+                    })
+                    .copied()
+                    .collect();
+                assert_eq!(bytes, tail.as_bytes());
+                assert_eq!(
+                    events.last().unwrap().observation().unwrap().lifecycle,
+                    if malformed {
+                        LifecycleState::Quarantined
+                    } else {
+                        LifecycleState::Exited
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requires an explicitly installed Codex CLI"]
     fn installed_codex_satisfies_the_probe_contract() {
         let probe = CodexProvider::new(["codex"])
@@ -2970,7 +3037,7 @@ mod tests {
     }
 
     fn collect_job_events(
-        provider: &mut CodexProvider,
+        provider: &mut dyn Provider,
         handle: &super::ProviderSessionHandle,
     ) -> Vec<super::ProviderEvent> {
         let deadline = Instant::now() + Duration::from_secs(5);

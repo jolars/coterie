@@ -5,7 +5,9 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{
+    DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt,
+};
 use std::path::{Path, PathBuf};
 
 use git2::{ErrorCode, Repository};
@@ -191,6 +193,16 @@ pub(crate) struct CoterieDirectories {
 }
 
 impl CoterieDirectories {
+    pub(crate) fn inspection_directories(&self) -> [&Path; 6] {
+        [
+            &self.runtime_base,
+            &self.runtime,
+            &self.leases,
+            &self.state,
+            &self.runs,
+            &self.projects,
+        ]
+    }
     pub(crate) fn from_environment() -> Result<Self, ProjectError> {
         Self::from_environment_values(
             std::env::var_os("XDG_RUNTIME_DIR"),
@@ -305,17 +317,13 @@ impl ProjectLease {
     ) -> Result<LeaseAttempt, ProjectError> {
         let key = ProjectKey::for_identity(identity);
         let path = directories.leases.join(format!("{key}.lock"));
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|source| ProjectError::LeaseIo {
-                action: "open",
-                path: path.clone(),
-                source,
+        let mut file =
+            crate::private_fs::open(&path, true, true).map_err(|source| {
+                ProjectError::LeaseIo {
+                    action: "open",
+                    path: path.clone(),
+                    source,
+                }
             })?;
 
         match file.try_lock() {
@@ -396,7 +404,7 @@ impl ActiveRunIndex {
     ) -> Result<Option<ActiveRunEntry>, ProjectError> {
         let key = ProjectKey::for_identity(identity);
         let path = self.entry_path(&key);
-        let mut file = match File::open(&path) {
+        let mut file = match crate::private_fs::open(&path, false, false) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(None);
@@ -650,7 +658,7 @@ fn require_absolute(
 }
 
 fn validate_runtime_base(path: &Path) -> Result<(), ProjectError> {
-    let metadata = fs::metadata(path).map_err(|source| {
+    let metadata = fs::symlink_metadata(path).map_err(|source| {
         ProjectError::RuntimeDirectoryMetadata {
             path: path.to_owned(),
             source,
@@ -662,7 +670,7 @@ fn validate_runtime_base(path: &Path) -> Result<(), ProjectError> {
         });
     }
     let mode = metadata.permissions().mode() & 0o777;
-    if mode != 0o700 {
+    if mode != 0o700 || metadata.uid() != nix::unistd::geteuid().as_raw() {
         return Err(ProjectError::InsecureRuntimeDirectory {
             path: path.to_owned(),
             mode,
@@ -713,13 +721,13 @@ fn create_private_directory(path: &Path) -> Result<(), ProjectError> {
             path: path.to_owned(),
         });
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(
-        |source| ProjectError::DirectoryIo {
+    crate::private_fs::directory(path).map_err(|source| {
+        ProjectError::DirectoryIo {
             action: "secure",
             path: path.to_owned(),
             source,
-        },
-    )
+        }
+    })
 }
 
 mod path_bytes {
@@ -1243,6 +1251,7 @@ mod tests {
                 .expect("the inconsistent fixture should encode"),
         )
         .expect("the fixture index should be written");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
 
         assert!(matches!(
             ActiveRunIndex::new(&directories).lookup(&expected),

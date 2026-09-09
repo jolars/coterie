@@ -5,11 +5,13 @@ mod cli;
     reason = "M1 defines configuration policy before later milestones resolve it"
 )]
 mod config;
+mod doctor;
 #[allow(
     dead_code,
     reason = "M1 defines stable identifiers before later milestones consume them"
 )]
 mod id;
+mod private_fs;
 #[allow(
     dead_code,
     reason = "M2 defines project discovery before supervisor startup consumes it"
@@ -21,6 +23,7 @@ mod protocol;
     reason = "M2 defines provider lifecycles before delegation commands launch them"
 )]
 mod providers;
+mod redaction;
 #[allow(
     dead_code,
     reason = "M1 defines durable state before later milestones start the supervisor"
@@ -75,7 +78,7 @@ async fn main() -> std::process::ExitCode {
         }
         Err(error) => {
             let exit_code = u8::try_from(error.exit_code()).unwrap_or(2);
-            let _ = error.print();
+            eprint!("{}", redaction::text(&error.to_string()));
             return std::process::ExitCode::from(exit_code);
         }
     };

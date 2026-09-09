@@ -174,7 +174,7 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   and generation; adopt a live process only when it proves both.
 - [x] Add bounded restart windows, crash-loop quarantine, timeout handling, and
   the full phased shutdown protocol.
-- [ ] Complete `doctor`, conservative stale-state repair, resumable event
+- [x] Complete `doctor`, conservative stale-state repair, resumable event
   following, transcript-tail handling, credential redaction, and private
   runtime permission checks.
 - [ ] Inject failures at every database/process/filesystem boundary and verify

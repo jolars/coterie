@@ -19,7 +19,8 @@ The current platform target is Linux, developed on NixOS and tested on Ubuntu.
 The current command slice can launch or reconnect to a durable local run,
 open its foreground Codex TUI, inspect durable state, create and close tasks,
 spawn Codex workers in isolated Git worktrees, finish assignments, exchange
-durable messages, read transcripts and events, explicitly integrate submitted
+durable messages, read and follow transcripts and events, diagnose runtime state
+with `doctor`, explicitly integrate submitted
 Git worktrees through a guarded operation, and stop the run while preserving
 recoverable work. Run
 `coterie --help` for the generated command reference; see the [CLI

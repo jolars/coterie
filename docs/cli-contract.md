@@ -7,8 +7,8 @@ output, retry behavior, authentication, and process exit codes.
 
 Generated `--help` output is authoritative for argument spelling. The reference
 below covers every public command in the MVP. Commands other than the foreground
-launch require an active run and never create one as a side effect. Every
-subcommand accepts the global `--json` option; mutating commands also accept
+launch and `doctor` require an active run and never create one as a side effect.
+Every subcommand accepts the global `--json` option; mutating commands also accept
 `--operation-id <co-ULID>` as shown below.
 
 ### `coterie`
@@ -37,6 +37,36 @@ coterie status
 
 Summarize the active run, project, agents, and task-state counts. Full status is
 operator-only.
+
+### `coterie doctor`
+
+```console
+coterie doctor [--json]
+```
+
+Inspect supervisor reachability, the project lease and index, runtime file
+ownership and permissions, database integrity and migrations, pending operations,
+unfinished assignments, uncertain sessions, task cycles, transcript accessibility
+and incomplete tails, and worktree ownership. Provider checks probe the installed
+Codex version and required capabilities without launching a model session.
+Configuration and lock files are reported as unverified when present because M5
+owns external configuration loading.
+
+Doctor is operator-only and never starts a supervisor, migrates a database,
+changes permissions, signals a process, or removes work. If the supervisor is
+unreachable, it opens an existing private database read-only. Insecure or
+ambiguous paths remain untouched. A successful diagnostic report exits 0 even
+when individual checks report `warning`, `error`, or `unavailable`; inspect the
+`report.checks` statuses. An inability to run the command uses the ordinary error
+contract. The [doctor report schema](../schemas/doctor-report-v1.schema.json) is
+generated from its Rust type.
+
+Launch `coterie` to attempt conservative recovery of an indexed run. Recovery
+requires the exclusive project lease, an existing private run database, and
+matching durable project identity. It replaces a socket only after a refused
+connection proves that the socket is stale. A held lease, responsive mismatched
+socket, missing database, or inconsistent index must remain for inspection.
+Stopped runs retire only their coordination metadata; their durable work remains.
 
 ### `coterie whoami`
 
@@ -173,23 +203,50 @@ durable acknowledgement point backward. The operator has no agent inbox.
 ### `coterie logs`
 
 ```console
-coterie logs <agent-id-or-name>
+coterie logs <agent-id-or-name> [--session <session-id>] [--after <byte-offset>]
+  [--limit <1..65536>] [--follow]
 ```
 
 Read the latest provider transcript visible to the caller. The operator may
 inspect any agent. An agent may inspect itself and any role allowed by its
-`logs:*` capabilities.
+`logs:*` capabilities. Reads return at most 65,536 bytes by default, plus up to three bytes to keep a
+UTF-8 character whole, with a
+`next_cursor` byte offset, `session_id`, `eof`, `terminal`, and `incomplete_tail`.
+Resume using both the returned session and cursor to avoid switching to a newer
+session. A cursor beyond the file length is refused, including after truncation.
+Incomplete final JSONL frames remain visible as transcript data and do not imply
+success. Invalid UTF-8 is displayed with replacement characters; cursors always
+count stored bytes.
+
+`--follow` pins the first returned session and emits pages until its terminal
+observation and end of file. A terminal page may contain no new bytes. A missing
+transcript at offset zero represents no captured output; `doctor` distinguishes
+missing background output from inherited foreground terminal streams.
 
 ### `coterie events`
 
 ```console
-coterie events [--after <cursor>] [--limit <1..1000>]
+coterie events [--after <cursor>] [--limit <1..1000>] [--follow]
 ```
 
 Read immutable, typed run events in increasing run-local sequence order. The
 cursor defaults to 0, and the limit defaults to 100. Each event carries its
 applicable durable IDs, optional correlation and causation IDs, and a versioned
-payload. Full event-stream inspection is operator-only.
+payload. Pages have a 900 KiB byte budget, so they may contain fewer records
+than the requested limit. Mutations that would create a larger event return
+`invalid_argument` before committing. Older events exceeding this budget are
+returned individually. Each response returns `next_cursor`, which can be passed
+to `--after` to resume without replaying earlier events. Full event-stream
+inspection is operator-only.
+
+`--follow` emits nonempty pages as they become available and drains the stopped
+run through a final empty page before exiting. Operator followers reconnect to
+the same run for up to five seconds after a transient disconnect, without
+starting a supervisor or switching to a replacement run. If shutdown retires
+the socket before the next poll,
+operator followers read final immutable pages from the same stopped run. A
+longer outage returns a diagnostic; resume with the last printed cursor. Agent transcript followers can resume explicitly after a
+disconnect with their session and byte cursor.
 
 ### `coterie stop`
 
@@ -311,15 +368,27 @@ The foreground Codex process inherits the operator's terminal and ambient
 environment. Background Codex jobs start from an empty environment and receive
 only `PATH`, `HOME`, `CODEX_HOME`, and `OPENAI_API_KEY` when present, plus their
 `COTERIE_*` identity values. The raw Coterie token exists only in the session
-environment; the database stores a verifier. Coterie redacts that known token
-from transcripts it controls, but cannot sanitize a provider's separate storage.
+environment; the database stores a verifier. Coterie redacts the known token and passed `OPENAI_API_KEY` from controlled
+transcripts, request text stored in tasks and messages, and diagnostics. Streaming
+redaction retains possible credential prefixes across chunks and conceals an
+unfinished prefix on terminal observation. Token-shaped values are also redacted
+after a restart when the raw token is no longer in memory. Provider-managed
+storage and inherited foreground terminal streams remain outside this filter.
+Runtime directories must be owned by the current user with mode 0700; sockets,
+lease and index files, SQLite files, and transcripts require mode 0600. Coterie
+refuses symlinks, nonregular data files, hard-linked data files, and foreign
+ownership. Existing owned application directories may be tightened at startup;
+`doctor` reports their original permissions without changing them.
 
 ## JSON output
 
 Programmatic commands selected with `--json` emit exactly one compact JSON
-object followed by a newline. A successful response goes to standard output,
+object followed by a newline, except `events --follow` and `logs --follow`, which
+emit one such envelope per page. A successful response goes to standard output,
 and standard error remains empty. A failed response goes to standard error,
-and standard output remains empty. Human-readable diagnostics also go to
+and standard output remains empty for ordinary commands. If a follower fails
+after printing pages, those pages remain on standard output and the final
+diagnostic goes to standard error. Human-readable diagnostics also go to
 standard error, but do not share a stream with successful JSON.
 
 The interactive foreground launch does not accept `--json`, because Codex owns
@@ -366,6 +435,10 @@ uses its operation ID to prepare the durable session, but emits no wrapper
 response while Codex owns the terminal. A programmatic caller retries an
 uncertain mutation with the same ID. Read-only commands neither accept nor
 return an operation ID.
+
+New mutations retain a fingerprint of the original request separately from
+redacted request text, so retries survive provider credential changes. Older
+operation records without a fingerprint retain their stored-request comparison.
 
 An integration retry reuses its original preflight plan. It succeeds
 idempotently if that plan already advanced the target, and it refuses a target

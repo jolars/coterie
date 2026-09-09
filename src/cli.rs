@@ -39,6 +39,8 @@ pub(crate) struct Arguments {
 pub(crate) enum Command {
     /// Inspect the active run, agents, and tasks.
     Status,
+    /// Diagnose runtime ownership and durable state without changing either.
+    Doctor,
     /// Report the authenticated caller's identity.
     Whoami,
     /// Reconstruct the caller's current orchestration context.
@@ -225,6 +227,18 @@ pub(crate) struct InboxAckArguments {
 pub(crate) struct LogsArguments {
     /// An agent ID or run-local agent name.
     pub(crate) agent: String,
+    /// Resume at this byte offset in the transcript.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) after: u64,
+    /// Bound the number of transcript bytes returned per page.
+    #[arg(long, default_value_t = 65536, value_parser = clap::value_parser!(u32).range(1..=65536))]
+    pub(crate) limit: u32,
+    /// Read this session instead of the agent's latest session.
+    #[arg(long)]
+    pub(crate) session: Option<crate::id::SessionId>,
+    /// Follow this session's transcript until its terminal observation.
+    #[arg(long)]
+    pub(crate) follow: bool,
 }
 
 /// Inputs for `events`.
@@ -236,6 +250,9 @@ pub(crate) struct EventsArguments {
     /// Bound the number of returned events.
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
     pub(crate) limit: u16,
+    /// Follow new events, resuming with --after after an interruption.
+    #[arg(long)]
+    pub(crate) follow: bool,
 }
 
 /// The private child-supervisor invocation.
@@ -408,7 +425,7 @@ impl Diagnostic {
     pub(crate) fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
-            message: message.into(),
+            message: crate::redaction::text(&message.into()),
             details: BTreeMap::new(),
             operation_id: None,
         }

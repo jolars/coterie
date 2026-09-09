@@ -1,5 +1,6 @@
 //! SQLite migrations, transactions, operations, messages, and events.
 
+mod diagnostics;
 pub(crate) mod supervision;
 
 #[cfg(test)]
@@ -28,6 +29,8 @@ use crate::providers::LifecycleState;
 use crate::tasks::{TaskReadiness, TaskStatus, TaskTransition};
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+// Leave room for the RPC envelope and page cursor beneath the transport limit.
+const MAXIMUM_EVENT_PAGE_LENGTH: usize = 900 * 1024;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -79,6 +82,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "bounded_supervision",
         sql: include_str!("state/migrations/0009_bounded_supervision.sql"),
     },
+    Migration {
+        version: 10,
+        name: "request_fingerprints",
+        sql: include_str!("state/migrations/0010_request_fingerprints.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -91,6 +99,8 @@ struct Migration {
 /// A failure to open, migrate, or access durable run state.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
+    #[error("event `{id}` exceeds the {maximum}-byte event limit; shorten the request text", maximum = MAXIMUM_EVENT_PAGE_LENGTH)]
+    EventTooLarge { id: EventId },
     /// SQLite rejected an operation.
     #[error("SQLite state error: {0}")]
     Database(#[from] rusqlite::Error),
@@ -634,7 +644,7 @@ pub(crate) struct WorkspaceRecord {
 }
 
 /// One immutable entry in a run's typed event stream.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct EventRecord {
     pub(crate) id: EventId,
     pub(crate) run_id: RunId,
@@ -880,16 +890,38 @@ impl Store {
     where
         T: DeserializeOwned + Serialize,
     {
+        self.mutate_with_fingerprint(mutation, None, apply)
+    }
+
+    /// Compares original request identities independently of stored redacted text.
+    pub(crate) fn mutate_with_fingerprint<T>(
+        &mut self,
+        mutation: &Mutation,
+        request_fingerprint: Option<&str>,
+        apply: impl FnOnce(&Repositories<'_, '_>) -> Result<T, StoreError>,
+    ) -> Result<MutationOutcome<T>, StoreError>
+    where
+        T: DeserializeOwned + Serialize,
+    {
         let transaction = self.connection.transaction()?;
         let repositories = Repositories {
             transaction: &transaction,
         };
 
         if let Some(existing) = repositories.operation(mutation.id)? {
+            let stored_fingerprint: Option<String> = transaction.query_row(
+                "SELECT request_fingerprint FROM operations WHERE id = ?1",
+                [mutation.id],
+                |row| row.get(0),
+            )?;
+            let same_request = match stored_fingerprint.as_deref() {
+                Some(stored) => request_fingerprint == Some(stored),
+                None => existing.request == mutation.request,
+            };
             if existing.run_id != mutation.run_id
                 || existing.kind != mutation.kind
                 || existing.actor_agent_id != mutation.actor_agent_id
-                || existing.request != mutation.request
+                || !same_request
             {
                 return Err(StoreError::OperationConflict { id: mutation.id });
             }
@@ -926,6 +958,10 @@ impl Store {
             updated_at: mutation.created_at,
         })?;
 
+        transaction.execute(
+            "UPDATE operations SET request_fingerprint = ?2 WHERE id = ?1",
+            params![mutation.id, request_fingerprint],
+        )?;
         let result = apply(&repositories)?;
         let encoded = serde_json::to_string(&result)?;
         repositories.transaction.execute(
@@ -964,9 +1000,18 @@ impl Store {
     }
 
     /// Applies a non-claim task transition and replays its durable result.
+    #[cfg(test)]
     pub(crate) fn transition_task(
         &mut self,
         transition: &TaskTransitionMutation,
+    ) -> Result<MutationOutcome<TaskTransitionResult>, StoreError> {
+        self.transition_task_with_fingerprint(transition, None)
+    }
+
+    pub(crate) fn transition_task_with_fingerprint(
+        &mut self,
+        transition: &TaskTransitionMutation,
+        request_fingerprint: Option<&str>,
     ) -> Result<MutationOutcome<TaskTransitionResult>, StoreError> {
         let mutation = Mutation {
             id: transition.operation_id,
@@ -982,26 +1027,33 @@ impl Store {
             created_at: transition.transitioned_at,
         };
 
-        self.mutate(&mutation, |repositories| {
-            let active_claim = repositories
-                .active_claim_for_task(transition.run_id, transition.task_id)?;
-            let active_assignment = repositories.active_assignment_for_task(
-                transition.run_id,
-                transition.task_id,
-            )?;
-            let result = repositories.apply_task_transition(transition)?;
-            if let TaskTransitionResult::Transitioned {
-                previous_status,
-                status,
-            } = result
-            {
-                let task = repositories.task(transition.task_id)?.ok_or_else(
-                    || StoreError::CorruptTaskState {
-                        id: transition.task_id,
-                        reason: "the transitioned task disappeared".to_owned(),
-                    },
+        self.mutate_with_fingerprint(
+            &mutation,
+            request_fingerprint,
+            |repositories| {
+                let active_claim = repositories.active_claim_for_task(
+                    transition.run_id,
+                    transition.task_id,
                 )?;
-                let task_event = repositories.append_event(&NewEvent {
+                let active_assignment = repositories
+                    .active_assignment_for_task(
+                        transition.run_id,
+                        transition.task_id,
+                    )?;
+                let result = repositories.apply_task_transition(transition)?;
+                if let TaskTransitionResult::Transitioned {
+                    previous_status,
+                    status,
+                } = result
+                {
+                    let task = repositories
+                        .task(transition.task_id)?
+                        .ok_or_else(|| StoreError::CorruptTaskState {
+                            id: transition.task_id,
+                            reason: "the transitioned task disappeared"
+                                .to_owned(),
+                        })?;
+                    let task_event = repositories.append_event(&NewEvent {
                     run_id: transition.run_id,
                     kind: EventKind::TaskLifecycleChanged,
                     actor: mutation_actor(transition.actor_agent_id),
@@ -1023,73 +1075,76 @@ impl Store {
                     ),
                     created_at: transition.transitioned_at,
                 })?;
-                if previous_status == TaskStatus::InProgress {
-                    let assignment = active_assignment.ok_or_else(|| {
-                        StoreError::CorruptTaskState {
+                    if previous_status == TaskStatus::InProgress {
+                        let assignment =
+                            active_assignment.ok_or_else(|| {
+                                StoreError::CorruptTaskState {
                             id: transition.task_id,
                             reason:
                                 "the transitioned task had no active assignment"
                                     .to_owned(),
                         }
-                    })?;
-                    let claim = active_claim.ok_or_else(|| {
-                        StoreError::CorruptTaskState {
-                            id: transition.task_id,
-                            reason: "the transitioned task had no active claim"
-                                .to_owned(),
-                        }
-                    })?;
-                    let assignment_state = match transition.transition {
-                        TaskTransition::Reopen => "released",
-                        TaskTransition::Submit => "completed",
-                        TaskTransition::Cancel => "canceled",
-                        TaskTransition::Close => unreachable!(
-                            "an in-progress task cannot close directly"
-                        ),
-                    };
-                    repositories.append_event(&NewEvent {
-                        run_id: transition.run_id,
-                        kind: EventKind::AssignmentLifecycleChanged,
-                        actor: mutation_actor(transition.actor_agent_id),
-                        subject: assignment.id.to_string(),
-                        project_id: Some(task.project_id),
-                        agent_id: Some(assignment.agent_id),
-                        task_id: Some(transition.task_id),
-                        operation_id: Some(transition.operation_id),
-                        correlation_id: Some(task_event.id),
-                        causation_id: Some(task_event.id),
-                        data: json!({
-                            "previous_state": assignment.state,
-                            "state": assignment_state,
-                        }),
-                        summary: format!(
-                            "Assignment {} changed to {assignment_state}.",
-                            assignment.id
-                        ),
-                        created_at: transition.transitioned_at,
-                    })?;
-                    repositories.append_event(&NewEvent {
-                        run_id: transition.run_id,
-                        kind: EventKind::ClaimReleased,
-                        actor: mutation_actor(transition.actor_agent_id),
-                        subject: transition.task_id.to_string(),
-                        project_id: Some(task.project_id),
-                        agent_id: Some(claim.agent_id),
-                        task_id: Some(transition.task_id),
-                        operation_id: Some(transition.operation_id),
-                        correlation_id: Some(task_event.id),
-                        causation_id: Some(task_event.id),
-                        data: json!({"claim_id": claim.id}),
-                        summary: format!(
-                            "Released the claim on task {}.",
-                            transition.task_id
-                        ),
-                        created_at: transition.transitioned_at,
-                    })?;
+                            })?;
+                        let claim = active_claim.ok_or_else(|| {
+                            StoreError::CorruptTaskState {
+                                id: transition.task_id,
+                                reason:
+                                    "the transitioned task had no active claim"
+                                        .to_owned(),
+                            }
+                        })?;
+                        let assignment_state = match transition.transition {
+                            TaskTransition::Reopen => "released",
+                            TaskTransition::Submit => "completed",
+                            TaskTransition::Cancel => "canceled",
+                            TaskTransition::Close => unreachable!(
+                                "an in-progress task cannot close directly"
+                            ),
+                        };
+                        repositories.append_event(&NewEvent {
+                            run_id: transition.run_id,
+                            kind: EventKind::AssignmentLifecycleChanged,
+                            actor: mutation_actor(transition.actor_agent_id),
+                            subject: assignment.id.to_string(),
+                            project_id: Some(task.project_id),
+                            agent_id: Some(assignment.agent_id),
+                            task_id: Some(transition.task_id),
+                            operation_id: Some(transition.operation_id),
+                            correlation_id: Some(task_event.id),
+                            causation_id: Some(task_event.id),
+                            data: json!({
+                                "previous_state": assignment.state,
+                                "state": assignment_state,
+                            }),
+                            summary: format!(
+                                "Assignment {} changed to {assignment_state}.",
+                                assignment.id
+                            ),
+                            created_at: transition.transitioned_at,
+                        })?;
+                        repositories.append_event(&NewEvent {
+                            run_id: transition.run_id,
+                            kind: EventKind::ClaimReleased,
+                            actor: mutation_actor(transition.actor_agent_id),
+                            subject: transition.task_id.to_string(),
+                            project_id: Some(task.project_id),
+                            agent_id: Some(claim.agent_id),
+                            task_id: Some(transition.task_id),
+                            operation_id: Some(transition.operation_id),
+                            correlation_id: Some(task_event.id),
+                            causation_id: Some(task_event.id),
+                            data: json!({"claim_id": claim.id}),
+                            summary: format!(
+                                "Released the claim on task {}.",
+                                transition.task_id
+                            ),
+                            created_at: transition.transitioned_at,
+                        })?;
+                    }
                 }
-            }
-            Ok(result)
-        })
+                Ok(result)
+            },
+        )
     }
 
     /// Explicitly acknowledges a recipient-local cursor without allowing regressions.
@@ -2457,6 +2512,8 @@ impl Repositories<'_, '_> {
         error: Option<&str>,
         reconciled_at: i64,
     ) -> Result<ResourceTransitionOutcome, StoreError> {
+        let redacted_error = error.map(crate::redaction::text);
+        let error = redacted_error.as_deref();
         let Some(operation) = self.operation(operation_id)? else {
             return Ok(ResourceTransitionOutcome::Stale);
         };
@@ -3435,6 +3492,9 @@ impl Repositories<'_, '_> {
         &self,
         event: &EventRecord,
     ) -> Result<(), StoreError> {
+        if serde_json::to_vec(event)?.len() > MAXIMUM_EVENT_PAGE_LENGTH {
+            return Err(StoreError::EventTooLarge { id: event.id });
+        }
         let payload = serde_json::to_string(&event.payload)?;
         self.transaction.execute(
             "INSERT INTO events (\
@@ -3567,7 +3627,20 @@ impl Repositories<'_, '_> {
                     created_at: row.get(14)?,
                 })
             })?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut events = Vec::new();
+        let mut length = 0;
+        for event in rows {
+            let event = event?;
+            let size = serde_json::to_vec(&event)?.len();
+            // Older writers accepted larger records. Return those alone so
+            // readers can advance without discarding an immutable event.
+            if !events.is_empty() && length + size > MAXIMUM_EVENT_PAGE_LENGTH {
+                break;
+            }
+            length += size;
+            events.push(event);
+        }
+        Ok(events)
     }
 }
 
@@ -5133,6 +5206,15 @@ mod tests {
                     |row| row.get::<_, i64>(0),
                 )
                 .expect("the migration ledger should be readable");
+            let request_fingerprint: Option<String> = store
+                .connection
+                .query_row(
+                    "SELECT request_fingerprint FROM operations WHERE id = ?1",
+                    [OPERATION_ID],
+                    |row| row.get(0),
+                )
+                .expect("the fingerprint column should exist after upgrade");
+            assert!(request_fingerprint.is_none());
             let credential_table = store
                 .connection
                 .query_row(

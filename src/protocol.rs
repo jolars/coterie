@@ -14,7 +14,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 3;
+pub(crate) const PROTOCOL_VERSION: u16 = 4;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -93,6 +93,7 @@ pub(crate) enum RpcRequest {
         scope: crate::auth::SessionScope,
     },
     Status,
+    Doctor,
     Whoami,
     Prime,
     TaskCreate {
@@ -137,6 +138,9 @@ pub(crate) enum RpcRequest {
     },
     Logs {
         agent: String,
+        after: u64,
+        limit: u32,
+        session_id: Option<SessionId>,
     },
     Events {
         after: u64,
@@ -219,6 +223,9 @@ pub(crate) enum RpcResponse {
         agents: Vec<AgentSummary>,
         tasks: TaskCounts,
     },
+    Doctor {
+        report: crate::doctor::DoctorReport,
+    },
     Identity {
         run_id: RunId,
         channel: CallerChannel,
@@ -279,6 +286,10 @@ pub(crate) enum RpcResponse {
         agent: AgentSummary,
         session_id: SessionId,
         transcript: String,
+        next_cursor: u64,
+        eof: bool,
+        terminal: bool,
+        incomplete_tail: bool,
     },
     Events {
         events: Vec<EventSummary>,
@@ -409,7 +420,7 @@ impl RpcFailure {
     ) -> Self {
         Self {
             code,
-            message: message.into(),
+            message: crate::redaction::text(&message.into()),
         }
     }
 }
@@ -525,7 +536,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 3,
+                    "protocol_version": 4,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -638,7 +649,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 3,
+                    "protocol_version": 4,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

@@ -497,7 +497,9 @@ commits, summary, and test outcome---to downstream agents through
 
 The store uses foreign keys, explicit schema migrations, bounded busy timeouts,
 and WAL mode where the platform supports it. Every mutating RPC accepts an
-operation ID so retries are idempotent.
+operation ID so retries are idempotent. Requests containing redactable text
+store a fingerprint of the original typed request separately from the redacted
+text. Credential changes do not change the identity of a recorded retry.
 
 Database transactions cannot include process or filesystem side effects.
 Operations that attach a project, create or integrate a worktree, or launch a
@@ -871,7 +873,25 @@ schema accidentally.
 `coterie doctor` checks at least supervisor reachability, database migrations,
 configuration and lock compatibility, provider versions and capabilities,
 abandoned operations, stale assignments, task cycles, transcript accessibility,
-and worktree ownership.
+and worktree ownership. Inspection is read-only, including when the supervisor
+is unreachable: an offline reader may open an existing private database without
+migrations or mutations. It reports unverified external configuration and lock
+compatibility until M5 implements those layers. Recovery remains the existing
+lease-protected startup and desired-state reconciliation path. An indexed run
+must have a matching durable database; a responsive socket or ambiguous file
+ownership is never discarded as stale.
+
+Event following emits bounded pages with sequence cursors. New events must fit
+the 900 KiB page budget before their mutations commit. Older, larger events are
+returned individually so readers can advance past them. Operator followers
+reconnect only to the same run, and may read its immutable final pages after
+shutdown retires the socket, draining all events through the final empty page.
+Transcript pages use session IDs and byte cursors, keep UTF-8 characters whole
+where possible, and preserve incomplete final JSONL
+frames as data. Streaming redaction retains possible credential prefixes between
+chunks, conceals interrupted prefixes, and filters known provider credentials
+and Coterie tokens before controlled storage. Runtime checks validate ownership,
+private modes, and file types, refusing symlinked and hard-linked data files.
 
 ## Trust and permission model
 

@@ -1,5 +1,6 @@
 //! Desired-state reconciliation and process ownership.
 
+mod doctor;
 mod session;
 
 use std::collections::BTreeMap;
@@ -10,7 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -173,7 +174,15 @@ pub(crate) async fn run(
             .await
             .map_err(|error| error.for_operation(operation_id))
         }
+        Some(CliCommand::Doctor) => {
+            if foreground_operation_id.is_some() {
+                return Err(SupervisorError::ForegroundOperationIdWithCommand);
+            }
+            doctor::run(json_output).await
+        }
         Some(command) => {
+            let follow = matches!(&command, CliCommand::Events(args) if args.follow)
+                || matches!(&command, CliCommand::Logs(args) if args.follow);
             if foreground_operation_id.is_some() {
                 return Err(SupervisorError::ForegroundOperationIdWithCommand);
             }
@@ -201,6 +210,15 @@ pub(crate) async fn run(
                         .map_err(|error| command_error(error, operation_id))?;
                 (client, Some((project, directories, entry)))
             };
+            if follow {
+                return follow_output(
+                    &mut client,
+                    operator_context.as_ref(),
+                    request,
+                    json_output,
+                )
+                .await;
+            }
             let response = client
                 .request(request)
                 .await
@@ -229,6 +247,182 @@ fn command_error(
     match operation_id {
         Some(operation_id) => error.for_operation(operation_id),
         None => error,
+    }
+}
+
+async fn follow_output(
+    client: &mut SupervisorClient,
+    context: Option<&(DiscoveredProject, CoterieDirectories, ActiveRunEntry)>,
+    mut request: RpcRequest,
+    json_output: bool,
+) -> Result<crate::cli::ExitCategory, SupervisorError> {
+    let mut stopped = false;
+    loop {
+        let response = match client.request(request.clone()).await {
+            Ok(response) => response,
+            Err(error)
+                if error.is_transient_connection_failure()
+                    && context.is_some() =>
+            {
+                let context = context.expect("operator context was checked");
+                let (_, directories, entry) = context;
+                let deadline = Instant::now() + STARTUP_TIMEOUT;
+                loop {
+                    if let Some(response) =
+                        stopped_stream_page(context, &request)?
+                    {
+                        stopped = true;
+                        break response;
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                    let result = match SupervisorClient::connect_operator_at(
+                        &directories.socket_path(entry.run_id),
+                        entry,
+                    )
+                    .await
+                    {
+                        Ok(reconnected) => {
+                            *client = reconnected;
+                            client.request(request.clone()).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    match result {
+                        Ok(response) => break response,
+                        Err(error)
+                            if error.is_transient_connection_failure()
+                                && Instant::now() < deadline => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        let (empty, done, caught_up) = match (&mut request, &response) {
+            (
+                RpcRequest::Events { after, .. },
+                RpcResponse::Events {
+                    events,
+                    next_cursor,
+                },
+            ) => {
+                *after = *next_cursor;
+                stopped |= events
+                    .iter()
+                    .any(|event| event.event_type == "run.stopped");
+                (
+                    events.is_empty(),
+                    stopped && events.is_empty(),
+                    events.is_empty(),
+                )
+            }
+            (
+                RpcRequest::Logs {
+                    after, session_id, ..
+                },
+                RpcResponse::Logs {
+                    session_id: observed,
+                    next_cursor,
+                    eof,
+                    terminal,
+                    transcript,
+                    ..
+                },
+            ) => {
+                *after = *next_cursor;
+                *session_id = Some(*observed);
+                (transcript.is_empty(), *eof && *terminal, *eof)
+            }
+            _ => {
+                return Err(SupervisorError::UnexpectedMessage {
+                    expected: "a matching stream page",
+                });
+            }
+        };
+        if !empty || done {
+            render_public_response(json_output, None, &response)?;
+        }
+        if done {
+            return Ok(crate::cli::ExitCategory::Success);
+        }
+        if caught_up {
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+fn stopped_stream_page(
+    context: &(DiscoveredProject, CoterieDirectories, ActiveRunEntry),
+    request: &RpcRequest,
+) -> Result<Option<RpcResponse>, SupervisorError> {
+    let (project, directories, entry) = context;
+    let root = directories.runs.join(entry.run_id.to_string());
+    let database = root.join(DATABASE_FILE);
+    for path in directories
+        .inspection_directories()
+        .into_iter()
+        .chain([root.as_path()])
+    {
+        crate::private_fs::check_directory(path).map_err(|source| {
+            SupervisorError::StateFileIo {
+                action: "inspect",
+                path: path.to_owned(),
+                source,
+            }
+        })?;
+    }
+    crate::private_fs::database(&database, false).map_err(|source| {
+        SupervisorError::StateFileIo {
+            action: "inspect",
+            path: database.clone(),
+            source,
+        }
+    })?;
+    let mut store = Store::open_read_only(&database)?;
+    let stopped = store.transaction(|repositories| {
+        Ok(repositories
+            .run(entry.run_id)?
+            .is_some_and(|run| run.status == "stopped")
+            && repositories
+                .project(entry.project_id)?
+                .is_some_and(|stored| {
+                    stored.run_id == entry.run_id
+                        && stored.identity == project.identity
+                }))
+    })?;
+    if !stopped {
+        return Ok(None);
+    }
+    // Shutdown can retire the socket before the next poll; immutable final pages
+    // remain readable from this exact run without starting a replacement supervisor.
+    match request {
+        RpcRequest::Events { after, limit } => events(
+            &mut store,
+            entry.run_id,
+            &AuthenticatedCaller::Operator,
+            *after,
+            *limit,
+        )
+        .map(Some)
+        .map_err(Into::into),
+        RpcRequest::Logs {
+            agent,
+            after,
+            limit,
+            session_id,
+        } => logs(
+            &mut store,
+            &root,
+            entry.run_id,
+            &AuthenticatedCaller::Operator,
+            agent,
+            *after,
+            *limit,
+            *session_id,
+        )
+        .map(Some)
+        .map_err(Into::into),
+        _ => Ok(None),
     }
 }
 
@@ -575,6 +769,7 @@ fn public_request(
 ) -> (RpcRequest, Option<OperationId>, bool) {
     match command {
         CliCommand::Status => (RpcRequest::Status, None, false),
+        CliCommand::Doctor => unreachable!("doctor is dispatched locally"),
         CliCommand::Whoami => (RpcRequest::Whoami, None, false),
         CliCommand::Prime => (RpcRequest::Prime, None, false),
         CliCommand::Task(arguments) => match arguments.command {
@@ -706,6 +901,9 @@ fn public_request(
         CliCommand::Logs(arguments) => (
             RpcRequest::Logs {
                 agent: arguments.agent,
+                after: arguments.after,
+                limit: arguments.limit,
+                session_id: arguments.session,
             },
             None,
             false,
@@ -818,6 +1016,36 @@ pub(crate) async fn connect_or_start(
         }
     }
 
+    if let Some(entry) = &indexed {
+        let root = directories.runs.join(entry.run_id.to_string());
+        let path = root.join(DATABASE_FILE);
+        crate::private_fs::check_directory(&root)
+            .and_then(|()| {
+                crate::private_fs::database(&path, false).map(|_| ())
+            })
+            .map_err(|source| SupervisorError::StateFileIo {
+                action: "validate indexed",
+                path: path.clone(),
+                source,
+            })?;
+        let mut store = Store::open_read_only(&path)?;
+        if !store.transaction(|repositories| {
+            Ok(repositories.run(entry.run_id)?.is_some()
+                && repositories.project(entry.project_id)?.is_some_and(
+                    |stored| {
+                        stored.run_id == entry.run_id
+                            && stored.identity == project.identity
+                            && stored.canonical_path == project.canonical_path
+                            && stored.is_primary
+                    },
+                ))
+        })? {
+            return Err(SupervisorError::RunStateMismatch {
+                run_id: entry.run_id,
+                project_id: entry.project_id,
+            });
+        }
+    }
     let candidate = indexed.unwrap_or_else(|| {
         ActiveRunEntry::new(
             RunId::generate(),
@@ -968,12 +1196,12 @@ async fn serve(
             .run(active.run_id)?
             .is_some_and(|run| run.status == "stopped"))
     })? {
-        remove_stale_socket(&socket_path)?;
+        remove_stale_socket(&socket_path).await?;
         ActiveRunIndex::new(&directories)
             .retire(&project.identity, active.run_id)?;
         return Ok(());
     }
-    remove_stale_socket(&socket_path)?;
+    remove_stale_socket(&socket_path).await?;
     let listener = UnixListener::bind(&socket_path).map_err(|source| {
         SupervisorError::SocketIo {
             action: "bind",
@@ -2061,6 +2289,36 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             "the run is draining and no longer accepts launches",
         ));
     }
+    use sha2::{Digest, Sha256};
+
+    let request_fingerprint = Sha256::digest(
+        serde_json::to_vec(&request)
+            .map_err(|error| rpc_state_failure(error.into()))?,
+    )
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect::<String>();
+    let mut request = request;
+    match &mut request {
+        RpcRequest::TaskCreate {
+            title,
+            description,
+            group,
+            ..
+        } => {
+            *title = crate::redaction::text(title);
+            *description = crate::redaction::text(description);
+            *group = group.as_deref().map(crate::redaction::text);
+        }
+        RpcRequest::TaskClose { summary, .. }
+        | RpcRequest::Finish { summary, .. } => {
+            *summary = crate::redaction::text(summary)
+        }
+        RpcRequest::Send { message, .. } => {
+            *message = crate::redaction::text(message)
+        }
+        _ => (),
+    }
     match request {
         RpcRequest::Ping => Ok(RpcResponse::Pong { run_id }),
         RpcRequest::LaunchForeground {
@@ -2103,6 +2361,16 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
                 ForegroundEnd::ObservationLost,
             )
         }
+        RpcRequest::Doctor => {
+            require_operator(caller, "only the operator can diagnose the run")?;
+            let report = crate::doctor::inspect_store(
+                store,
+                run_id,
+                paths.run_state_directory,
+            )
+            .map_err(rpc_state_failure)?;
+            Ok(RpcResponse::Doctor { report })
+        }
         RpcRequest::Status => status(store, run_id, caller),
         RpcRequest::Whoami => whoami(store, run_id, caller),
         RpcRequest::Prime => prime(store, run_id, caller),
@@ -2123,13 +2391,22 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             project,
             group,
             dependencies,
+            Some(&request_fingerprint),
         ),
         RpcRequest::TaskReady => ready_tasks(store, run_id, caller),
         RpcRequest::TaskClose {
             operation_id,
             task_id,
             summary,
-        } => close_task(store, run_id, caller, operation_id, task_id, summary),
+        } => close_task(
+            store,
+            run_id,
+            caller,
+            operation_id,
+            task_id,
+            summary,
+            Some(&request_fingerprint),
+        ),
         RpcRequest::Spawn {
             operation_id,
             role,
@@ -2171,6 +2448,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             operation_id,
             status,
             summary,
+            Some(&request_fingerprint),
         ),
         RpcRequest::Send {
             operation_id,
@@ -2183,15 +2461,28 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             operation_id,
             recipient,
             message,
+            Some(&request_fingerprint),
         ),
         RpcRequest::Inbox { after } => inbox(store, run_id, caller, after),
         RpcRequest::InboxAcknowledge {
             operation_id,
             through,
         } => acknowledge_inbox(store, run_id, caller, operation_id, through),
-        RpcRequest::Logs { agent } => {
-            logs(store, paths.run_state_directory, run_id, caller, &agent)
-        }
+        RpcRequest::Logs {
+            agent,
+            after,
+            limit,
+            session_id,
+        } => logs(
+            store,
+            paths.run_state_directory,
+            run_id,
+            caller,
+            &agent,
+            after,
+            limit,
+            session_id,
+        ),
         RpcRequest::Events { after, limit } => {
             events(store, run_id, caller, after, limit)
         }
@@ -2911,6 +3202,7 @@ fn create_task(
     project_alias: String,
     group: Option<String>,
     dependencies: Vec<TaskId>,
+    request_fingerprint: Option<&str>,
 ) -> Result<RpcResponse, RpcFailure> {
     require_capability(store, run_id, caller, "task", "create")?;
     if title.trim().is_empty() {
@@ -2948,74 +3240,79 @@ fn create_task(
         created_at: now,
     };
     let outcome = store
-        .mutate(&mutation, |repositories| {
-            for dependency_id in &dependencies {
-                let dependency = repositories.task(*dependency_id)?;
-                if !dependency.is_some_and(|task| task.run_id == run_id) {
-                    return Err(StoreError::CorruptTaskState {
-                        id: *dependency_id,
-                        reason: "a requested dependency is not in this run"
-                            .to_owned(),
-                    });
+        .mutate_with_fingerprint(
+            &mutation,
+            request_fingerprint,
+            |repositories| {
+                for dependency_id in &dependencies {
+                    let dependency = repositories.task(*dependency_id)?;
+                    if !dependency.is_some_and(|task| task.run_id == run_id) {
+                        return Err(StoreError::CorruptTaskState {
+                            id: *dependency_id,
+                            reason: "a requested dependency is not in this run"
+                                .to_owned(),
+                        });
+                    }
                 }
-            }
-            let group_id = if let Some(name) = group.as_deref() {
-                Some(
-                    repositories
-                        .task_group_by_name(run_id, name)?
-                        .map_or_else(
-                            || {
-                                repositories
-                                    .insert_named_task_group(run_id, name, now)
-                            },
-                            |group| Ok(group.id),
-                        )?,
-                )
-            } else {
-                None
-            };
-            repositories.insert_task(&TaskRecord {
-                id: task_id,
-                run_id,
-                project_id: project.id,
-                group_id,
-                title: title.clone(),
-                description: description.clone(),
-                status: TaskStatus::Open,
-                result: None,
-                created_at: now,
-                updated_at: now,
-            })?;
-            for dependency_task_id in &dependencies {
-                repositories.insert_dependency(&DependencyRecord {
+                let group_id = if let Some(name) = group.as_deref() {
+                    Some(
+                        repositories
+                            .task_group_by_name(run_id, name)?
+                            .map_or_else(
+                                || {
+                                    repositories.insert_named_task_group(
+                                        run_id, name, now,
+                                    )
+                                },
+                                |group| Ok(group.id),
+                            )?,
+                    )
+                } else {
+                    None
+                };
+                repositories.insert_task(&TaskRecord {
+                    id: task_id,
                     run_id,
-                    task_id,
-                    dependency_task_id: *dependency_task_id,
+                    project_id: project.id,
+                    group_id,
+                    title: title.clone(),
+                    description: description.clone(),
+                    status: TaskStatus::Open,
+                    result: None,
+                    created_at: now,
+                    updated_at: now,
+                })?;
+                for dependency_task_id in &dependencies {
+                    repositories.insert_dependency(&DependencyRecord {
+                        run_id,
+                        task_id,
+                        dependency_task_id: *dependency_task_id,
+                        created_at: now,
+                    })?;
+                }
+                repositories.append_event(&NewEvent {
+                    run_id,
+                    kind: EventKind::TaskCreated,
+                    actor: event_actor(caller),
+                    subject: task_id.to_string(),
+                    project_id: Some(project.id),
+                    agent_id: actor_agent_id,
+                    task_id: Some(task_id),
+                    operation_id: Some(operation_id),
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "dependencies": dependencies,
+                        "group": group,
+                        "status": TaskStatus::Open,
+                        "title": title,
+                    }),
+                    summary: format!("Created task {task_id}."),
                     created_at: now,
                 })?;
-            }
-            repositories.append_event(&NewEvent {
-                run_id,
-                kind: EventKind::TaskCreated,
-                actor: event_actor(caller),
-                subject: task_id.to_string(),
-                project_id: Some(project.id),
-                agent_id: actor_agent_id,
-                task_id: Some(task_id),
-                operation_id: Some(operation_id),
-                correlation_id: None,
-                causation_id: None,
-                data: json!({
-                    "dependencies": dependencies,
-                    "group": group,
-                    "status": TaskStatus::Open,
-                    "title": title,
-                }),
-                summary: format!("Created task {task_id}."),
-                created_at: now,
-            })?;
-            Ok(task_id)
-        })
+                Ok(task_id)
+            },
+        )
         .map_err(|error| match error {
             StoreError::CorruptTaskState { id, .. }
                 if dependencies.contains(&id) =>
@@ -3057,6 +3354,7 @@ fn close_task(
     operation_id: OperationId,
     task_id: TaskId,
     summary: String,
+    request_fingerprint: Option<&str>,
 ) -> Result<RpcResponse, RpcFailure> {
     require_capability(store, run_id, caller, "task", "close")?;
     if summary.trim().is_empty() {
@@ -3137,7 +3435,7 @@ fn close_task(
     };
     let result = mutation_value(
         store
-            .transition_task(&transition)
+            .transition_task_with_fingerprint(&transition, request_fingerprint)
             .map_err(rpc_state_failure)?,
     );
     require_transition(result, task_id, "close")?;
@@ -3581,6 +3879,7 @@ fn complete_spawn_operation<P: Provider, B: WorkspaceBackend>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_assignment<B: WorkspaceBackend>(
     store: &mut Store,
     workspaces: &WorkspaceSupervisor<B>,
@@ -3589,6 +3888,7 @@ fn finish_assignment<B: WorkspaceBackend>(
     operation_id: OperationId,
     status: FinishStatus,
     summary: String,
+    request_fingerprint: Option<&str>,
 ) -> Result<RpcResponse, RpcFailure> {
     let agent_id = caller.agent_id().ok_or_else(|| {
         RpcFailure::new(
@@ -3682,7 +3982,10 @@ fn finish_assignment<B: WorkspaceBackend>(
     };
     let result = mutation_value(
         store
-            .transition_task(&task_transition)
+            .transition_task_with_fingerprint(
+                &task_transition,
+                request_fingerprint,
+            )
             .map_err(rpc_state_failure)?,
     );
     require_transition(result, assignment.task_id, "finish")?;
@@ -3866,6 +4169,7 @@ fn send_message(
     operation_id: OperationId,
     recipient: String,
     message: String,
+    request_fingerprint: Option<&str>,
 ) -> Result<RpcResponse, RpcFailure> {
     if message.trim().is_empty() {
         return Err(invalid_argument("message cannot be empty"));
@@ -3899,46 +4203,50 @@ fn send_message(
         created_at: now,
     };
     let outcome = store
-        .mutate(&mutation, |repositories| {
-            let sequence =
-                repositories.next_message_sequence(run_id, recipient.id)?;
-            repositories.insert_message(&MessageRecord {
-                id: message_id,
-                run_id,
-                sender_agent_id: caller.agent_id(),
-                recipient_agent_id: recipient.id,
-                sequence,
-                body: message.clone(),
-                created_at: now,
-                acknowledged_at: None,
-            })?;
-            repositories.append_event(&NewEvent {
-                run_id,
-                kind: EventKind::MessageSent,
-                actor: event_actor(caller),
-                subject: message_id.to_string(),
-                project_id: None,
-                agent_id: Some(recipient.id),
-                task_id: None,
-                operation_id: Some(operation_id),
-                correlation_id: None,
-                causation_id: None,
-                data: json!({
-                    "recipient_agent_id": recipient.id,
-                    "sender_agent_id": caller.agent_id(),
-                    "sequence": sequence,
-                }),
-                summary: format!(
-                    "Persisted message {message_id} for {}.",
-                    recipient.name
-                ),
-                created_at: now,
-            })?;
-            Ok(MessageIntent {
-                message_id,
-                sequence,
-            })
-        })
+        .mutate_with_fingerprint(
+            &mutation,
+            request_fingerprint,
+            |repositories| {
+                let sequence =
+                    repositories.next_message_sequence(run_id, recipient.id)?;
+                repositories.insert_message(&MessageRecord {
+                    id: message_id,
+                    run_id,
+                    sender_agent_id: caller.agent_id(),
+                    recipient_agent_id: recipient.id,
+                    sequence,
+                    body: message.clone(),
+                    created_at: now,
+                    acknowledged_at: None,
+                })?;
+                repositories.append_event(&NewEvent {
+                    run_id,
+                    kind: EventKind::MessageSent,
+                    actor: event_actor(caller),
+                    subject: message_id.to_string(),
+                    project_id: None,
+                    agent_id: Some(recipient.id),
+                    task_id: None,
+                    operation_id: Some(operation_id),
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "recipient_agent_id": recipient.id,
+                        "sender_agent_id": caller.agent_id(),
+                        "sequence": sequence,
+                    }),
+                    summary: format!(
+                        "Persisted message {message_id} for {}.",
+                        recipient.name
+                    ),
+                    created_at: now,
+                })?;
+                Ok(MessageIntent {
+                    message_id,
+                    sequence,
+                })
+            },
+        )
         .map_err(rpc_state_failure)?;
     let intent = mutation_value(outcome);
     Ok(RpcResponse::MessageSent {
@@ -4057,46 +4365,57 @@ fn acknowledge_inbox(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn logs(
     store: &mut Store,
     run_state_directory: &Path,
     run_id: RunId,
     caller: &AuthenticatedCaller,
     agent_name: &str,
+    after: u64,
+    limit: u32,
+    session_id: Option<SessionId>,
 ) -> Result<RpcResponse, RpcFailure> {
     let agent = resolve_agent(store, run_id, agent_name)?;
     if caller.agent_id() != Some(agent.id) {
         require_capability(store, run_id, caller, "logs", &agent.role)?;
     }
     let session = store
-        .transaction(|repositories| {
-            repositories.latest_session_for_agent(run_id, agent.id)
+        .transaction(|repositories| match session_id {
+            Some(id) => repositories.session(id),
+            None => repositories.latest_session_for_agent(run_id, agent.id),
         })
         .map_err(rpc_state_failure)?
+        .filter(|session| {
+            session.run_id == run_id && session.agent_id == agent.id
+        })
         .ok_or_else(|| {
-            not_found(format!("agent `{}` has no session", agent.name))
+            not_found(format!("agent `{}` has no matching session", agent.name))
         })?;
-    if !safe_relative_path(&session.transcript_path) {
+    if session.transcript_path != TranscriptStore::relative_path(session.id) {
         return Err(RpcFailure::new(
             RpcFailureCode::Internal,
-            "stored transcript path is not a safe run-relative path",
+            "stored transcript path does not match its session",
         ));
     }
-    let path = run_state_directory.join(&session.transcript_path);
-    let transcript = match fs::read(&path) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-        Err(error) => {
-            return Err(RpcFailure::new(
-                RpcFailureCode::Internal,
-                format!("could not read provider transcript: {error}"),
-            ));
-        }
-    };
+    let mut page = TranscriptStore::new(run_state_directory)
+        .read(session.id, after, limit)
+        .map_err(|error| invalid_argument(error.to_string()))?;
+    if !session.state.is_terminal()
+        && let Err(error) = std::str::from_utf8(&page.bytes)
+        && error.error_len().is_none()
+    {
+        page.bytes.truncate(error.valid_up_to());
+        page.next_cursor = after + page.bytes.len() as u64;
+    }
     Ok(RpcResponse::Logs {
         agent,
         session_id: session.id,
-        transcript,
+        transcript: String::from_utf8_lossy(&page.bytes).into_owned(),
+        next_cursor: page.next_cursor,
+        eof: page.eof,
+        terminal: session.state.is_terminal(),
+        incomplete_tail: page.incomplete_tail,
     })
 }
 
@@ -4111,6 +4430,9 @@ fn events(
         caller,
         "only the operator can inspect the full event stream",
     )?;
+    if !(1..=1000).contains(&limit) {
+        return Err(invalid_argument("event limit must be between 1 and 1000"));
+    }
     let after = i64::try_from(after)
         .map_err(|_| invalid_argument("event cursor is too large"))?;
     let events = store
@@ -4427,14 +4749,6 @@ fn event_actor(caller: &AuthenticatedCaller) -> String {
         .map_or_else(|| "operator".to_owned(), |id| id.to_string())
 }
 
-fn safe_relative_path(path: &Path) -> bool {
-    !path.as_os_str().is_empty()
-        && !path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-}
-
 fn require_transition(
     result: TaskTransitionResult,
     task_id: TaskId,
@@ -4579,6 +4893,7 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         | StoreError::WorkspaceTargetConflict { .. } => {
             RpcFailureCode::Conflict
         }
+        StoreError::EventTooLarge { .. } => RpcFailureCode::InvalidArgument,
         StoreError::Database(_)
         | StoreError::EncodeJson(_)
         | StoreError::ModifiedMigration { .. }
@@ -4720,6 +5035,13 @@ fn initialize_store(
     project: &DiscoveredProject,
 ) -> Result<Store, SupervisorError> {
     let database_path = run_state_directory.join(DATABASE_FILE);
+    let _file = crate::private_fs::database(&database_path, true).map_err(
+        |source| SupervisorError::StateFileIo {
+            action: "validate",
+            path: database_path.clone(),
+            source,
+        },
+    )?;
     let mut store = Store::open(&database_path)?;
     fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600))
         .map_err(|source| SupervisorError::StateFileIo {
@@ -4824,9 +5146,34 @@ fn unix_timestamp() -> Result<i64, SupervisorError> {
         .map_err(|_| SupervisorError::TimestampOverflow)
 }
 
-fn remove_stale_socket(path: &Path) -> Result<(), SupervisorError> {
+async fn remove_stale_socket(path: &Path) -> Result<(), SupervisorError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => {
+            crate::private_fs::check_socket(path).map_err(|source| {
+                SupervisorError::SocketIo {
+                    action: "validate stale",
+                    path: path.to_owned(),
+                    source,
+                }
+            })?;
+            match tokio::time::timeout(
+                STARTUP_TIMEOUT,
+                UnixStream::connect(path),
+            )
+            .await
+            {
+                Ok(Err(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound
+                            | io::ErrorKind::ConnectionRefused
+                    ) => {}
+                _ => {
+                    return Err(SupervisorError::UnsafeSocketPath {
+                        path: path.to_owned(),
+                    });
+                }
+            }
             fs::remove_file(path).map_err(|source| SupervisorError::SocketIo {
                 action: "remove stale",
                 path: path.to_owned(),
@@ -4952,6 +5299,15 @@ impl SupervisorClient {
         channel: ConnectionChannel,
         authentication: RequestAuthentication,
     ) -> Result<Self, SupervisorError> {
+        crate::private_fs::check_directory(
+            socket_path.parent().ok_or(SupervisorError::InvalidProof)?,
+        )
+        .and_then(|()| crate::private_fs::check_socket(socket_path))
+        .map_err(|source| SupervisorError::SocketIo {
+            action: "validate",
+            path: socket_path.to_owned(),
+            source,
+        })?;
         let mut stream =
             UnixStream::connect(socket_path).await.map_err(|source| {
                 SupervisorError::SocketIo {
@@ -5618,6 +5974,7 @@ impl From<RpcFailure> for SupervisorError {
 mod tests {
     use std::fs;
     use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     use serde_json::json;
@@ -5669,6 +6026,8 @@ mod tests {
         let entry = entry(&fixture.join("project"));
         let listener = UnixListener::bind(&socket)
             .expect("the fixture socket should bind");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+            .unwrap();
         let server_entry = entry.clone();
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
         let (command_tx, mut command_rx) = mpsc::channel(1);
@@ -5767,6 +6126,8 @@ mod tests {
         );
         let listener = UnixListener::bind(&socket)
             .expect("the fixture socket should bind");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+            .unwrap();
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
         let (command_tx, _command_rx) = mpsc::channel(1);
         let server = tokio::spawn(async move {
@@ -5848,6 +6209,8 @@ mod tests {
         let server_entry = entry(&fixture.join("project"));
         let listener = UnixListener::bind(&socket)
             .expect("the fixture socket should bind");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+            .unwrap();
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
         let (command_tx, _command_rx) = mpsc::channel(1);
         let server = tokio::spawn(async move {
@@ -5884,6 +6247,124 @@ mod tests {
             .await
             .expect("the server task should finish")
             .expect("a rejected sequence is handled normally");
+    }
+
+    #[tokio::test]
+    async fn event_size_limits_reject_mutations_before_commit_and_read_legacy_pages()
+     {
+        let fixture = TestDirectory::new();
+        let active = entry(&fixture.join("project"));
+        let database = fixture.join("state.sqlite3");
+        let mut store = Store::open(&database).unwrap();
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: active.run_id,
+                    status: "active".to_owned(),
+                    created_at: 10,
+                    stopped_at: None,
+                })?;
+                repositories.insert_project(&ProjectRecord {
+                    id: active.project_id,
+                    run_id: active.run_id,
+                    alias: "primary".to_owned(),
+                    original_path: fixture.join("project"),
+                    canonical_path: fixture.join("project"),
+                    identity: active.project_identity.clone(),
+                    is_primary: true,
+                    attached_at: 10,
+                })
+            })
+            .unwrap();
+        let title = "x".repeat(950_000);
+        let operation_id = OperationId::generate();
+        let request = RpcRequest::TaskCreate {
+            operation_id,
+            title: title.clone(),
+            description: "Large task".to_owned(),
+            project: "primary".to_owned(),
+            group: None,
+            dependencies: Vec::new(),
+        };
+        write_frame(
+            &mut tokio::io::sink(),
+            &ClientMessage::Request(VersionedRequest {
+                protocol_version: crate::protocol::PROTOCOL_VERSION,
+                request_id: 1,
+                authentication: RequestAuthentication::Operator,
+                request: request.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        let failure = super::execute_request(
+            &mut store,
+            &mut runtime_sessions(&fixture.0),
+            &mut WorkspaceSupervisor::new(FakeWorkspace::new()),
+            super::RuntimePaths {
+                run_state_directory: &fixture.0,
+                socket_path: &fixture.join("socket"),
+            },
+            active.run_id,
+            &AuthenticatedCaller::Operator,
+            request,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, RpcFailureCode::InvalidArgument);
+        store
+            .transaction(|repositories| {
+                assert!(repositories.operation(operation_id)?.is_none());
+                assert!(repositories.tasks(active.run_id)?.is_empty());
+                assert!(
+                    repositories
+                        .events_after(active.run_id, 0, 100)?
+                        .is_empty()
+                );
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        // Simulate durable events accepted before the insertion limit existed.
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        for (sequence, title) in
+            [(1, "small"), (2, title.as_str()), (3, "small")]
+        {
+            connection.execute("INSERT INTO events (id, run_id, sequence, event_type, actor, subject, payload_json, summary, created_at) VALUES (?1, ?2, ?3, 'task.created', 'operator', 'legacy', ?4, 'Legacy event.', 10)", rusqlite::params![crate::id::EventId::generate(), active.run_id, sequence, json!({"schema_version": 1, "data": {"title": title}}).to_string()]).unwrap();
+        }
+        drop(connection);
+        let mut store = Store::open(&database).unwrap();
+        for cursor in 0..3 {
+            let response = super::events(
+                &mut store,
+                active.run_id,
+                &AuthenticatedCaller::Operator,
+                cursor,
+                100,
+            )
+            .unwrap();
+            let RpcResponse::Events {
+                events,
+                next_cursor,
+            } = &response
+            else {
+                panic!("events page")
+            };
+            assert_eq!(*next_cursor, cursor + 1);
+            assert_eq!(events.len(), 1);
+            if cursor == 1 {
+                assert_eq!(events[0].payload["data"]["title"], title);
+            }
+            write_frame(
+                &mut tokio::io::sink(),
+                &ServerMessage::Response(crate::protocol::VersionedResponse {
+                    protocol_version: crate::protocol::PROTOCOL_VERSION,
+                    request_id: 1,
+                    result: crate::protocol::RpcResult::Ok(Box::new(response)),
+                }),
+            )
+            .await
+            .unwrap();
+        }
     }
 
     #[test]
@@ -6013,6 +6494,7 @@ mod tests {
             finish_id,
             FinishStatus::Completed,
             "late finish".to_owned(),
+            None,
         )
         .expect_err("old assignment");
         assert_eq!(failure.code, RpcFailureCode::Conflict);
@@ -6067,6 +6549,8 @@ mod tests {
         let active = entry(&fixture.join("project"));
         let listener = UnixListener::bind(&socket)
             .expect("the fixture socket should bind");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+            .unwrap();
         let agent_id = AGENT_ID.parse::<AgentId>().expect("valid agent ID");
         let session_id =
             SESSION_ID.parse::<SessionId>().expect("valid session ID");
@@ -6241,7 +6725,7 @@ mod tests {
         let project_path = fixture.join("project");
         let run_state_directory = fixture.join("run");
         fs::create_dir(&project_path).expect("the project should be created");
-        fs::create_dir(&run_state_directory)
+        crate::private_fs::directory(&run_state_directory)
             .expect("the run state directory should be created");
         let active = entry(&project_path);
         let task_id = TASK_ID.parse::<TaskId>().expect("valid task ID");
@@ -6356,7 +6840,7 @@ mod tests {
         let project_path = fixture.join("project");
         let run_state_directory = fixture.join("run");
         fs::create_dir(&project_path).expect("the project should be created");
-        fs::create_dir(&run_state_directory)
+        crate::private_fs::directory(&run_state_directory)
             .expect("the run state directory should be created");
         let active = entry(&project_path);
         let task_id = TASK_ID.parse::<TaskId>().expect("valid task ID");
@@ -6496,7 +6980,7 @@ mod tests {
         let project_path = fixture.join("project");
         let run_state_directory = fixture.join("run");
         fs::create_dir(&project_path).expect("the project should be created");
-        fs::create_dir(&run_state_directory)
+        crate::private_fs::directory(&run_state_directory)
             .expect("the run state directory should be created");
         let active = entry(&project_path);
         let task_id = TASK_ID.parse::<TaskId>().expect("valid task ID");
@@ -6629,7 +7113,7 @@ mod tests {
         let project_path = fixture.join("project");
         let run_state_directory = fixture.join("run");
         fs::create_dir(&project_path).expect("the project should be created");
-        fs::create_dir(&run_state_directory)
+        crate::private_fs::directory(&run_state_directory)
             .expect("the run state directory should be created");
         let active = entry(&project_path);
         let agent_id = AgentId::generate();
@@ -6820,8 +7304,10 @@ mod tests {
         let active = entry(&project_path);
         let listener = UnixListener::bind(&socket)
             .expect("the fixture socket should bind");
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+            .unwrap();
         let run_state_directory = fixture.join("run");
-        fs::create_dir(&run_state_directory)
+        crate::private_fs::directory(&run_state_directory)
             .expect("the run directory should be created");
         let mut store = Store::open(&run_state_directory.join("state.sqlite3"))
             .expect("the store should open");
@@ -7390,6 +7876,7 @@ mod tests {
         let active = entry(&fixture.0);
         let path = fixture.join("unresponsive.sock");
         let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let server = tokio::spawn(async move {
             let (_stream, _) = listener.accept().await.unwrap();
             std::future::pending::<()>().await;
@@ -7398,6 +7885,24 @@ mod tests {
             SupervisorClient::connect_operator_at(&path, &active).await;
         server.abort();
         assert!(matches!(result, Err(SupervisorError::RpcTimeout { .. })));
+    }
+
+    #[tokio::test]
+    async fn stale_socket_repair_preserves_responsive_or_insecure_paths() {
+        let fixture = TestDirectory::new();
+        let path = fixture.join("owned.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(super::remove_stale_socket(&path).await.is_err());
+        assert!(path.exists());
+        drop(listener);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(super::remove_stale_socket(&path).await.is_err());
+        assert!(path.exists());
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        super::remove_stale_socket(&path).await.unwrap();
+        super::remove_stale_socket(&path).await.unwrap();
+        assert!(!path.exists());
     }
 
     #[tokio::test]

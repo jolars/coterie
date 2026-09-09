@@ -22,7 +22,7 @@ clap = { version = "4.5.48", default-features = false, features = [
 getrandom = "0.4.3"
 git2 = { version = "0.21.0", features = ["vendored-libgit2"] }
 hmac = "0.13.0"
-nix = { version = "0.30.1", features = ["fs", "signal"] }
+nix = { version = "0.30.1", features = ["fs", "signal", "user"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 schemars = "1.2.2"
 semver = "1.0.28"

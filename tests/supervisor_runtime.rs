@@ -1670,6 +1670,20 @@ fn completed_shutdown_retires_stale_coordination_before_a_new_run() {
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     drop(listener);
     fs::write(&index_path, &index_bytes).unwrap();
+    fs::set_permissions(&index_path, fs::Permissions::from_mode(0o600))
+        .unwrap();
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+    let report = fixture.run_json(&["doctor", "--json"]);
+    assert!(
+        report["data"]["report"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| {
+                check["check"] == "operations" && check["status"] == "ok"
+            }),
+        "{report}"
+    );
     let result = run(fixture.connect_command());
     assert!(result.status.success(), "{result:?}");
     let current: Value =
@@ -1736,10 +1750,43 @@ fn stale_index_and_socket_restart_the_same_durable_run() {
     let stale_contents =
         fs::read(&stale_index).expect("the index should exist");
 
+    let follow_path = fixture.root.join("restart-follow.jsonl");
+    let mut follow_command = fixture.command();
+    follow_command
+        .args(["events", "--follow", "--json"])
+        .stdout(fs::File::create(&follow_path).unwrap())
+        .stderr(Stdio::piped());
+    let mut follower = follow_command.spawn().unwrap();
+    wait_until("initial follow page", || {
+        fs::metadata(&follow_path).unwrap().len() > 0
+    });
+
     crashed
         .kill()
         .expect("the owned fixture process should stop");
     crashed.wait().expect("the killed process should be reaped");
+
+    let report = fixture.run_json(&["doctor", "--json"]);
+    assert_eq!(report["data"]["report"]["run_id"], RUN_ID);
+    let checks = report["data"]["report"]["checks"].as_array().unwrap();
+    assert!(checks.iter().any(|check| check["check"] == "supervisor"
+        && check["status"] == "unavailable"));
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["check"] == "database_migrations"
+                && check["status"] == "ok")
+    );
+    assert_eq!(fs::read(&stale_index).unwrap(), stale_contents);
+    assert!(
+        std::os::unix::net::UnixStream::connect(
+            fixture
+                .runtime
+                .join("coterie")
+                .join(format!("{RUN_ID}.sock"))
+        )
+        .is_err()
+    );
 
     let restart = run(fixture.connect_command());
     assert!(restart.status.success(), "restart failed: {restart:?}");
@@ -1748,11 +1795,562 @@ fn stale_index_and_socket_restart_the_same_durable_run() {
         stale_contents,
         "recovery should preserve the indexed run and project IDs"
     );
+    fixture.run_json(&["task", "create", "After recovery", "--json"]);
+    wait_until("reconnected follower", || {
+        fs::read_to_string(&follow_path)
+            .unwrap()
+            .contains("After recovery")
+    });
 
     let mut shutdown = fixture.command();
     shutdown.arg("__supervisor-shutdown");
     assert!(run(shutdown).status.success());
     wait_until("restarted supervisor retirement", || !stale_index.exists());
+    wait_until("reconnected follower retirement", || {
+        follower.try_wait().unwrap().is_some()
+    });
+    let output = follower.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let sequences = fs::read_to_string(follow_path)
+        .unwrap()
+        .lines()
+        .flat_map(|line| {
+            let page: Value = serde_json::from_str(line).unwrap();
+            page["data"]["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|event| event["sequence"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(sequences.windows(2).all(|pair| pair[1] == pair[0] + 1));
+}
+
+#[test]
+fn indexed_recovery_does_not_recreate_a_missing_database() {
+    let fixture = TestEnvironment::new();
+    assert!(run(fixture.connect_command()).status.success());
+    let index = fixture.only_index_entry();
+    let encoded = fs::read(&index).unwrap();
+    let entry: Value = serde_json::from_slice(&encoded).unwrap();
+    fixture.run_json(&["stop", "--json"]);
+    fs::write(&index, encoded).unwrap();
+    fs::set_permissions(&index, fs::Permissions::from_mode(0o600)).unwrap();
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(entry["run_id"].as_str().unwrap())
+        .join("state.sqlite3");
+    let preserved = database.with_extension("preserved");
+    fs::rename(&database, &preserved).unwrap();
+    let result = run(fixture.connect_command());
+    assert!(!result.status.success());
+    assert!(!database.exists());
+    assert!(preserved.exists());
+    assert_eq!(fixture.index_entry_count(), 1);
+    fs::rename(preserved, database).unwrap();
+    assert!(run(fixture.connect_command()).status.success());
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn doctor_is_read_only_without_a_run_and_refuses_agent_context() {
+    let fixture = TestEnvironment::new();
+    let files = fixture.files();
+    let report = fixture.run_json(&["doctor", "--json"]);
+    assert!(report["data"]["report"]["run_id"].is_null());
+    assert_eq!(fixture.files(), files);
+    let mut command = fixture.command();
+    command
+        .args(["doctor", "--json"])
+        .env("COTERIE_AGENT_ID", "incomplete");
+    let output = run(command);
+    assert_eq!(output.status.code(), Some(6));
+    assert!(output.stdout.is_empty());
+    assert_eq!(fixture.files(), files);
+}
+
+#[test]
+fn doctor_checks_live_state_and_reports_permissions_without_repair() {
+    let fixture = TestEnvironment::new();
+    fixture.launch(&[]);
+    let report = fixture.run_json(&["doctor", "--json"]);
+    let checks = report["data"]["report"]["checks"].as_array().unwrap();
+    for name in [
+        "supervisor",
+        "database_migrations",
+        "database_integrity",
+        "foreign_keys",
+        "operations",
+        "assignments",
+        "task_cycles",
+        "provider",
+        "project_lease",
+    ] {
+        assert!(
+            checks
+                .iter()
+                .any(|check| check["check"] == name && check["status"] == "ok"),
+            "missing check {name}: {checks:?}"
+        );
+    }
+    let state = fixture.state.join("coterie");
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o755)).unwrap();
+    let report = fixture.run_json(&["doctor", "--json"]);
+    assert!(
+        report["data"]["report"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["check"] == "runtime_permissions"
+                && check["status"] == "error")
+    );
+    assert_eq!(mode(&state), 0o755);
+    fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn doctor_reports_corrupt_migrations_and_cycles_without_mutation() {
+    let fixture = TestEnvironment::new();
+    fixture.launch(&[]);
+    let first = fixture.run_json(&["task", "create", "First", "--json"]);
+    let second = fixture.run_json(&["task", "create", "Second", "--json"]);
+    let run_id = fixture.run_json(&["status", "--json"])["data"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(&run_id)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let first = first["data"]["task"]["id"].as_str().unwrap();
+    let second = second["data"]["task"]["id"].as_str().unwrap();
+    for (task, dependency) in [(first, second), (second, first)] {
+        connection.execute("INSERT INTO task_dependencies (run_id, task_id, dependency_task_id, created_at) VALUES (?1, ?2, ?3, 1)", [&run_id, task, dependency]).unwrap();
+    }
+    let report = fixture.run_json(&["doctor", "--json"]);
+    assert_eq!(
+        report["data"]["report"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|check| check["check"] == "task_cycles"
+                && check["status"] == "warning")
+            .count(),
+        2
+    );
+    connection.execute("INSERT INTO schema_migrations (version, name, source) VALUES (999, 'future', 'future')", []).unwrap();
+    let before = query_rows(
+        &connection,
+        "SELECT version, name, source FROM schema_migrations ORDER BY version",
+        3,
+    );
+    let report = fixture.run_json(&["doctor", "--json"]);
+    assert!(
+        report["data"]["report"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["check"] == "database_migrations"
+                && check["status"] == "error")
+    );
+    assert_eq!(
+        before,
+        query_rows(
+            &connection,
+            "SELECT version, name, source FROM schema_migrations ORDER BY version",
+            3
+        )
+    );
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn doctor_preserves_work_with_ambiguous_ownership_and_unreadable_transcripts() {
+    let fixture = TestEnvironment::new();
+    fixture.launch(&[]);
+    let task =
+        fixture.run_json(&["task", "create", "Preserved work", "--json"]);
+    let worker = fixture.run_json(&[
+        "spawn",
+        "worker",
+        "--task",
+        task["data"]["task"]["id"].as_str().unwrap(),
+        "--json",
+    ]);
+    let report = fixture.run_json(&["doctor", "--json"]);
+    assert!(
+        report["data"]["report"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["check"] == "workspace"
+                && check["status"] == "ok")
+    );
+    let run_id = fixture.run_json(&["status", "--json"])["data"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = fixture.state.join("coterie/runs").join(run_id);
+    let connection =
+        rusqlite::Connection::open(root.join("state.sqlite3")).unwrap();
+    let workspace: Vec<u8> = connection
+        .query_row(
+            "SELECT path FROM workspaces WHERE assignment_id = ?1",
+            [worker["data"]["assignment_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let workspace = Path::new(std::ffi::OsStr::from_bytes(&workspace));
+    let repository = Repository::open(workspace).unwrap();
+    let head = repository.head().unwrap().target().unwrap();
+    repository.set_head_detached(head).unwrap();
+    fs::write(workspace.join("precious.txt"), "recoverable work").unwrap();
+    let transcript = root.join("transcripts").join(format!(
+        "{}.jsonl",
+        worker["data"]["session_id"].as_str().unwrap()
+    ));
+    wait_until("transcript", || transcript.exists());
+    let preserved = transcript.with_extension("preserved");
+    fs::rename(&transcript, &preserved).unwrap();
+    std::os::unix::fs::symlink(&preserved, &transcript).unwrap();
+    let report = fixture.run_json(&["doctor", "--json"]);
+    let checks = report["data"]["report"]["checks"].as_array().unwrap();
+    assert!(
+        checks
+            .iter()
+            .any(|check| check["check"] == "workspace"
+                && check["status"] != "ok")
+    );
+    assert!(
+        checks.iter().any(|check| check["check"] == "transcript"
+            && check["status"] == "error")
+    );
+    assert!(
+        fs::symlink_metadata(&transcript)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("precious.txt")).unwrap(),
+        "recoverable work"
+    );
+    fs::remove_file(&transcript).unwrap();
+    fs::rename(preserved, transcript).unwrap();
+    fixture.run_json(&["stop", "--json"]);
+    assert!(workspace.join("precious.txt").exists());
+}
+
+#[test]
+fn event_following_pages_resume_and_drain_after_socket_retirement() {
+    let fixture = TestEnvironment::new();
+    fixture.launch(&[]);
+    let first = fixture.run_json(&["events", "--limit", "1", "--json"]);
+    let cursor = first["data"]["next_cursor"].as_u64().unwrap();
+    let path = fixture.root.join("follow.jsonl");
+    let mut command = fixture.command();
+    command
+        .args([
+            "events",
+            "--follow",
+            "--limit",
+            "1",
+            "--after",
+            &cursor.to_string(),
+            "--json",
+        ])
+        .stdout(fs::File::create(&path).unwrap())
+        .stderr(Stdio::piped());
+    let mut follower = command.spawn().unwrap();
+    wait_until("first follower page", || {
+        fs::metadata(&path).unwrap().len() > 0
+    });
+    fixture.run_json(&["task", "create", "A streamed task", "--json"]);
+    let complete =
+        fixture.run_json(&["events", "--after", &cursor.to_string(), "--json"]);
+    let run_id = fixture.run_json(&["status", "--json"])["data"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fixture.run_json(&["stop", "--json"]);
+    wait_until("follower terminal page", || {
+        follower.try_wait().unwrap().is_some()
+    });
+    let output = follower.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let pages = fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let events = pages
+        .iter()
+        .flat_map(|page| page["data"]["events"].as_array().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[0]["sequence"].as_u64().unwrap()
+                < pair[1]["sequence"].as_u64().unwrap())
+    );
+    assert_eq!(events[0]["sequence"].as_u64().unwrap(), cursor + 1);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["event_type"] == "run.stopped")
+    );
+    for event in complete["data"]["events"].as_array().unwrap() {
+        assert!(events.contains(&event));
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        fixture
+            .state
+            .join("coterie/runs")
+            .join(run_id)
+            .join("state.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let durable_sequences = connection
+        .prepare(
+            "SELECT sequence FROM events WHERE sequence > ?1 ORDER BY sequence",
+        )
+        .unwrap()
+        .query_map([cursor as i64], |row| row.get::<_, i64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event["sequence"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        durable_sequences
+    );
+}
+
+#[test]
+fn mutation_retries_survive_credential_rotation_and_removal() {
+    let fixture = TestEnvironment::new();
+    let secret = "retry-fixture-api-key";
+    let start = |key: Option<&str>| {
+        let mut command = fixture.command();
+        command
+            .args(["__supervisor", RUN_ID, PROJECT_ID])
+            .arg(&fixture.project)
+            .env_remove("OPENAI_API_KEY")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(key) = key {
+            command.env("OPENAI_API_KEY", key);
+        }
+        let child = command.spawn().unwrap();
+        wait_until("supervisor publication", || {
+            let mut command = fixture.command();
+            command.args(["status", "--json"]);
+            run(command).status.success()
+        });
+        child
+    };
+    let mut supervisor = start(Some(secret));
+    fixture.launch(&[]);
+    let create_id = format!("co-{}", ulid::Ulid::generate());
+    let send_id = format!("co-{}", ulid::Ulid::generate());
+    let close_id = format!("co-{}", ulid::Ulid::generate());
+    let create = [
+        "task",
+        "create",
+        secret,
+        "--description",
+        secret,
+        "--group",
+        secret,
+        "--operation-id",
+        &create_id,
+        "--json",
+    ];
+    let created = fixture.run_json(&create);
+    let task_id = created["data"]["task"]["id"].as_str().unwrap();
+    let send = ["send", "lead", secret, "--operation-id", &send_id, "--json"];
+    let sent = fixture.run_json(&send);
+    let close = [
+        "task",
+        "close",
+        task_id,
+        "--summary",
+        secret,
+        "--operation-id",
+        &close_id,
+        "--json",
+    ];
+    let close_request = || {
+        let mut command = fixture.command();
+        command.args(close);
+        run(command)
+    };
+    let closed = close_request();
+    assert_eq!(closed.status.code(), Some(5));
+    let created = fixture.run_json(&create);
+    for key in [Some("replacement-fixture-api-key"), None] {
+        supervisor.kill().unwrap();
+        supervisor.wait().unwrap();
+        supervisor = start(key);
+        assert_eq!(fixture.run_json(&create), created);
+        assert_eq!(fixture.run_json(&send), sent);
+        let replayed = close_request();
+        assert_eq!(replayed.status.code(), closed.status.code());
+        assert_eq!(replayed.stderr, closed.stderr);
+        let mut conflict = fixture.command();
+        conflict.args([
+            "task",
+            "create",
+            "[REDACTED]",
+            "--description",
+            "[REDACTED]",
+            "--group",
+            "[REDACTED]",
+            "--operation-id",
+            &create_id,
+            "--json",
+        ]);
+        let output = run(conflict);
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], "conflict");
+    }
+    fixture.run_json(&["stop", "--json"]);
+    supervisor.wait().unwrap();
+    for entry in
+        fs::read_dir(fixture.state.join("coterie/runs").join(RUN_ID)).unwrap()
+    {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            assert!(
+                !fs::read(path)
+                    .unwrap()
+                    .windows(secret.len())
+                    .any(|bytes| bytes == secret.as_bytes())
+            );
+        }
+    }
+}
+
+#[test]
+fn credentials_are_redacted_from_durable_requests_and_worker_output() {
+    let fixture = TestEnvironment::new();
+    let script = FAKE_CODEX.replace("  printf '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\\n'", "  printf '{\"type\":\"thread.started\",\"token\":\"%s\",\"key\":\"%s\"}\\n' \"$COTERIE_TOKEN\" \"$OPENAI_API_KEY\"");
+    assert_ne!(script, FAKE_CODEX);
+    fs::write(fixture.root.join("bin/codex"), script).unwrap();
+    let secret = "fixture-api-key-unique";
+    let mut command = fixture.connect_command();
+    command.env("OPENAI_API_KEY", secret);
+    assert!(run(command).status.success());
+    let token = format!("cot1_{}", "ab".repeat(32));
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        &format!("{secret} {token}"),
+        "--json",
+    ]);
+    assert_eq!(task["data"]["task"]["title"], "[REDACTED] [REDACTED]");
+    let worker = fixture.run_json(&[
+        "spawn",
+        "reviewer",
+        "--task",
+        task["data"]["task"]["id"].as_str().unwrap(),
+        "--json",
+    ]);
+    let agent = worker["data"]["agent"]["id"].as_str().unwrap();
+    let session = worker["data"]["session_id"].as_str().unwrap();
+    wait_until("redacted worker output", || {
+        fixture.run_json(&["logs", agent, "--json"])["data"]["transcript"]
+            .as_str()
+            .unwrap()
+            .contains("[REDACTED]")
+    });
+    let all = fixture.run_json(&["logs", agent, "--json"]);
+    let mut transcript = String::new();
+    let mut cursor = 0;
+    loop {
+        let page = fixture.run_json(&[
+            "logs",
+            agent,
+            "--session",
+            session,
+            "--after",
+            &cursor.to_string(),
+            "--limit",
+            "7",
+            "--json",
+        ]);
+        transcript.push_str(page["data"]["transcript"].as_str().unwrap());
+        cursor = page["data"]["next_cursor"].as_u64().unwrap();
+        if page["data"]["eof"] == true {
+            break;
+        }
+    }
+    assert_eq!(transcript, all["data"]["transcript"].as_str().unwrap());
+    assert!(!transcript.contains(secret));
+    assert!(!transcript.contains("cot1_"));
+    let run_id = fixture.run_json(&["status", "--json"])["data"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let follow_path = fixture.root.join("logs-follow.jsonl");
+    let mut command = fixture.command();
+    command
+        .args(["logs", agent, "--follow", "--limit", "7", "--json"])
+        .stdout(fs::File::create(&follow_path).unwrap())
+        .stderr(Stdio::piped());
+    let mut follower = command.spawn().unwrap();
+    wait_until("transcript follower", || {
+        fs::metadata(&follow_path).unwrap().len() > 0
+    });
+    fixture.run_json(&["stop", "--json"]);
+    wait_until("transcript follower completion", || {
+        follower.try_wait().unwrap().is_some()
+    });
+    let output = follower.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let pages = fs::read_to_string(&follow_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        pages
+            .iter()
+            .all(|page| page["data"]["session_id"] == session)
+    );
+    let followed: String = pages
+        .iter()
+        .map(|page| page["data"]["transcript"].as_str().unwrap())
+        .collect();
+    assert_eq!(followed, transcript);
+    assert_eq!(pages.last().unwrap()["data"]["terminal"], true);
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(run_id)
+        .join("state.sqlite3");
+    let bytes = fs::read(database).unwrap();
+    assert!(
+        !bytes
+            .windows(secret.len())
+            .any(|candidate| candidate == secret.as_bytes())
+    );
+    assert!(
+        !bytes
+            .windows(token.len())
+            .any(|candidate| candidate == token.as_bytes())
+    );
 }
 
 #[test]

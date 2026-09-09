@@ -48,7 +48,7 @@ pub(crate) struct LaunchedAgent {
 pub(crate) struct AgentSessionSupervisor<P> {
     provider: P,
     sessions: BTreeMap<SessionId, ProviderSessionHandle>,
-    transcript_secrets: BTreeMap<SessionId, Vec<u8>>,
+    transcript_secrets: BTreeMap<SessionId, crate::redaction::Redactor>,
     transcripts: TranscriptStore,
     #[cfg(test)]
     credential_observer: Option<std::sync::mpsc::Sender<LaunchedAgent>>,
@@ -441,7 +441,9 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         launch: &AgentLaunch,
         token: AgentToken,
     ) -> Result<LaunchedAgent, AgentSessionError> {
-        let transcript_secret = token.expose_secret().as_bytes().to_vec();
+        let mut transcript_secret =
+            crate::redaction::Redactor::from_environment();
+        transcript_secret.add(token.expose_secret().as_bytes());
         let specification = LaunchSpecification {
             scope: launch.scope,
             working_directory: launch.working_directory.clone(),
@@ -853,16 +855,16 @@ impl<P: Provider> AgentSessionSupervisor<P> {
     }
 
     fn append_transcript(
-        &self,
+        &mut self,
         session_id: SessionId,
         bytes: &[u8],
     ) -> Result<(), TranscriptError> {
-        self.transcript_secrets.get(&session_id).map_or_else(
-            || self.transcripts.append(session_id, bytes),
-            |secret| {
-                self.transcripts.append_redacted(session_id, bytes, secret)
-            },
-        )
+        let redactor = self
+            .transcript_secrets
+            .entry(session_id)
+            .or_insert_with(crate::redaction::Redactor::from_environment);
+        let bytes = redactor.push(bytes);
+        self.transcripts.append(session_id, &bytes)
     }
 
     #[cfg_attr(
@@ -1188,8 +1190,14 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             }
             Ok(())
         })?;
-        if observation.lifecycle.is_terminal() {
-            self.transcript_secrets.remove(&handle.scope.session_id);
+        if observation.lifecycle.is_terminal()
+            && let Some(redactor) =
+                self.transcript_secrets.get_mut(&handle.scope.session_id)
+        {
+            let tail = redactor.finish();
+            if !tail.is_empty() {
+                self.transcripts.append(handle.scope.session_id, &tail)?;
+            }
         }
         Ok(())
     }
@@ -2615,7 +2623,8 @@ mod tests {
         fn new() -> Self {
             let path = std::env::temp_dir()
                 .join(format!("coterie-session-test-{}", RunId::generate()));
-            fs::create_dir(&path).expect("the test directory should be unique");
+            crate::private_fs::directory(&path)
+                .expect("the test directory should be unique");
             Self(path)
         }
     }
