@@ -2,7 +2,7 @@ mod auth;
 mod cli;
 #[allow(
     dead_code,
-    reason = "M1 defines configuration policy before later milestones resolve it"
+    reason = "M5 defines configuration loading before runtime snapshot integration"
 )]
 mod config;
 mod doctor;

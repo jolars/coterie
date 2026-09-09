@@ -1,0 +1,48 @@
+# These inputs exercise the M5 loader; runtime adoption is a later M5 slice.
+schema_version = 1
+archetype = "global:pair@1"
+
+[providers.codex]
+command = ["codex"]
+
+[limits]
+max_concurrent_agents = 6
+max_agents_per_run = 12
+max_spawns_per_minute = 6
+
+[supervision]
+job_timeout_seconds = 1800
+
+[permission_profiles.interactive]
+filesystem = "project-write"
+network = "provider-default"
+approvals = "interactive"
+
+[permission_profiles.implementation]
+filesystem = "workspace-write"
+network = "deny"
+approvals = "never"
+
+[permission_profiles.inspect]
+filesystem = "read-only"
+network = "deny"
+approvals = "never"
+
+[archetypes."global:pair@1"]
+lead = "coordinator"
+
+[archetypes."global:pair@1".roles.coordinator]
+provider = "codex"
+mode = "interactive"
+workspace = "project"
+permission_profile = "interactive"
+instructions = "Coordinate tasks through Coterie."
+capabilities = ["spawn:builder", "send:*", "task:*", "logs:*"]
+
+[archetypes."global:pair@1".roles.builder]
+provider = "codex"
+mode = "job"
+workspace = "worktree"
+permission_profile = "implementation"
+max_instances = 3
+capabilities = ["send:coordinator", "task:read", "task:claim", "task:comment"]

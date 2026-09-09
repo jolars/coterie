@@ -2,14 +2,35 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+mod input;
+mod loader;
+mod resolver;
+
+pub(crate) use input::*;
+#[cfg_attr(
+    not(test),
+    allow(
+        unused_imports,
+        reason = "runtime loading follows in a later M5 slice"
+    )
+)]
+pub(crate) use loader::{ConfigLocations, load};
+pub(crate) use resolver::{ConfigError, ConfigLayer, EffectiveConfig, resolve};
+
+#[cfg(test)]
+mod resolution_tests;
+
 const STANDARD_LEAD_INSTRUCTIONS: &str = "Coordinate work through Coterie. Delegate independent implementation and\n\
 review tasks when useful, and report consolidated outcomes to the user.";
 
 /// The compiled operator policy used when no trusted global configuration exists.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CompiledDefaults {
-    pub(crate) archetype: &'static str,
-    pub(crate) providers: BTreeMap<&'static str, ProviderBinding>,
+    pub(crate) archetype: String,
+    pub(crate) providers: BTreeMap<String, ProviderBinding>,
     pub(crate) limits: RunLimits,
     pub(crate) supervision: SupervisionPolicy,
 }
@@ -29,7 +50,7 @@ pub(crate) struct SupervisionPolicy {
 /// A trusted command binding for an out-of-process provider.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProviderBinding {
-    pub(crate) command: &'static [&'static str],
+    pub(crate) command: Vec<String>,
 }
 
 /// Operator ceilings that apply across archetypes.
@@ -43,10 +64,10 @@ pub(crate) struct RunLimits {
 /// A sealed, versioned declaration of roles and provider policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ArchetypeDefinition {
-    pub(crate) reference: &'static str,
-    pub(crate) lead: &'static str,
-    pub(crate) permission_profiles: BTreeMap<&'static str, PermissionProfile>,
-    pub(crate) roles: BTreeMap<&'static str, RoleDefinition>,
+    pub(crate) reference: String,
+    pub(crate) lead: String,
+    pub(crate) permission_profiles: BTreeMap<String, PermissionProfile>,
+    pub(crate) roles: BTreeMap<String, RoleDefinition>,
 }
 
 impl ArchetypeDefinition {
@@ -73,13 +94,13 @@ impl ArchetypeDefinition {
 /// A configured type of agent with no runtime-defined role semantics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RoleDefinition {
-    pub(crate) provider: &'static str,
+    pub(crate) provider: String,
     pub(crate) mode: RoleMode,
     pub(crate) max_instances: Option<u16>,
     pub(crate) workspace: WorkspacePolicy,
-    pub(crate) permission_profile: &'static str,
-    pub(crate) instructions: Option<&'static str>,
-    capabilities: &'static [CapabilityGrant],
+    pub(crate) permission_profile: String,
+    pub(crate) instructions: Option<String>,
+    capabilities: Vec<CapabilityGrant>,
 }
 
 impl RoleDefinition {
@@ -97,14 +118,20 @@ impl RoleDefinition {
 }
 
 /// The provider interaction style required by a role.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum RoleMode {
     Interactive,
     Job,
 }
 
 /// The kind of target workspace assigned to a role.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum WorkspacePolicy {
     Project,
     Worktree,
@@ -112,7 +139,10 @@ pub(crate) enum WorkspacePolicy {
 }
 
 /// Provider sandbox policy referenced by a role.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PermissionProfile {
     pub(crate) filesystem: FilesystemPolicy,
     pub(crate) network: NetworkPolicy,
@@ -120,7 +150,10 @@ pub(crate) struct PermissionProfile {
 }
 
 /// Filesystem authority granted to a provider process.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum FilesystemPolicy {
     ProjectWrite,
     WorkspaceWrite,
@@ -128,14 +161,20 @@ pub(crate) enum FilesystemPolicy {
 }
 
 /// Network authority granted to a provider process.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum NetworkPolicy {
     ProviderDefault,
     Deny,
 }
 
 /// How a provider process may request operator approval.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum ApprovalPolicy {
     Interactive,
     Never,
@@ -163,67 +202,79 @@ pub(crate) enum AuthorizationDecision {
     Denied,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CapabilityGrant {
-    Exact {
-        namespace: &'static str,
-        action: &'static str,
-    },
-    Namespace(&'static str),
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CapabilityGrant {
+    namespace: String,
+    action: String,
 }
 
 impl CapabilityGrant {
-    const fn exact(namespace: &'static str, action: &'static str) -> Self {
-        Self::Exact { namespace, action }
-    }
-
-    const fn namespace(namespace: &'static str) -> Self {
-        Self::Namespace(namespace)
-    }
-
-    fn allows(self, capability: Capability<'_>) -> bool {
-        match self {
-            Self::Exact { namespace, action } => {
-                capability.namespace == namespace && capability.action == action
-            }
-            Self::Namespace(namespace) => capability.namespace == namespace,
+    fn parse(value: &str) -> Option<Self> {
+        let (namespace, action) = value.split_once(':')?;
+        if !matches!(
+            namespace,
+            "spawn" | "send" | "task" | "logs" | "project" | "workspace"
+        ) || !(action == "*" || valid_name(action))
+        {
+            return None;
         }
+        Some(Self {
+            namespace: namespace.into(),
+            action: action.into(),
+        })
+    }
+
+    fn allows(&self, capability: Capability<'_>) -> bool {
+        self.namespace == capability.namespace
+            && (self.action == "*" || self.action == capability.action)
     }
 }
 
-const LEAD_CAPABILITIES: &[CapabilityGrant] = &[
-    CapabilityGrant::exact("spawn", "worker"),
-    CapabilityGrant::exact("spawn", "reviewer"),
-    CapabilityGrant::namespace("send"),
-    CapabilityGrant::namespace("task"),
-    CapabilityGrant::namespace("logs"),
-    CapabilityGrant::exact("project", "attach"),
-    CapabilityGrant::exact("workspace", "integrate"),
-];
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+        })
+}
 
-const WORKER_CAPABILITIES: &[CapabilityGrant] = &[
-    CapabilityGrant::exact("send", "lead"),
-    CapabilityGrant::exact("send", "peer"),
-    CapabilityGrant::exact("task", "read"),
-    CapabilityGrant::exact("task", "claim"),
-    CapabilityGrant::exact("task", "comment"),
+const LEAD_CAPABILITIES: &[&str] = &[
+    "spawn:worker",
+    "spawn:reviewer",
+    "send:*",
+    "task:*",
+    "logs:*",
+    "project:attach",
+    "workspace:integrate",
 ];
+const WORKER_CAPABILITIES: &[&str] = &[
+    "send:lead",
+    "send:peer",
+    "task:read",
+    "task:claim",
+    "task:comment",
+];
+const REVIEWER_CAPABILITIES: &[&str] =
+    &["send:lead", "task:read", "task:comment"];
 
-const REVIEWER_CAPABILITIES: &[CapabilityGrant] = &[
-    CapabilityGrant::exact("send", "lead"),
-    CapabilityGrant::exact("task", "read"),
-    CapabilityGrant::exact("task", "comment"),
-];
+fn compiled_capabilities(values: &[&str]) -> Vec<CapabilityGrant> {
+    values
+        .iter()
+        .map(|value| {
+            CapabilityGrant::parse(value)
+                .expect("compiled capabilities are valid")
+        })
+        .collect()
+}
 
 /// Returns the operator defaults compiled into this Coterie version.
 #[must_use]
 pub(crate) fn compiled_defaults() -> CompiledDefaults {
     CompiledDefaults {
-        archetype: "builtin:standard@1",
+        archetype: "builtin:standard@1".into(),
         providers: BTreeMap::from([(
-            "codex",
+            "codex".into(),
             ProviderBinding {
-                command: &["codex"],
+                command: vec!["codex".into()],
             },
         )]),
         limits: RunLimits {
@@ -247,11 +298,11 @@ pub(crate) fn compiled_defaults() -> CompiledDefaults {
 #[must_use]
 pub(crate) fn builtin_standard() -> ArchetypeDefinition {
     ArchetypeDefinition {
-        reference: "builtin:standard@1",
-        lead: "lead",
+        reference: "builtin:standard@1".into(),
+        lead: "lead".into(),
         permission_profiles: BTreeMap::from([
             (
-                "interactive",
+                "interactive".into(),
                 PermissionProfile {
                     filesystem: FilesystemPolicy::ProjectWrite,
                     network: NetworkPolicy::ProviderDefault,
@@ -259,7 +310,7 @@ pub(crate) fn builtin_standard() -> ArchetypeDefinition {
                 },
             ),
             (
-                "worker",
+                "worker".into(),
                 PermissionProfile {
                     filesystem: FilesystemPolicy::WorkspaceWrite,
                     network: NetworkPolicy::Deny,
@@ -267,7 +318,7 @@ pub(crate) fn builtin_standard() -> ArchetypeDefinition {
                 },
             ),
             (
-                "review",
+                "review".into(),
                 PermissionProfile {
                     filesystem: FilesystemPolicy::ReadOnly,
                     network: NetworkPolicy::Deny,
@@ -277,39 +328,39 @@ pub(crate) fn builtin_standard() -> ArchetypeDefinition {
         ]),
         roles: BTreeMap::from([
             (
-                "lead",
+                "lead".into(),
                 RoleDefinition {
-                    provider: "codex",
+                    provider: "codex".into(),
                     mode: RoleMode::Interactive,
                     max_instances: None,
                     workspace: WorkspacePolicy::Project,
-                    permission_profile: "interactive",
-                    instructions: Some(STANDARD_LEAD_INSTRUCTIONS),
-                    capabilities: LEAD_CAPABILITIES,
+                    permission_profile: "interactive".into(),
+                    instructions: Some(STANDARD_LEAD_INSTRUCTIONS.into()),
+                    capabilities: compiled_capabilities(LEAD_CAPABILITIES),
                 },
             ),
             (
-                "worker",
+                "worker".into(),
                 RoleDefinition {
-                    provider: "codex",
+                    provider: "codex".into(),
                     mode: RoleMode::Job,
                     max_instances: Some(3),
                     workspace: WorkspacePolicy::Worktree,
-                    permission_profile: "worker",
+                    permission_profile: "worker".into(),
                     instructions: None,
-                    capabilities: WORKER_CAPABILITIES,
+                    capabilities: compiled_capabilities(WORKER_CAPABILITIES),
                 },
             ),
             (
-                "reviewer",
+                "reviewer".into(),
                 RoleDefinition {
-                    provider: "codex",
+                    provider: "codex".into(),
                     mode: RoleMode::Job,
                     max_instances: Some(1),
                     workspace: WorkspacePolicy::ReadOnly,
-                    permission_profile: "review",
+                    permission_profile: "review".into(),
                     instructions: None,
-                    capabilities: REVIEWER_CAPABILITIES,
+                    capabilities: compiled_capabilities(REVIEWER_CAPABILITIES),
                 },
             ),
         ]),
@@ -388,7 +439,7 @@ mod tests {
         assert_eq!(lead.permission_profile, "interactive");
         assert_eq!(lead.capabilities.len(), 7);
         assert_eq!(
-            lead.instructions,
+            lead.instructions.as_deref(),
             Some(
                 "Coordinate work through Coterie. Delegate independent implementation and\n\
                  review tasks when useful, and report consolidated outcomes to the user."

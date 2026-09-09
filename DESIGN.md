@@ -209,6 +209,20 @@ for a run using the built-in tracker.
 Global configuration lives at `$XDG_CONFIG_HOME/coterie/config.toml`, falling
 back to `~/.config/coterie/config.toml`.
 
+The first M5 slice implements the internal loader and resolver. Runtime
+launches and recovery still use compiled defaults until the snapshot and
+runtime integration work is complete. Configuration inspection commands,
+provenance, and lock handling remain separate M5 work.
+
+Only absolute `XDG_CONFIG_HOME` and `HOME` values participate in discovery.
+An absent or relative `XDG_CONFIG_HOME` falls back to an absolute `HOME`; if
+neither is available, global configuration is absent. The project file is
+`coterie.toml` in the discovered project root, without an additional search
+through parent or nested directories. Missing optional files use defaults;
+existing unreadable files, dangling file symlinks, and missing explicit
+includes are errors. Loading configuration does not create files or probe
+providers.
+
 When no global configuration exists, Coterie uses these compiled operator
 defaults:
 
@@ -221,6 +235,44 @@ Trusted global configuration may replace the provider binding and these
 run-wide ceilings or select another archetype. The provider command and
 run-wide ceilings are operator policy; they are not part of an archetype's
 versioned semantics.
+
+Configuration files use `schema_version = 1`, with omission also meaning
+version 1. The global format contains `archetype`, `includes`, `providers`,
+`limits`, `supervision`, `permission_profiles`, and `archetypes`. Includes use
+the same partial format: fields may be supplied across files, but required
+definition fields must exist after merging. A provider table supplies a
+`command` argument array whose first element is a nonempty executable.
+
+Global archetypes are keyed by complete references, such as
+`[archetypes."global:pair@1"]`, with positive integer versions and no leading
+zeros. Each declares a `lead` selector and `roles` tables. Each role requires
+`provider`, `mode`, `workspace`, `permission_profile`, and `capabilities`;
+`instructions` and `max_instances` are optional. Profile references resolve
+against complete definitions in the global `permission_profiles` table.
+Archetypes do not inherit from other archetypes. Role, provider, profile, and
+archetype names contain only ASCII letters, digits, underscores, or hyphens.
+Capabilities use the existing `spawn`, `send`, `task`, `logs`, `project`, and
+`workspace` namespaces, followed by a colon and an action name or `*`.
+
+`limits` exposes `max_concurrent_agents`, `max_agents_per_run`, and
+`max_spawns_per_minute`, each a positive 16-bit integer. `supervision` exposes
+the existing restart window, launch attempts, restart backoff, startup and job
+timeouts, interrupt grace, and shutdown timeout fields with their explicit
+`_seconds` or `_ms` units. These bounds must be positive, fit millisecond
+arithmetic, and leave an interrupt grace shorter than the shutdown timeout.
+Supervision settings are trusted global policy; project restrictions and
+operator overrides do not change them in this slice.
+
+The [global example](examples/config/global.toml) and
+[project example](examples/config/project.toml) are tested loader inputs.
+The [global schema](schemas/config-global-v1.schema.json) and
+[project schema](schemas/config-project-v1.schema.json) are generated from the
+typed Rust inputs. They describe file structure; resolution additionally
+checks references, required merged fields, and policy bounds.
+
+Regenerate these schemas explicitly with
+`cargo test config::resolution_tests::regenerate_configuration_schemas -- --ignored`.
+Ordinary test runs verify the schemas without rewriting them.
 
 The semantic definition of `builtin:standard@1` is compiled into Coterie. The
 following TOML-like representation is normative data, not a global
@@ -307,6 +359,21 @@ overrides. A project may disable roles, reduce capacities, choose a globally
 defined permission profile that is no more permissive, and tighten resource
 limits. It cannot increase authority or resource ceilings.
 
+Project files allow only `schema_version`, `archetype`, `limits`, and `roles`.
+Role restrictions allow `enabled`, `max_instances`, and `permission_profile`.
+Disabling a role preserves its declaration but prevents spawning it. The
+designated foreground role cannot be disabled. A capacity of zero prevents
+explicit spawns; like any `max_instances` setting, it does not change creation
+of the one initial foreground agent. An omitted archetype role capacity has no
+per-role ceiling, but run-wide limits still apply.
+
+Permission restrictions compare all components. Read-only filesystem access
+may replace either writable scope; project-write and workspace-write are
+incomparable. Network denial may replace provider-default access, and never
+requesting approvals may replace interactive approvals. Other increases or
+incomparable replacements are errors. Effective role settings remain separate
+from their unmodified archetype definition.
+
 ```toml
 archetype = "builtin:standard@1"
 
@@ -328,6 +395,15 @@ built-in archetype resolves its sealed definition rather than merging global
 archetype or permission-profile tables into it. Every effective value retains
 provenance identifying its source layer and file.
 
+Archetype selection uses the last explicit selector: operator, project,
+global, then compiled default. Project role restrictions apply to that final
+selected archetype. Unknown selectors in lower layers still fail validation.
+Explicit operator overrides may restore capacities, enabled roles, or profiles
+restricted by the project, but cannot exceed the selected trusted archetype
+or global run limits. They expose the same role restrictions and run limits
+as the project layer, plus archetype selection. Invalid project requests are
+reported before operator overrides are applied, rather than hidden by them.
+
 Coterie provides the following inspection commands:
 
 ```console
@@ -340,6 +416,14 @@ coterie config lock
 Unknown fields and unsupported schema versions are errors. Includes are
 global-only, non-recursive, cycle-checked, and resolved relative to the
 including file.
+
+Included files load in listed order, followed by the main global file, which
+takes precedence. Every file is checked for unknown fields and unsupported
+schemas before merging. Included files cannot contain an `includes` field,
+even an empty one. Canonical file identities detect repeated files and cycles,
+including aliases through symlinks. Repeated inclusion is an error. File
+symlinks are otherwise allowed, and relative includes resolve against the
+directory of the path used to open the including file.
 
 Built-in archetypes use the reserved `builtin:` namespace and cannot be shadowed
 by global configuration. Global archetypes use `global:`. If no configuration

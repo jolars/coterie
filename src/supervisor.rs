@@ -452,13 +452,13 @@ async fn launch_foreground_codex(
         .expect("the compiled default archetype binds the Codex provider");
     let archetype = builtin_standard();
     let lead = archetype
-        .role(archetype.lead)
+        .role(&archetype.lead)
         .expect("the built-in archetype has its designated lead role");
     let permission_profile = *archetype
         .permission_profiles
-        .get(lead.permission_profile)
+        .get(&lead.permission_profile)
         .expect("the built-in lead references a permission profile");
-    let mut provider = CodexProvider::new(binding.command.iter().copied());
+    let mut provider = CodexProvider::new(&binding.command);
     let probe = provider.probe().map_err(AgentSessionError::from)?;
     validate_provider_capabilities(
         &probe,
@@ -1422,7 +1422,7 @@ fn runtime_sessions(
         .get("codex")
         .expect("the compiled defaults bind the Codex provider");
     AgentSessionSupervisor::new(
-        CodexProvider::new(binding.command.iter().copied()),
+        CodexProvider::new(&binding.command),
         run_state_directory,
     )
 }
@@ -1644,7 +1644,7 @@ fn reconcile_spawn_operation<P: Provider, B: WorkspaceBackend>(
     };
     let Some(permission_profile) = archetype
         .permission_profiles
-        .get(role_definition.permission_profile)
+        .get(&role_definition.permission_profile)
         .copied()
     else {
         return record_operation_reconciliation(
@@ -3497,7 +3497,7 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         .ok_or_else(|| not_found(format!("role `{role}` is not configured")))?;
     let permission_profile = *archetype
         .permission_profiles
-        .get(role_definition.permission_profile)
+        .get(&role_definition.permission_profile)
         .ok_or_else(|| {
             RpcFailure::new(
                 RpcFailureCode::Internal,

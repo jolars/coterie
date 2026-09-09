@@ -191,10 +191,11 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 
 ## M5: Full declarative configuration
 
-- [ ] Load versioned compiled defaults, trusted global configuration and local
-  includes, a selected built-in or global archetype, safe project
-  restrictions, and bounded operator overrides in the specified precedence
-  order.
+- [x] Implement the internal loader and resolver for versioned compiled
+  defaults, trusted global configuration and local includes, a selected
+  built-in or global archetype, safe project restrictions, and bounded
+  operator overrides in the specified precedence order. Runtime adoption
+  follows with snapshot integration below.
 - [ ] Track provenance for every effective value; reject unknown fields,
   unsupported schemas, recursive includes, cycles, shadowed `builtin:`
   names, and references to missing trusted definitions.
@@ -205,8 +206,9 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 - [ ] Implement `config check`, effective configuration with provenance, schema
   generation, explicit lock creation, and lock verification without secrets
   or host-specific values.
-- [ ] Snapshot the effective run configuration and reject incompatible changes
-  rather than hot-applying them.
+- [ ] Wire resolved configuration into launches and recovery, snapshot the
+  effective run configuration, and reject incompatible changes rather than
+  hot-applying them.
 
 ### M5 gate
 

@@ -78,14 +78,14 @@ pub(super) async fn run(
 fn inspect_provider(report: &mut DoctorReport) {
     let defaults = compiled_defaults();
     let binding = &defaults.providers["codex"];
-    let provider = CodexProvider::new(binding.command.iter().copied());
+    let provider = CodexProvider::new(&binding.command);
     match provider.probe() {
         Ok(probe) => {
             let archetype = builtin_standard();
             let mut errors = Vec::new();
             for role in archetype.roles.values() {
                 let profile =
-                    archetype.permission_profiles[role.permission_profile];
+                    archetype.permission_profiles[&role.permission_profile];
                 let mut required = vec![
                     ProviderCapability::StartupInstructions,
                     if role.mode == RoleMode::Interactive {

@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProjectConfig",
+  "description": "Untrusted repository requests can only select definitions and restrict policy.",
+  "type": "object",
+  "properties": {
+    "archetype": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "limits": {
+      "$ref": "#/$defs/LimitOverrides",
+      "default": {
+        "max_agents_per_run": null,
+        "max_concurrent_agents": null,
+        "max_spawns_per_minute": null
+      }
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RoleRestriction"
+      },
+      "default": {}
+    },
+    "schema_version": {
+      "$ref": "#/$defs/ConfigSchemaVersion",
+      "default": 1
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ConfigSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "LimitOverrides": {
+      "type": "object",
+      "properties": {
+        "max_agents_per_run": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "max_concurrent_agents": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "max_spawns_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "RoleRestriction": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "max_instances": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "permission_profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GlobalConfig",
+  "description": "Trusted operator definitions. Included files use the same partial format.",
+  "type": "object",
+  "properties": {
+    "archetype": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "archetypes": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ArchetypeInput"
+      },
+      "default": {}
+    },
+    "includes": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "type": "string"
+      }
+    },
+    "limits": {
+      "$ref": "#/$defs/LimitOverrides",
+      "default": {
+        "max_agents_per_run": null,
+        "max_concurrent_agents": null,
+        "max_spawns_per_minute": null
+      }
+    },
+    "permission_profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ProfileInput"
+      },
+      "default": {}
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ProviderInput"
+      },
+      "default": {}
+    },
+    "schema_version": {
+      "$ref": "#/$defs/ConfigSchemaVersion",
+      "default": 1
+    },
+    "supervision": {
+      "$ref": "#/$defs/SupervisionOverrides",
+      "default": {
+        "interrupt_grace_ms": null,
+        "job_timeout_seconds": null,
+        "max_launch_attempts": null,
+        "restart_backoff_seconds": null,
+        "restart_window_seconds": null,
+        "shutdown_timeout_ms": null,
+        "startup_timeout_seconds": null
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ApprovalPolicy": {
+      "description": "How a provider process may request operator approval.",
+      "type": "string",
+      "enum": [
+        "interactive",
+        "never"
+      ]
+    },
+    "ArchetypeInput": {
+      "type": "object",
+      "properties": {
+        "lead": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "roles": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RoleInput"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "ConfigSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "FilesystemPolicy": {
+      "description": "Filesystem authority granted to a provider process.",
+      "type": "string",
+      "enum": [
+        "project-write",
+        "workspace-write",
+        "read-only"
+      ]
+    },
+    "LimitOverrides": {
+      "type": "object",
+      "properties": {
+        "max_agents_per_run": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "max_concurrent_agents": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "max_spawns_per_minute": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "NetworkPolicy": {
+      "description": "Network authority granted to a provider process.",
+      "type": "string",
+      "enum": [
+        "provider-default",
+        "deny"
+      ]
+    },
+    "ProfileInput": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "filesystem": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FilesystemPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProviderInput": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "RoleInput": {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "instructions": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "max_instances": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "default": null,
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RoleMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "permission_profile": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspacePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "RoleMode": {
+      "description": "The provider interaction style required by a role.",
+      "type": "string",
+      "enum": [
+        "interactive",
+        "job"
+      ]
+    },
+    "SupervisionOverrides": {
+      "type": "object",
+      "properties": {
+        "interrupt_grace_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "job_timeout_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "max_launch_attempts": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "restart_backoff_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "restart_window_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "shutdown_timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "startup_timeout_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkspacePolicy": {
+      "description": "The kind of target workspace assigned to a role.",
+      "type": "string",
+      "enum": [
+        "project",
+        "worktree",
+        "read-only"
+      ]
+    }
+  }
+}

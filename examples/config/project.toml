@@ -1,0 +1,8 @@
+# The selected definition must exist in trusted global configuration.
+archetype = "global:pair@1"
+
+[limits]
+max_concurrent_agents = 3
+
+[roles.builder]
+max_instances = 2
