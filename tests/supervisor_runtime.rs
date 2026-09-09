@@ -55,11 +55,18 @@ if [ "${COTERIE_FAKE_MODE-}" = "signals" ]; then
   done
 fi
 if [ "${COTERIE_FAKE_MODE-}" = "stop" ]; then
-  trap 'printf "term\n" > "$COTERIE_FAKE_CAPTURE"; exit 0' TERM
+  trap 'printf "int\n" >> "$COTERIE_FAKE_CAPTURE"' INT
+  trap 'printf "term\n" >> "$COTERIE_FAKE_CAPTURE"; exit 0' TERM
   printf 'ready\n' > "$COTERIE_FAKE_READY"
   while :; do
     :
   done
+fi
+if [ "${COTERIE_FAKE_MODE-}" = "phased-stop" ]; then
+  trap 'printf "int\n" >> "$COTERIE_FAKE_CAPTURE"' INT
+  trap 'printf "term\n" >> "$COTERIE_FAKE_CAPTURE"' TERM
+  printf 'ready\n' > "$COTERIE_FAKE_READY"
+  while :; do :; done
 fi
 if [ "${COTERIE_FAKE_MODE-}" = "restart" ]; then
   printf 'ready\n' > "$COTERIE_FAKE_READY"
@@ -678,9 +685,93 @@ fn stop_terminates_and_reaps_the_foreground_codex_process() {
     );
     assert_eq!(
         fs::read_to_string(&capture).expect("Codex should record termination"),
-        "term\n"
+        "int\nterm\n"
     );
     assert_eq!(fixture.index_entry_count(), 0);
+}
+
+#[test]
+fn phased_shutdown_resumes_after_a_supervisor_crash() {
+    let fixture = TestEnvironment::new();
+    let mut command = fixture.command();
+    command
+        .args(["__supervisor", RUN_ID, PROJECT_ID])
+        .arg(&fixture.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut supervisor = command.spawn().unwrap();
+    wait_until("supervisor publication", || {
+        fixture.index_entry_count() == 1
+    });
+    let ready = fixture.root.join("ready");
+    let capture = fixture.root.join("signals");
+    let mut command = fixture.command();
+    command
+        .env("COTERIE_FAKE_MODE", "phased-stop")
+        .env("COTERIE_FAKE_READY", &ready)
+        .env("COTERIE_FAKE_CAPTURE", &capture)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut foreground = command.spawn().unwrap();
+    wait_until("foreground ready", || ready.exists());
+    let operation_id = format!("co-{}", ulid::Ulid::generate());
+    let mut stop = fixture.command();
+    stop.args(["stop", "--json", "--operation-id", &operation_id])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut stop = stop.spawn().unwrap();
+    wait_until("interrupt delivery", || {
+        fs::read_to_string(&capture).is_ok_and(|text| text.contains("int"))
+    });
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(RUN_ID)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let deadline: i64 = connection
+        .query_row("SELECT deadline_ms FROM run_shutdowns", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+    stop.wait().unwrap();
+    let mut restart = fixture.command();
+    restart
+        .args(["__supervisor", RUN_ID, PROJECT_ID])
+        .arg(&fixture.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut restart = restart.spawn().unwrap();
+    wait_until("completed shutdown retirement", || {
+        fixture.index_entry_count() == 0
+    });
+    wait_until("foreground reap", || {
+        foreground.try_wait().unwrap().is_some()
+    });
+    wait_until("replacement supervisor exit", || {
+        restart.try_wait().unwrap().is_some()
+    });
+    assert_eq!(fs::read_to_string(&capture).unwrap(), "int\nterm\n");
+    let state: (String, i64, String, String) = connection.query_row("SELECT phase, deadline_ms, runs.status, operation_id FROM run_shutdowns JOIN runs ON runs.id = run_shutdowns.run_id", [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap();
+    assert_eq!(
+        state,
+        ("completed".into(), deadline, "stopped".into(), operation_id)
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM events WHERE event_type = 'run.stopped'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -1105,6 +1196,25 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
     fs::write(workspace_path.join("uncommitted.txt"), "recoverable work\n")
         .expect("the assignment worktree should become dirty");
     let stopped = fixture.run_json(&["stop", "--json"]);
+    let drained = rusqlite::Connection::open(
+        fixture
+            .state
+            .join("coterie/runs")
+            .join(run_id.as_str())
+            .join("state.sqlite3"),
+    )
+    .unwrap();
+    assert_eq!(
+        drained
+            .query_row(
+                "SELECT count(*) FROM assignments WHERE state = 'draining'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(drained.query_row("SELECT count(*) FROM events WHERE event_type = 'assignment.lifecycle_changed' AND json_extract(payload_json, '$.data.state') = 'draining'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(stopped["data"]["run_id"], run_id);
     assert_eq!(stopped["data"]["status"], "stopped");
     assert!(
@@ -1542,6 +1652,50 @@ fn concurrent_launches_share_one_supervisor_and_clean_shutdown_retires_it() {
         .expect("the durable run should be readable");
     assert_eq!(status, "stopped");
     assert!(stopped_at.is_some());
+}
+
+#[test]
+fn completed_shutdown_retires_stale_coordination_before_a_new_run() {
+    let fixture = TestEnvironment::new();
+    assert!(run(fixture.connect_command()).status.success());
+    let index_path = fixture.only_index_entry();
+    let index_bytes = fs::read(&index_path).unwrap();
+    let indexed: Value = serde_json::from_slice(&index_bytes).unwrap();
+    let old_run = indexed["run_id"].as_str().unwrap();
+    fixture.run_json(&["stop", "--json"]);
+    let socket = fixture
+        .runtime
+        .join("coterie")
+        .join(format!("{old_run}.sock"));
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    drop(listener);
+    fs::write(&index_path, &index_bytes).unwrap();
+    let result = run(fixture.connect_command());
+    assert!(result.status.success(), "{result:?}");
+    let current: Value =
+        serde_json::from_slice(&fs::read(fixture.only_index_entry()).unwrap())
+            .unwrap();
+    assert_ne!(current["run_id"], indexed["run_id"]);
+    assert!(!socket.exists());
+    let connection = rusqlite::Connection::open(
+        fixture
+            .state
+            .join("coterie/runs")
+            .join(old_run)
+            .join("state.sqlite3"),
+    )
+    .unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM events WHERE event_type = 'run.stopped'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    fixture.run_json(&["stop", "--json"]);
 }
 
 #[test]

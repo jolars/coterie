@@ -172,7 +172,7 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   recording.
 - [x] Fence sessions, assignments, workspaces, and late provider output by run
   and generation; adopt a live process only when it proves both.
-- [ ] Add bounded restart windows, crash-loop quarantine, timeout handling, and
+- [x] Add bounded restart windows, crash-loop quarantine, timeout handling, and
   the full phased shutdown protocol.
 - [ ] Complete `doctor`, conservative stale-state repair, resumable event
   following, transcript-tail handling, credential redaction, and private

@@ -1,5 +1,7 @@
 //! SQLite migrations, transactions, operations, messages, and events.
 
+pub(crate) mod supervision;
+
 #[cfg(test)]
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -71,6 +73,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 8,
         name: "generation_fencing",
         sql: include_str!("state/migrations/0008_generation_fencing.sql"),
+    },
+    Migration {
+        version: 9,
+        name: "bounded_supervision",
+        sql: include_str!("state/migrations/0009_bounded_supervision.sql"),
     },
 ];
 
@@ -651,6 +658,9 @@ pub(crate) struct EventRecord {
 pub(crate) enum EventKind {
     RunStarted,
     RunStopped,
+    RunShutdownChanged,
+    SessionControlChanged,
+    SessionRestartLimited,
     ProjectAttached,
     AgentCreated,
     AgentLifecycleChanged,
@@ -679,6 +689,9 @@ impl EventKind {
         match self {
             Self::RunStarted => "run.started",
             Self::RunStopped => "run.stopped",
+            Self::RunShutdownChanged => "run.shutdown_changed",
+            Self::SessionControlChanged => "session.control_changed",
+            Self::SessionRestartLimited => "session.restart_limited",
             Self::ProjectAttached => "project.attached",
             Self::AgentCreated => "agent.created",
             Self::AgentLifecycleChanged => "agent.lifecycle_changed",
@@ -3779,6 +3792,10 @@ mod tests {
             "operations",
             "projects",
             "runs",
+            "run_shutdowns",
+            "session_controls",
+            "session_launch_attempts",
+            "session_failures",
             "schema_migrations",
             "session_credentials",
             "sessions",
@@ -5075,6 +5092,9 @@ mod tests {
                     "target_reference": "refs/heads/main", "target_commit": "base", "integrated_at": 12,
                 }).to_string()],
             ).expect("legacy integration plan");
+            if prior_count >= 8 {
+                connection.execute("UPDATE operations SET result_json = json_set(result_json, '$.run_id', ?1, '$.generation', 2) WHERE id = ?2", rusqlite::params![RUN_ID, OPERATION_ID]).unwrap();
+            }
             connection.execute(
                 "INSERT INTO claims (id, run_id, task_id, agent_id, operation_id, state, claimed_at, released_at) \
                  VALUES (1, ?1, ?2, ?3, ?4, 'released', 10, 12)",
@@ -5085,11 +5105,22 @@ mod tests {
                  VALUES (?1, ?2, ?3, ?4, ?5, 1, 2, 'completed', 10, 12)",
                 rusqlite::params![ASSIGNMENT_ID, RUN_ID, TASK_ID, AGENT_ID, SESSION_ID],
             ).expect("legacy assignment");
-            connection.execute(
-                "INSERT INTO workspaces (assignment_id, run_id, project_id, kind, path, state, created_at) \
-                 VALUES (?1, ?2, ?3, 'worktree', ?4, 'observed', 10)",
-                rusqlite::params![ASSIGNMENT_ID, RUN_ID, PROJECT_ID, b"/tmp/workspace".as_slice()],
-            ).expect("legacy workspace");
+            let workspace_sql = if prior_count >= 8 {
+                "INSERT INTO workspaces (assignment_id, run_id, project_id, kind, path, state, created_at, generation) VALUES (?1, ?2, ?3, 'worktree', ?4, 'observed', 10, 2)"
+            } else {
+                "INSERT INTO workspaces (assignment_id, run_id, project_id, kind, path, state, created_at) VALUES (?1, ?2, ?3, 'worktree', ?4, 'observed', 10)"
+            };
+            connection
+                .execute(
+                    workspace_sql,
+                    rusqlite::params![
+                        ASSIGNMENT_ID,
+                        RUN_ID,
+                        PROJECT_ID,
+                        b"/tmp/workspace".as_slice()
+                    ],
+                )
+                .expect("legacy workspace");
             drop(connection);
 
             let store =

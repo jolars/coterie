@@ -197,13 +197,21 @@ payload. Full event-stream inspection is operator-only.
 coterie stop [--operation-id <co-ULID>]
 ```
 
-Stop the active run safely. Coterie rejects new spawns, interrupts workers,
-requests foreground termination, and explicitly terminates survivors after a
-bounded grace period. It marks the run stopped and retires its socket and
-project index only after every controlled process is terminal. If it cannot
-prove that outcome before the timeout, the command fails and leaves the run
-active. Shutdown does not delete assignment worktrees or owned references. Only
-the operator may call this mutation.
+Stop the active run safely. Coterie durably blocks foreground launches and
+worker spawns, marks unfinished assignments `draining`, and interrupts every
+controlled session. It sends `SIGTERM` after 250 milliseconds and `SIGKILL` to
+verified survivors after 2.5 seconds. The foreground wrapper controls its own
+child. Unknown processes are never signaled by PID alone.
+
+The five-second deadline covers process control and terminal observation. A
+timeout returns `unavailable` (exit 7), leaves the run active, and keeps launches
+blocked. Inspect `events --json` and retry with the same operation ID to recheck
+progress. Retries and supervisor restarts retain the original deadline. When
+all processes are proved terminal, Coterie reconciles workspace observations,
+marks the run stopped, and retires its socket and project index before releasing
+the lease. It preserves unfinished tasks, claims, draining assignments,
+transcripts, worktrees, and owned references. Only the operator may call this
+mutation.
 
 ## Recovery
 
@@ -238,6 +246,26 @@ older generation's assignment or create or integrate its workspace. Such work
 remains available for inspection. Recovery adopts a provider handle only when
 its provider identity and complete session scope match the current durable
 ownership; a PID alone does not establish that proof.
+
+The compiled restart policy allows three launch attempts within 60 seconds,
+with exponential retry delays starting at one second. Automatic retries require
+proof that the failed attempt created no process. Exhausting this budget
+quarantines the session and records `session.restart_limited`; repeated failures
+before a session can be prepared also stop after three attempts. Three failed
+foreground sessions in one window quarantine the latest session and block
+replacement for 60 seconds. Quarantine and retry accounting survive supervisor
+restarts. Workers that have already executed are left for the lead to inspect
+and recover, preserving the original task and workspace ownership.
+
+Provider probes time out after two seconds and cap each output stream at 1 MiB.
+Session startup times out after 30 seconds; background jobs have a one-hour
+execution limit. Foreground interactive sessions have no execution limit.
+These limits do not treat a quiet provider as idle or successful. Session
+timeouts use the interrupt, terminate, and kill phases described above and emit
+`session.control_changed` events. Shutdown phases emit `run.shutdown_changed`.
+Handshake waits are bounded to five seconds, and ordinary RPC responses to ten
+seconds; the foreground process-control subscription remains a long poll.
+External configuration of these compiled limits belongs to M5.
 
 Coterie never automatically deletes a dirty, unintegrated, running, lost, or
 ambiguously owned assignment worktree. Use `status`, `prime`, `logs`, and

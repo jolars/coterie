@@ -57,6 +57,7 @@ use crate::providers::{
     CodexProvider, InteractiveEnvironment, LaunchMode, LaunchSpecification,
     LifecycleState, Provider, ProviderCapability,
 };
+use crate::state::supervision::{ControlPhase, ShutdownPhase};
 use crate::state::{
     AcknowledgeMessagesMutation, AcknowledgeMessagesResult, AgentRecord,
     ClaimTaskMutation, ClaimTaskResult, DependencyRecord, EventKind,
@@ -89,8 +90,6 @@ const STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 const SESSION_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(5);
 const MAXIMUM_EVENTS_PER_POLL: usize = 256;
-const WORKER_INTERRUPT_GRACE: Duration = Duration::from_millis(250);
-const FOREGROUND_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const DATABASE_FILE: &str = "state.sqlite3";
 const MAXIMUM_LINUX_SOCKET_PATH_LENGTH: usize = 107;
 
@@ -476,7 +475,7 @@ fn validate_foreground_exit_response(
     match response {
         RpcResponse::ForegroundObserved { session_id, state }
             if session_id == scope.session_id
-                && state == LifecycleState::Exited.as_str() =>
+                && matches!(state.as_str(), "exited" | "quarantined") =>
         {
             Ok(())
         }
@@ -875,6 +874,7 @@ async fn await_startup(
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let index = ActiveRunIndex::new(directories);
     let mut child_status = None;
+    let mut continued_after_retirement = false;
     loop {
         if let Some(entry) = index.lookup(&project.identity)? {
             match SupervisorClient::connect_operator_at(
@@ -899,6 +899,19 @@ async fn await_startup(
                 .child
                 .try_wait()
                 .map_err(SupervisorError::ChildStatus)?;
+        }
+        if !continued_after_retirement
+            && child_status.is_some_and(|status| status.success())
+            && index.lookup(&project.identity)?.is_none()
+        {
+            let candidate = ActiveRunEntry::new(
+                RunId::generate(),
+                ProjectId::generate(),
+                project.identity.clone(),
+            );
+            supervisor = spawn_supervisor(&candidate, &project.canonical_path)?;
+            child_status = None;
+            continued_after_retirement = true;
         }
         if Instant::now() >= deadline {
             let child_error = supervisor.error_message();
@@ -950,6 +963,16 @@ async fn serve(
     let mut store =
         initialize_store(&run_directories.state, &active, &project)?;
     let socket_path = checked_socket_path(&directories, active.run_id)?;
+    if store.transaction(|repositories| {
+        Ok(repositories
+            .run(active.run_id)?
+            .is_some_and(|run| run.status == "stopped"))
+    })? {
+        remove_stale_socket(&socket_path)?;
+        ActiveRunIndex::new(&directories)
+            .retire(&project.identity, active.run_id)?;
+        return Ok(());
+    }
     remove_stale_socket(&socket_path)?;
     let listener = UnixListener::bind(&socket_path).map_err(|source| {
         SupervisorError::SocketIo {
@@ -970,11 +993,21 @@ async fn serve(
     let mut sessions = runtime_sessions(&run_directories.state);
     let mut workspaces = runtime_workspaces(&run_directories.state);
     let reconciled_at = unix_timestamp()?;
-    workspaces.reconcile_after_restart(
-        &mut store,
-        active.run_id,
-        reconciled_at,
-    )?;
+    if store.transaction(|repositories| {
+        Ok(repositories.run_shutdown(active.run_id)?.is_some())
+    })? {
+        workspaces.reconcile_for_shutdown(
+            &mut store,
+            active.run_id,
+            reconciled_at,
+        )?;
+    } else {
+        workspaces.reconcile_after_restart(
+            &mut store,
+            active.run_id,
+            reconciled_at,
+        )?;
+    }
     sessions.reconcile_after_restart(
         &mut store,
         active.run_id,
@@ -1001,12 +1034,12 @@ async fn serve(
         &mut workspaces,
     )
     .await;
-    let index_result = if serve_result.is_ok() {
+    let socket_result = remove_owned_socket(&socket_path);
+    let index_result = if serve_result.is_ok() && socket_result.is_ok() {
         index.retire(&project.identity, active.run_id)
     } else {
         Ok(())
     };
-    let socket_result = remove_owned_socket(&socket_path);
     drop(lease);
 
     serve_result?;
@@ -1027,7 +1060,16 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(16);
     let mut connections = JoinSet::new();
-    let mut foreground = ForegroundCoordination::default();
+    let pending_shutdown = store
+        .transaction(|repositories| repositories.run_shutdown(active.run_id))?
+        .filter(|shutdown| shutdown.phase != ShutdownPhase::Completed)
+        .map(|_| PendingShutdown {
+            responses: Vec::new(),
+        });
+    let mut foreground = ForegroundCoordination {
+        pending_shutdown,
+        ..ForegroundCoordination::default()
+    };
     let mut session_poll = tokio::time::interval(SESSION_POLL_INTERVAL);
     session_poll
         .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1086,17 +1128,19 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
                 progress_shutdown(
                     store,
                     sessions,
+                    workspaces,
                     active.run_id,
                     &mut foreground,
                 );
+                if foreground.retire_without_response { break; }
             }
             _ = reconciliation_poll.tick() => {
                 let reconciled_at = unix_timestamp()?;
-                workspaces.reconcile_after_restart(
-                    store,
-                    active.run_id,
-                    reconciled_at,
-                )?;
+                if foreground.pending_shutdown.is_some() {
+                    workspaces.reconcile_for_shutdown(store, active.run_id, reconciled_at)?;
+                } else {
+                    workspaces.reconcile_after_restart(store, active.run_id, reconciled_at)?;
+                }
                 reconcile_operations(
                     &mut SpawnRuntime {
                         store,
@@ -1108,24 +1152,6 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
                     },
                     reconciled_at,
                 )?;
-            }
-            _ = sleep_until_pending_shutdown(&foreground.pending_shutdown),
-                if foreground.pending_shutdown.is_some() =>
-            {
-                let pending = foreground.pending_shutdown
-                    .take()
-                    .expect("the guarded shutdown should be pending");
-                let failure = RpcFailure::new(
-                    RpcFailureCode::Unavailable,
-                    format!(
-                        "timed out waiting for agent processes before stopping run {}",
-                        active.run_id
-                    ),
-                );
-                for response in pending.responses {
-                    let _request_may_have_disconnected =
-                        response.send(Err(failure.clone()));
-                }
             }
             Some(completed) = connections.join_next(), if !connections.is_empty() => {
                 match completed {
@@ -1194,8 +1220,15 @@ fn reconcile_operations<P: Provider, B: WorkspaceBackend>(
     let operations = runtime.store.transaction(|repositories| {
         repositories.operations_requiring_reconciliation(runtime.run_id)
     })?;
+    let stopping = runtime.store.transaction(|repositories| {
+        Ok(repositories.run_shutdown(runtime.run_id)?.is_some())
+    })?;
     for operation in operations {
+        if stopping && operation.kind == "agent.spawn" {
+            continue;
+        }
         match operation.kind.as_str() {
+            "run.stop" => {}
             "agent.launch_foreground" => {
                 reconcile_foreground_operation(
                     runtime.store,
@@ -1509,11 +1542,7 @@ struct ForegroundControlWaiter {
 }
 
 struct PendingShutdown {
-    operation_id: OperationId,
     responses: Vec<oneshot::Sender<Result<RpcResponse, RpcFailure>>>,
-    terminate_at: Instant,
-    termination_sent: bool,
-    deadline: Instant,
 }
 
 #[derive(Default)]
@@ -1521,13 +1550,6 @@ struct ForegroundCoordination {
     controls: BTreeMap<SessionId, ForegroundControlWaiter>,
     pending_shutdown: Option<PendingShutdown>,
     retire_without_response: bool,
-}
-
-async fn sleep_until_pending_shutdown(pending: &Option<PendingShutdown>) {
-    let deadline = pending
-        .as_ref()
-        .map_or_else(Instant::now, |shutdown| shutdown.deadline);
-    tokio::time::sleep_until(deadline).await;
 }
 
 fn handle_command<P: Provider, B: WorkspaceBackend>(
@@ -1563,6 +1585,7 @@ fn handle_command<P: Provider, B: WorkspaceBackend>(
             begin_shutdown(
                 store,
                 sessions,
+                workspaces,
                 run_id,
                 operation_id,
                 response,
@@ -1575,6 +1598,15 @@ fn handle_command<P: Provider, B: WorkspaceBackend>(
             response,
         } => {
             if let RpcRequest::WaitForegroundControl { scope } = request {
+                let shutdown_pending = foreground.pending_shutdown.is_some()
+                    || store
+                        .transaction(|repositories| {
+                            Ok(repositories
+                                .session_controls(run_id)?
+                                .iter()
+                                .any(|control| control.scope == scope))
+                        })
+                        .unwrap_or(false);
                 register_foreground_control(
                     store,
                     run_id,
@@ -1582,7 +1614,7 @@ fn handle_command<P: Provider, B: WorkspaceBackend>(
                     scope,
                     response,
                     &mut foreground.controls,
-                    foreground.pending_shutdown.is_some(),
+                    shutdown_pending,
                 );
                 return;
             }
@@ -1592,8 +1624,11 @@ fn handle_command<P: Provider, B: WorkspaceBackend>(
                 _ => None,
             };
             let result = if foreground.pending_shutdown.is_some()
-                && matches!(&request, RpcRequest::Spawn { .. })
-            {
+                && matches!(
+                    &request,
+                    RpcRequest::Spawn { .. }
+                        | RpcRequest::LaunchForeground { .. }
+                ) {
                 Err(conflict(
                     "the run is stopping and no longer accepts worker spawns",
                 ))
@@ -1620,95 +1655,74 @@ fn handle_command<P: Provider, B: WorkspaceBackend>(
             let _request_may_have_disconnected = response.send(result);
             if succeeded && let Some(scope) = ended_scope {
                 release_foreground_control(&mut foreground.controls, scope);
-                progress_shutdown(store, sessions, run_id, foreground);
+                progress_shutdown(
+                    store, sessions, workspaces, run_id, foreground,
+                );
             }
         }
     }
 }
 
-fn begin_shutdown<P: Provider>(
+fn begin_shutdown<P: Provider, B: WorkspaceBackend>(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<P>,
+    workspaces: &mut WorkspaceSupervisor<B>,
     run_id: RunId,
     operation_id: OperationId,
     response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
     foreground: &mut ForegroundCoordination,
 ) {
-    if let Some(pending) = &mut foreground.pending_shutdown {
-        if pending.operation_id == operation_id {
-            pending.responses.push(response);
-        } else {
-            let _request_may_have_disconnected = response.send(Err(conflict(
-                "another run shutdown is already waiting for foreground processes",
-            )));
-        }
+    let policy = compiled_defaults().supervision;
+    let result = unix_timestamp_ms()
+        .map_err(supervisor_rpc_failure)
+        .and_then(|now_ms| {
+            store
+                .transaction(|repositories| {
+                    repositories.begin_run_shutdown(
+                        run_id,
+                        operation_id,
+                        now_ms,
+                        policy.interrupt_grace_ms,
+                        policy.shutdown_timeout_ms,
+                    )
+                })
+                .map_err(rpc_state_failure)
+        });
+    if let Err(error) = result {
+        let _disconnected = response.send(Err(error));
         return;
     }
-    let reconciled_at = match rpc_timestamp() {
-        Ok(reconciled_at) => reconciled_at,
-        Err(error) => {
-            let _request_may_have_disconnected = response.send(Err(error));
-            return;
-        }
-    };
-    if let Err(error) =
-        sessions.reconcile_unknown_sessions(store, run_id, reconciled_at)
-    {
-        let _request_may_have_disconnected =
-            response.send(Err(rpc_session_failure(error)));
-        return;
-    }
-    let foreground_scopes = active_foreground_scopes(store, run_id);
-    let background_sessions = active_background_session_ids(store, run_id);
-    match (foreground_scopes, background_sessions) {
-        (Ok(foreground_scopes), Ok(background_sessions))
-            if foreground_scopes.is_empty()
-                && background_sessions.is_empty() =>
-        {
-            let result = persist_shutdown(store, run_id, operation_id)
-                .map_err(supervisor_rpc_failure);
-            let stopped = result.is_ok();
-            if response.send(result).is_err() && stopped {
+    match store.transaction(|repositories| {
+        Ok(repositories
+            .run_shutdown(run_id)?
+            .is_some_and(|shutdown| shutdown.phase == ShutdownPhase::Completed))
+    }) {
+        Ok(true) => {
+            if response
+                .send(Ok(RpcResponse::ShuttingDown {
+                    run_id,
+                    operation_id,
+                }))
+                .is_err()
+            {
                 foreground.retire_without_response = true;
             }
+            return;
         }
-        (Ok(foreground_scopes), Ok(background_sessions)) => {
-            let observed_at = match rpc_timestamp() {
-                Ok(observed_at) => observed_at,
-                Err(error) => {
-                    let _request_may_have_disconnected =
-                        response.send(Err(error));
-                    return;
-                }
-            };
-            for session_id in background_sessions {
-                if let Err(error) =
-                    sessions.interrupt(store, session_id, observed_at)
-                {
-                    let _request_may_have_disconnected =
-                        response.send(Err(rpc_session_failure(error)));
-                    return;
-                }
-            }
-            let now = Instant::now();
-            foreground.pending_shutdown = Some(PendingShutdown {
-                operation_id,
-                responses: vec![response],
-                terminate_at: now + WORKER_INTERRUPT_GRACE,
-                termination_sent: false,
-                deadline: now + FOREGROUND_SHUTDOWN_TIMEOUT,
-            });
-            request_foreground_termination(
-                &mut foreground.controls,
-                &foreground_scopes,
-            );
-            progress_shutdown(store, sessions, run_id, foreground);
-        }
-        (Err(error), _) | (_, Err(error)) => {
-            let _request_may_have_disconnected =
-                response.send(Err(rpc_state_failure(error)));
+        Ok(false) => {}
+        Err(error) => {
+            let _disconnected = response.send(Err(rpc_state_failure(error)));
+            return;
         }
     }
+    let pending =
+        foreground
+            .pending_shutdown
+            .get_or_insert_with(|| PendingShutdown {
+                responses: Vec::new(),
+            });
+    pending.responses.push(response);
+    progress_shutdown(store, sessions, workspaces, run_id, foreground);
 }
 
 fn register_foreground_control(
@@ -1800,93 +1814,115 @@ fn release_foreground_control(
         )));
 }
 
-fn progress_shutdown<P: Provider>(
+fn progress_shutdown<P: Provider, B: WorkspaceBackend>(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<P>,
+    workspaces: &mut WorkspaceSupervisor<B>,
     run_id: RunId,
     foreground: &mut ForegroundCoordination,
 ) {
-    if foreground.pending_shutdown.is_none() {
-        return;
-    }
-    let foreground_scopes = active_foreground_scopes(store, run_id);
-    let background_sessions = active_background_session_ids(store, run_id);
-    match (foreground_scopes, background_sessions) {
-        (Ok(foreground_scopes), Ok(background_sessions))
-            if foreground_scopes.is_empty()
-                && background_sessions.is_empty() =>
-        {
-            let pending = foreground
-                .pending_shutdown
-                .take()
-                .expect("the checked shutdown should still be pending");
-            let result = persist_shutdown(store, run_id, pending.operation_id)
-                .map_err(supervisor_rpc_failure);
-            let stopped = result.is_ok();
+    let result = progress_shutdown_inner(
+        store, sessions, workspaces, run_id, foreground,
+    );
+    match result {
+        Ok(Some(response)) => {
+            let pending = foreground.pending_shutdown.take();
             let mut delivered = false;
-            for response in pending.responses {
-                delivered |= response.send(result.clone()).is_ok();
+            if let Some(pending) = pending {
+                for waiter in pending.responses {
+                    delivered |= waiter.send(Ok(response.clone())).is_ok();
+                }
             }
-            if !delivered && stopped {
+            if !delivered {
                 foreground.retire_without_response = true;
             }
         }
-        (Ok(_), Ok(background_sessions)) => {
-            let should_terminate =
-                foreground.pending_shutdown.as_ref().is_some_and(|pending| {
-                    !pending.termination_sent
-                        && Instant::now() >= pending.terminate_at
-                });
-            if !should_terminate {
-                return;
-            }
-            let observed_at = match rpc_timestamp() {
-                Ok(observed_at) => observed_at,
-                Err(error) => {
-                    fail_pending_shutdown(foreground, error);
-                    return;
-                }
-            };
-            for session_id in background_sessions {
-                if let Err(error) =
-                    sessions.terminate(store, session_id, observed_at)
-                {
-                    fail_pending_shutdown(
-                        foreground,
-                        rpc_session_failure(error),
-                    );
-                    return;
-                }
-            }
+        Ok(None) => {}
+        Err(failure) => {
             if let Some(pending) = &mut foreground.pending_shutdown {
-                pending.termination_sent = true;
-            }
-        }
-        (Err(error), _) | (_, Err(error)) => {
-            let pending = foreground
-                .pending_shutdown
-                .take()
-                .expect("the checked shutdown should still be pending");
-            let failure = rpc_state_failure(error);
-            for response in pending.responses {
-                let _request_may_have_disconnected =
-                    response.send(Err(failure.clone()));
+                for response in pending.responses.drain(..) {
+                    let _disconnected = response.send(Err(failure.clone()));
+                }
             }
         }
     }
 }
 
-fn fail_pending_shutdown(
+fn progress_shutdown_inner<P: Provider, B: WorkspaceBackend>(
+    store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<P>,
+    workspaces: &mut WorkspaceSupervisor<B>,
+    run_id: RunId,
     foreground: &mut ForegroundCoordination,
-    failure: RpcFailure,
-) {
-    let Some(pending) = foreground.pending_shutdown.take() else {
-        return;
+) -> Result<Option<RpcResponse>, RpcFailure> {
+    let now_ms = unix_timestamp_ms().map_err(supervisor_rpc_failure)?;
+    sessions
+        .reconcile_unknown_sessions(store, run_id, now_ms / 1000)
+        .map_err(rpc_session_failure)?;
+    sessions
+        .drive_controls(store, run_id, now_ms)
+        .map_err(rpc_session_failure)?;
+    let controls = store
+        .transaction(|repositories| repositories.session_controls(run_id))
+        .map_err(rpc_state_failure)?;
+    let scopes = controls
+        .iter()
+        .filter(|control| control.phase != ControlPhase::Completed)
+        .map(|control| control.scope)
+        .collect::<Vec<_>>();
+    request_foreground_termination(&mut foreground.controls, &scopes);
+    let Some(shutdown) = store
+        .transaction(|repositories| repositories.run_shutdown(run_id))
+        .map_err(rpc_state_failure)?
+    else {
+        return Ok(None);
     };
-    for response in pending.responses {
-        let _request_may_have_disconnected =
-            response.send(Err(failure.clone()));
+    if shutdown.phase == ShutdownPhase::Completed {
+        return Ok(None);
     }
+    let foreground_scopes =
+        active_foreground_scopes(store, run_id).map_err(rpc_state_failure)?;
+    let background_sessions = active_background_session_ids(store, run_id)
+        .map_err(rpc_state_failure)?;
+    if foreground_scopes.is_empty() && background_sessions.is_empty() {
+        store
+            .transaction(|repositories| {
+                repositories.set_shutdown_phase(
+                    run_id,
+                    ShutdownPhase::Reconciling,
+                    now_ms,
+                )
+            })
+            .map_err(rpc_state_failure)?;
+        workspaces
+            .reconcile_for_shutdown(store, run_id, now_ms / 1000)
+            .map_err(rpc_workspace_failure)?;
+        return persist_shutdown(store, run_id, shutdown.operation_id)
+            .map(Some)
+            .map_err(supervisor_rpc_failure);
+    }
+    let phase = if now_ms >= shutdown.deadline_ms {
+        ShutdownPhase::TimedOut
+    } else if now_ms >= shutdown.interrupt_until_ms {
+        ShutdownPhase::Terminating
+    } else {
+        ShutdownPhase::Interrupting
+    };
+    let phase = phase.max(shutdown.phase);
+    store
+        .transaction(|repositories| {
+            repositories.set_shutdown_phase(run_id, phase, now_ms)
+        })
+        .map_err(rpc_state_failure)?;
+    if phase == ShutdownPhase::TimedOut {
+        return Err(RpcFailure::new(
+            RpcFailureCode::Unavailable,
+            format!(
+                "timed out waiting for agent processes before stopping run {run_id}; launches remain blocked and recoverable work is retained"
+            ),
+        ));
+    }
+    Ok(None)
 }
 
 fn active_foreground_scopes(
@@ -2011,6 +2047,19 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
                 "the caller's session generation is no longer active",
             ));
         }
+    }
+    if matches!(
+        &request,
+        RpcRequest::Spawn { .. } | RpcRequest::LaunchForeground { .. }
+    ) && store
+        .transaction(|repositories| {
+            Ok(repositories.run_shutdown(run_id)?.is_some())
+        })
+        .map_err(rpc_state_failure)?
+    {
+        return Err(conflict(
+            "the run is draining and no longer accepts launches",
+        ));
     }
     match request {
         RpcRequest::Ping => Ok(RpcResponse::Pong { run_id }),
@@ -2181,6 +2230,28 @@ fn launch_foreground(
     let provider = role_definition.provider.to_owned();
     let bootstrap_instruction = bootstrap_instruction(run_id, &role);
     let now = rpc_timestamp()?;
+    let quarantine_until = store
+        .transaction(|repositories| {
+            if repositories.operation(operation_id)?.is_some() {
+                return Ok(None);
+            }
+            let agent = repositories
+                .agents(run_id)?
+                .into_iter()
+                .find(|agent| agent.role == role);
+            agent
+                .map(|agent| {
+                    repositories.agent_quarantine_until(run_id, agent.id, now)
+                })
+                .transpose()
+                .map(Option::flatten)
+        })
+        .map_err(rpc_state_failure)?;
+    if let Some(until) = quarantine_until {
+        return Err(conflict(format!(
+            "the foreground session is quarantined after repeated failures; retry after Unix timestamp {until} and inspect its events"
+        )));
+    }
     let agent_id = AgentId::generate();
     let session_id = SessionId::generate();
     let mutation = Mutation {
@@ -2562,7 +2633,7 @@ fn observe_foreground_ended(
             json!({"reason": "observation_failed"}),
         ),
     };
-    store
+    let lifecycle = store
         .transaction(|repositories| {
             let session = repositories
                 .session(scope.session_id)?
@@ -2570,6 +2641,7 @@ fn observe_foreground_ended(
                     id: scope.agent_id,
                     reason: "the foreground session disappeared".to_owned(),
                 })?;
+            if session.state.is_terminal() { return Ok(session.state); }
             let transition = repositories
                 .record_session_reconciliation_state(
                     scope,
@@ -2601,6 +2673,9 @@ fn observe_foreground_ended(
                     created_at: observed_at,
                 })?;
             }
+            let failed = matches!(end, ForegroundEnd::LaunchFailed) || matches!(end, ForegroundEnd::Exited { code, signal } if code != Some(0) && signal != Some(signal_hook::consts::signal::SIGINT) && signal != Some(signal_hook::consts::signal::SIGTERM));
+            let stopping = repositories.run_shutdown(run_id)?.is_some() || repositories.session_controls(run_id)?.iter().any(|control| control.scope == scope);
+            let lifecycle = if failed && !stopping && !session.state.is_terminal() && repositories.record_session_failure(scope, observed_at, compiled_defaults().supervision)? { LifecycleState::Quarantined } else { lifecycle };
             record_foreground_lifecycle(
                 repositories,
                 &session,
@@ -2623,7 +2698,7 @@ fn observe_foreground_ended(
                 },
                 observed_at,
             )?;
-            Ok(())
+            Ok(lifecycle)
         })
         .map_err(rpc_state_failure)?;
     Ok(RpcResponse::ForegroundObserved {
@@ -3334,6 +3409,22 @@ fn attempt_spawn_operation<P: Provider, B: WorkspaceBackend>(
     let operation_id = completion.operation_id;
     let session_id = completion.intent.session_id;
     let reconciled_at = completion.reconciled_at;
+    let agent_id = completion.intent.agent_id;
+    let preflight_quarantined = runtime
+        .store
+        .transaction(|repositories| {
+            Ok(repositories.session(session_id)?.is_none()
+                && repositories.agent(agent_id)?.is_some_and(|agent| {
+                    agent.run_id == runtime.run_id
+                        && agent.state == LifecycleState::Quarantined
+                }))
+        })
+        .map_err(rpc_state_failure)?;
+    if preflight_quarantined {
+        return Err(conflict(
+            "the launch is quarantined after repeated preflight failures; inspect its events and preserved workspace",
+        ));
+    }
     match complete_spawn_operation(runtime, completion) {
         Ok(()) => Ok(()),
         Err(failure) => {
@@ -3353,6 +3444,10 @@ fn attempt_spawn_operation<P: Provider, B: WorkspaceBackend>(
                         Some(&failure.message),
                         reconciled_at,
                     )?;
+                    if repositories.session(session_id)?.is_none() && repositories.operation(operation_id)?.is_some_and(|operation| operation.reconciliation_attempt_count >= compiled_defaults().supervision.max_launch_attempts) {
+                        repositories.quarantine_unstarted_agent(runtime.run_id, agent_id, operation_id, reconciled_at)?;
+                        repositories.record_operation_reconciliation(operation_id, ExternalResourceState::Observed, Some("launch quarantined after repeated preflight failures; no provider session was created"), reconciled_at)?;
+                    }
                     Ok(())
                 })
                 .map_err(rpc_state_failure)?;
@@ -3460,7 +3555,12 @@ fn complete_spawn_operation<P: Provider, B: WorkspaceBackend>(
         created_at,
     };
     if let Some(launched) = sessions
-        .ensure_existing_launch(store, &launch, Some(intent.assignment_id))
+        .ensure_existing_launch(
+            store,
+            &launch,
+            Some(intent.assignment_id),
+            reconciled_at,
+        )
         .map_err(rpc_session_failure)?
     {
         debug_assert_eq!(launched.scope, launch.scope);
@@ -4432,7 +4532,8 @@ fn rpc_session_failure(error: AgentSessionError) -> RpcFailure {
             RpcFailure::new(RpcFailureCode::Unavailable, error.to_string())
         }
         AgentSessionError::State(error) => rpc_state_failure(error),
-        AgentSessionError::UnresolvedIntent { .. } => {
+        AgentSessionError::UnresolvedIntent { .. }
+        | AgentSessionError::RestartLimited { .. } => {
             RpcFailure::new(RpcFailureCode::Conflict, error.to_string())
         }
         AgentSessionError::Transcript(_)
@@ -4539,6 +4640,41 @@ fn persist_shutdown(
     operation_id: OperationId,
 ) -> Result<RpcResponse, SupervisorError> {
     let stopped_at = unix_timestamp()?;
+    if let Some(shutdown) =
+        store.transaction(|repositories| repositories.run_shutdown(run_id))?
+    {
+        if shutdown.operation_id != operation_id {
+            return Err(
+                StoreError::OperationConflict { id: operation_id }.into()
+            );
+        }
+        let response = RpcResponse::ShuttingDown {
+            run_id,
+            operation_id,
+        };
+        if shutdown.phase == ShutdownPhase::Completed {
+            return Ok(response);
+        }
+        store.transaction(|repositories| {
+            repositories.stop_run(run_id, stopped_at)?;
+            repositories.supervision_event(
+                run_id,
+                EventKind::RunStopped,
+                run_id.to_string(),
+                None,
+                Some(operation_id),
+                json!({"previous_status": "active", "status": "stopped"}),
+                "Stopped the run and retained recoverable work.",
+                stopped_at.saturating_mul(1000),
+            )?;
+            repositories.complete_shutdown_operation(
+                run_id,
+                &serde_json::to_value(&response)?,
+                stopped_at.saturating_mul(1000),
+            )
+        })?;
+        return Ok(response);
+    }
     let mutation = Mutation {
         id: operation_id,
         run_id,
@@ -4657,7 +4793,7 @@ fn initialize_store(
             })?;
         }
         (Some(run), Some(stored_project))
-            if run.status == "active"
+            if matches!(run.status.as_str(), "active" | "stopped")
                 && stored_project.run_id == active.run_id
                 && stored_project.is_primary
                 && stored_project.canonical_path == project.canonical_path
@@ -4670,6 +4806,14 @@ fn initialize_store(
         }
     }
     Ok(store)
+}
+
+fn unix_timestamp_ms() -> Result<i64, SupervisorError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(SupervisorError::SystemClock)?;
+    i64::try_from(duration.as_millis())
+        .map_err(|_| SupervisorError::TimestampOverflow)
 }
 
 fn unix_timestamp() -> Result<i64, SupervisorError> {
@@ -4787,6 +4931,27 @@ impl SupervisorClient {
         channel: ConnectionChannel,
         authentication: RequestAuthentication,
     ) -> Result<Self, SupervisorError> {
+        tokio::time::timeout(
+            STARTUP_TIMEOUT,
+            Self::connect_with_unbounded(
+                socket_path,
+                expected,
+                channel,
+                authentication,
+            ),
+        )
+        .await
+        .map_err(|_| SupervisorError::RpcTimeout {
+            action: "supervisor handshake",
+        })?
+    }
+
+    async fn connect_with_unbounded(
+        socket_path: &Path,
+        expected: &ActiveRunEntry,
+        channel: ConnectionChannel,
+        authentication: RequestAuthentication,
+    ) -> Result<Self, SupervisorError> {
         let mut stream =
             UnixStream::connect(socket_path).await.map_err(|source| {
                 SupervisorError::SocketIo {
@@ -4855,6 +5020,23 @@ impl SupervisorClient {
     }
 
     pub(crate) async fn request(
+        &mut self,
+        request: RpcRequest,
+    ) -> Result<RpcResponse, SupervisorError> {
+        if matches!(request, RpcRequest::WaitForegroundControl { .. }) {
+            return self.request_unbounded(request).await;
+        }
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            self.request_unbounded(request),
+        )
+        .await
+        .map_err(|_| SupervisorError::RpcTimeout {
+            action: "supervisor response",
+        })?
+    }
+
+    async fn request_unbounded(
         &mut self,
         request: RpcRequest,
     ) -> Result<RpcResponse, SupervisorError> {
@@ -5183,6 +5365,8 @@ async fn reject(
 /// A failure while locating, starting, or communicating with a supervisor.
 #[derive(Debug, Error)]
 pub(crate) enum SupervisorError {
+    #[error("timed out waiting for {action}")]
+    RpcTimeout { action: &'static str },
     #[error(transparent)]
     Project(#[from] ProjectError),
     #[error(transparent)]
@@ -5298,6 +5482,7 @@ pub(crate) enum SupervisorError {
 impl SupervisorError {
     fn is_transient_connection_failure(&self) -> bool {
         match self {
+            Self::RpcTimeout { .. } => true,
             Self::SocketIo { source, .. } => matches!(
                 source.kind(),
                 io::ErrorKind::NotFound
@@ -5376,7 +5561,8 @@ impl SupervisorError {
             Self::State(_) | Self::RunStateMismatch { .. } => {
                 crate::cli::ErrorCode::CorruptState
             }
-            Self::SocketIo { .. }
+            Self::RpcTimeout { .. }
+            | Self::SocketIo { .. }
             | Self::Frame(_)
             | Self::Spawn { .. }
             | Self::StartupTimeout { .. }
@@ -6267,7 +6453,14 @@ mod tests {
             socket_path: &socket_path,
             run_id: active.run_id,
         };
-        reconcile_operations(&mut runtime, 20)
+        let retry_at = runtime
+            .store
+            .transaction(|repositories| {
+                Ok(repositories.operation(operation_id)?.unwrap().created_at
+                    + 10)
+            })
+            .unwrap();
+        reconcile_operations(&mut runtime, retry_at)
             .expect("the desired provider session should be retried");
 
         store
@@ -6391,6 +6584,43 @@ mod tests {
                 Ok(())
             })
             .expect("the incomplete spawn should remain reconcilable");
+        for now in [20, 30, 40] {
+            reconcile_operations(
+                &mut super::SpawnRuntime {
+                    store: &mut store,
+                    sessions: &mut sessions,
+                    workspaces: &mut workspaces,
+                    run_state_directory: &run_state_directory,
+                    socket_path: &socket_path,
+                    run_id: active.run_id,
+                },
+                now,
+            )
+            .unwrap();
+        }
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories.agents(active.run_id)?[0].state,
+                    LifecycleState::Quarantined
+                );
+                assert!(
+                    repositories
+                        .operations_requiring_reconciliation(active.run_id)?
+                        .is_empty()
+                );
+                assert!(repositories.sessions(active.run_id)?.is_empty());
+                assert!(
+                    repositories
+                        .operation(operation_id)?
+                        .unwrap()
+                        .reconciliation_error
+                        .unwrap()
+                        .contains("quarantined")
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
@@ -7053,6 +7283,260 @@ mod tests {
     }
 
     #[test]
+    fn foreground_crash_loop_is_quarantined_and_exit_replay_is_idempotent() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run_id = RunId::generate();
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: run_id,
+                    status: "active".into(),
+                    created_at: 10,
+                    stopped_at: None,
+                })
+            })
+            .unwrap();
+        let mut last_scope = None;
+        for failure in 1..=3 {
+            let response = launch_foreground(
+                &mut store,
+                run_id,
+                &AuthenticatedCaller::Operator,
+                OperationId::generate(),
+                &AgentToken::generate().unwrap(),
+            )
+            .unwrap();
+            let RpcResponse::ForegroundPrepared {
+                agent,
+                session_id,
+                generation,
+                ..
+            } = response
+            else {
+                panic!("expected foreground launch");
+            };
+            let scope = SessionScope {
+                run_id,
+                agent_id: agent.id,
+                session_id,
+                generation,
+            };
+            let end = super::ForegroundEnd::Exited {
+                code: Some(23),
+                signal: None,
+            };
+            let expected = if failure == 3 {
+                "quarantined"
+            } else {
+                "exited"
+            };
+            for _ in 0..2 {
+                assert_eq!(
+                    super::observe_foreground_ended(
+                        &mut store,
+                        run_id,
+                        &AuthenticatedCaller::Operator,
+                        scope,
+                        end
+                    )
+                    .unwrap(),
+                    RpcResponse::ForegroundObserved {
+                        session_id,
+                        state: expected.into()
+                    }
+                );
+            }
+            last_scope = Some(scope);
+        }
+        let rejected = launch_foreground(
+            &mut store,
+            run_id,
+            &AuthenticatedCaller::Operator,
+            OperationId::generate(),
+            &AgentToken::generate().unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(rejected.code, RpcFailureCode::Conflict);
+        let scope = last_scope.unwrap();
+        store
+            .transaction(|repositories| {
+                assert_eq!(repositories.sessions(run_id)?.len(), 3);
+                let now = super::unix_timestamp().unwrap();
+                let until = repositories
+                    .agent_quarantine_until(run_id, scope.agent_id, now)?
+                    .unwrap();
+                assert!(
+                    repositories
+                        .agent_quarantine_until(run_id, scope.agent_id, until)?
+                        .is_none()
+                );
+                assert_eq!(
+                    repositories
+                        .events_after(run_id, 0, 100)?
+                        .iter()
+                        .filter(|event| event.event_type
+                            == "session.restart_limited")
+                        .count(),
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unresponsive_peer_cannot_bypass_the_startup_deadline() {
+        let fixture = TestDirectory::new();
+        let active = entry(&fixture.0);
+        let path = fixture.join("unresponsive.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let result =
+            SupervisorClient::connect_operator_at(&path, &active).await;
+        server.abort();
+        assert!(matches!(result, Err(SupervisorError::RpcTimeout { .. })));
+    }
+
+    #[tokio::test]
+    async fn timed_out_shutdown_keeps_launches_blocked_and_replays_completion()
+    {
+        let fixture = TestDirectory::new();
+        let mut store = Store::open_in_memory().unwrap();
+        let run_id = RunId::generate();
+        store
+            .transaction(|repositories| {
+                repositories.insert_run(&RunRecord {
+                    id: run_id,
+                    status: "active".into(),
+                    created_at: 10,
+                    stopped_at: None,
+                })
+            })
+            .unwrap();
+        let response = launch_foreground(
+            &mut store,
+            run_id,
+            &AuthenticatedCaller::Operator,
+            OperationId::generate(),
+            &AgentToken::generate().unwrap(),
+        )
+        .unwrap();
+        let RpcResponse::ForegroundPrepared {
+            agent,
+            session_id,
+            generation,
+            ..
+        } = response
+        else {
+            panic!("expected foreground launch");
+        };
+        let scope = SessionScope {
+            run_id,
+            agent_id: agent.id,
+            session_id,
+            generation,
+        };
+        let operation_id = OperationId::generate();
+        store
+            .transaction(|repositories| {
+                repositories.begin_run_shutdown(
+                    run_id,
+                    operation_id,
+                    1_000,
+                    250,
+                    5_000,
+                )
+            })
+            .unwrap();
+        let mut sessions = runtime_sessions(&fixture.0);
+        let mut workspaces = runtime_workspaces(&fixture.0);
+        let mut foreground = ForegroundCoordination::default();
+        let (sender, receiver) = oneshot::channel();
+        begin_shutdown(
+            &mut store,
+            &mut sessions,
+            &mut workspaces,
+            run_id,
+            operation_id,
+            sender,
+            &mut foreground,
+        );
+        assert_eq!(
+            receiver.await.unwrap().unwrap_err().code,
+            RpcFailureCode::Unavailable
+        );
+        for request in [
+            RpcRequest::LaunchForeground {
+                operation_id: OperationId::generate(),
+                token: AgentToken::generate().unwrap(),
+            },
+            RpcRequest::Spawn {
+                operation_id: OperationId::generate(),
+                role: "worker".into(),
+                task_id: TaskId::generate(),
+            },
+        ] {
+            let failure = super::execute_request(
+                &mut store,
+                &mut sessions,
+                &mut workspaces,
+                super::RuntimePaths {
+                    run_state_directory: &fixture.0,
+                    socket_path: &fixture.join("socket"),
+                },
+                run_id,
+                &AuthenticatedCaller::Operator,
+                request,
+            )
+            .unwrap_err();
+            assert_eq!(failure.code, RpcFailureCode::Conflict);
+        }
+        store
+            .transaction(|repositories| {
+                assert_eq!(repositories.run(run_id)?.unwrap().status, "active");
+                assert_eq!(
+                    repositories.run_shutdown(run_id)?.unwrap().phase,
+                    crate::state::supervision::ShutdownPhase::TimedOut
+                );
+                Ok(())
+            })
+            .unwrap();
+        super::observe_foreground_ended(
+            &mut store,
+            run_id,
+            &AuthenticatedCaller::Operator,
+            scope,
+            super::ForegroundEnd::Exited {
+                code: Some(0),
+                signal: None,
+            },
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let (sender, receiver) = oneshot::channel();
+            begin_shutdown(
+                &mut store,
+                &mut sessions,
+                &mut workspaces,
+                run_id,
+                operation_id,
+                sender,
+                &mut foreground,
+            );
+            assert_eq!(
+                receiver.await.unwrap().unwrap(),
+                RpcResponse::ShuttingDown {
+                    run_id,
+                    operation_id
+                }
+            );
+        }
+    }
+
+    #[test]
     fn shutdown_is_a_durable_idempotent_mutation() {
         let fixture = TestDirectory::new();
         let mut store = Store::open(&fixture.join("state.sqlite3"))
@@ -7156,6 +7640,7 @@ mod tests {
         begin_shutdown(
             &mut store,
             &mut sessions,
+            &mut runtime_workspaces(&fixture.0),
             run_id,
             operation_id,
             response_tx,

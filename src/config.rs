@@ -11,6 +11,19 @@ pub(crate) struct CompiledDefaults {
     pub(crate) archetype: &'static str,
     pub(crate) providers: BTreeMap<&'static str, ProviderBinding>,
     pub(crate) limits: RunLimits,
+    pub(crate) supervision: SupervisionPolicy,
+}
+
+/// Trusted bounds on provider quota and process control, independent of roles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SupervisionPolicy {
+    pub(crate) restart_window_seconds: i64,
+    pub(crate) max_launch_attempts: i64,
+    pub(crate) restart_backoff_seconds: i64,
+    pub(crate) startup_timeout_seconds: i64,
+    pub(crate) job_timeout_seconds: i64,
+    pub(crate) interrupt_grace_ms: i64,
+    pub(crate) shutdown_timeout_ms: i64,
 }
 
 /// A trusted command binding for an out-of-process provider.
@@ -217,6 +230,15 @@ pub(crate) fn compiled_defaults() -> CompiledDefaults {
             max_concurrent_agents: 8,
             max_agents_per_run: 16,
             max_spawns_per_minute: 8,
+        },
+        supervision: SupervisionPolicy {
+            restart_window_seconds: 60,
+            max_launch_attempts: 3,
+            restart_backoff_seconds: 1,
+            startup_timeout_seconds: 30,
+            job_timeout_seconds: 3_600,
+            interrupt_grace_ms: 250,
+            shutdown_timeout_ms: 5_000,
         },
     }
 }

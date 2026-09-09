@@ -59,7 +59,7 @@ pub(crate) enum Command {
     Logs(LogsArguments),
     /// Read the run's typed event stream.
     Events(EventsArguments),
-    /// Stop the active run safely.
+    /// Drain assignments and stop the run with bounded process control.
     Stop(MutationArguments),
 
     #[command(name = "__supervisor", hide = true)]

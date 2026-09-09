@@ -799,7 +799,24 @@ unknown rather than killed or adopted.
 
 Restarts are bounded. Repeated failures within a configured window quarantine
 the session and emit a visible event. The supervisor does not spin indefinitely
-or consume unbounded provider quota.
+or consume unbounded provider quota. The compiled policy allows three launch
+attempts in a 60-second window, with exponential retry delays starting at one
+second. Only a failure proved to precede process creation permits automatic
+retry of that launch intent. Exhausted launch retries quarantine the session;
+three foreground process failures in one window quarantine that session and
+block replacement for 60 seconds. Repeated spawn preflight failures are also
+bounded to three attempts. A worker that has executed remains for the lead to
+inspect and recover; Coterie does not automatically repeat its task or transfer
+its workspace to another generation.
+
+Provider probes have a two-second deadline and bounded output. Session startup
+has a 30-second deadline, and background jobs have a one-hour execution limit.
+Interactive sessions have no execution limit. These are elapsed execution
+bounds, not inferences about semantic activity. Timeouts initiate the same
+bounded process-control phases as shutdown. Restart admission, quarantine,
+control intent, and deadlines survive supervisor replacement; uncertain
+in-flight launches remain unknown. Trusted operator configuration owns these
+bounds; until M5, the compiled policy supplies them.
 
 Shutdown proceeds in phases:
 
@@ -810,6 +827,25 @@ Shutdown proceeds in phases:
 5. Terminate survivors explicitly.
 6. Reconcile task and workspace state without deleting recoverable work.
 7. Release attached-project leases and retire their active-run index entries.
+
+The shutdown intent and draining assignments commit before any process control.
+Both foreground launches and worker spawns are rejected while draining,
+including launches attempted by reconciliation. The compiled policy interrupts
+first, sends `SIGTERM` after 250 milliseconds, and sends `SIGKILL` to verified
+survivors after 2.5 seconds. The foreground wrapper controls its own child;
+the supervisor never signals an ambiguous PID. The overall grace and
+observation deadline is five seconds. A timeout emits a visible event and
+returns an error while the run remains active and launches remain blocked.
+Retrying the same stop operation rechecks progress without extending deadlines.
+A later terminal observation can complete shutdown.
+
+Shutdown preserves unfinished tasks, their claims, draining assignments,
+transcripts, and workspaces for inspection. It does not infer task success,
+reopen work automatically, materialize missing workspaces, or delete owned
+references. Workspace observations and run completion precede socket and index
+retirement and lease release. Recovery can finish retirement if a crash occurs
+after the stopped state commits. M4 applies these phases to the primary project;
+M6 extends lease and index retirement to attached projects.
 
 ## Events and observability
 

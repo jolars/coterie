@@ -173,6 +173,7 @@ impl CodexInteractiveProcess {
     {
         let mut termination = Box::pin(termination);
         let mut termination_requested = false;
+        let mut terminate_deadline = None;
         let mut kill_deadline = None;
         loop {
             tokio::select! {
@@ -194,11 +195,15 @@ impl CodexInteractiveProcess {
                     }
                 }
                 () = &mut termination, if !termination_requested => {
-                    self.terminate()?;
+                    forward_signal(self.process_id(), SIGINT)?;
                     termination_requested = true;
-                    kill_deadline = Some(
-                        Instant::now() + Duration::from_secs(2),
-                    );
+                    let policy = crate::config::compiled_defaults().supervision;
+                    terminate_deadline = Some(Instant::now() + Duration::from_millis(policy.interrupt_grace_ms as u64));
+                    kill_deadline = Some(Instant::now() + Duration::from_millis((policy.shutdown_timeout_ms / 2) as u64));
+                }
+                () = wait_for_deadline(terminate_deadline), if terminate_deadline.is_some() => {
+                    self.terminate()?;
+                    terminate_deadline = None;
                 }
                 () = wait_for_deadline(kill_deadline),
                     if kill_deadline.is_some() =>
@@ -550,6 +555,11 @@ pub(crate) trait Provider {
         &mut self,
         session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError>;
+
+    fn kill(
+        &mut self,
+        session: &ProviderSessionHandle,
+    ) -> Result<SessionObservation, ProviderError>;
 }
 
 /// A provider adapter could not perform a requested session operation.
@@ -645,6 +655,23 @@ pub(crate) enum ProviderError {
         #[source]
         source: Errno,
     },
+}
+
+impl ProviderError {
+    /// Only pre-spawn failures permit another attempt with the same launch intent.
+    pub(crate) fn proves_no_process_started(&self) -> bool {
+        matches!(
+            self,
+            Self::NoLaunchScript
+                | Self::EmptyCodexCommand
+                | Self::JobLaunch { .. }
+                | Self::JobExecutableResolution { .. }
+                | Self::InteractiveLaunch { .. }
+                | Self::MissingInteractiveEnvironment
+                | Self::SignalRegistration(_)
+                | Self::SignalThread(_)
+        )
+    }
 }
 
 const MINIMUM_CODEX_VERSION: &str = "0.151.0";
@@ -1061,8 +1088,10 @@ fn stream_job_stdout(
 }
 
 fn terminate_failed_job_launch(child: &mut Child) {
-    let _process_may_have_already_exited = child.kill();
-    let _process_may_not_be_waitable = child.wait();
+    if child.try_wait().is_ok_and(|status| status.is_none()) {
+        let _kill = child.kill();
+        let _reap = reap_with_deadline(child, Duration::from_millis(250));
+    }
 }
 
 fn apply_codex_runtime_environment(
@@ -1190,16 +1219,28 @@ impl CodexJobProcess {
                     provider_id: provider_id.to_owned(),
                     source,
                 })?;
-            self.child
-                .wait()
-                .map_err(|source| ProviderError::JobControl {
-                    provider_id: provider_id.to_owned(),
-                    source,
-                })?;
-            self.exit_observed = true;
+            self.exit_observed =
+                reap_with_deadline(&mut self.child, Duration::from_millis(250))
+                    .map_err(|source| ProviderError::JobControl {
+                        provider_id: provider_id.to_owned(),
+                        source,
+                    })?
+                    .is_some();
         }
+        let reaped = self
+            .child
+            .try_wait()
+            .map_err(|source| ProviderError::JobObservation {
+                provider_id: provider_id.to_owned(),
+                source,
+            })?
+            .is_some();
         let observation = SessionObservation {
-            lifecycle: LifecycleState::Quarantined,
+            lifecycle: if reaped {
+                LifecycleState::Quarantined
+            } else {
+                LifecycleState::Unknown
+            },
             activity: ActivityState::Unknown,
             exit: None,
         };
@@ -1311,8 +1352,18 @@ impl Provider for CodexProvider {
         &mut self,
         session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError> {
-        if let Ok(process) = self.job_session(session) {
-            forward_signal(process.child.id(), SIGINT)?;
+        if let Ok(process) = self.job_session_mut(session) {
+            if process
+                .child
+                .try_wait()
+                .map_err(|source| ProviderError::JobControl {
+                    provider_id: session.provider_id().to_owned(),
+                    source,
+                })?
+                .is_none()
+            {
+                forward_signal(process.child.id(), SIGINT)?;
+            }
             return Ok(process.observation);
         }
         forward_signal(
@@ -1330,11 +1381,54 @@ impl Provider for CodexProvider {
         &mut self,
         session: &ProviderSessionHandle,
     ) -> Result<SessionObservation, ProviderError> {
-        if let Ok(process) = self.job_session(session) {
-            forward_signal(process.child.id(), SIGTERM)?;
+        if let Ok(process) = self.job_session_mut(session) {
+            if process
+                .child
+                .try_wait()
+                .map_err(|source| ProviderError::JobControl {
+                    provider_id: session.provider_id().to_owned(),
+                    source,
+                })?
+                .is_none()
+            {
+                forward_signal(process.child.id(), SIGTERM)?;
+            }
             return Ok(process.observation);
         }
         self.interactive_session(session)?.terminate()?;
+        Ok(SessionObservation {
+            lifecycle: LifecycleState::Running,
+            activity: ActivityState::Unknown,
+            exit: None,
+        })
+    }
+    fn kill(
+        &mut self,
+        session: &ProviderSessionHandle,
+    ) -> Result<SessionObservation, ProviderError> {
+        if let Ok(process) = self.job_session_mut(session) {
+            if process
+                .child
+                .try_wait()
+                .map_err(|source| ProviderError::JobControl {
+                    provider_id: session.provider_id().to_owned(),
+                    source,
+                })?
+                .is_none()
+            {
+                process.child.kill().map_err(|source| {
+                    ProviderError::JobControl {
+                        provider_id: session.provider_id().to_owned(),
+                        source,
+                    }
+                })?;
+            }
+            return Ok(process.observation);
+        }
+        forward_signal(
+            self.interactive_session(session)?.process_id(),
+            SIGKILL,
+        )?;
         Ok(SessionObservation {
             lifecycle: LifecycleState::Running,
             activity: ActivityState::Unknown,
@@ -1366,6 +1460,17 @@ impl ProbeCommandRunner for ProcessProbeRunner {
         command: &[OsString],
         arguments: &[&str],
     ) -> Result<ProbeOutput, io::Error> {
+        self.run_bounded(command, arguments, Duration::from_secs(2))
+    }
+}
+
+impl ProcessProbeRunner {
+    fn run_bounded(
+        &self,
+        command: &[OsString],
+        arguments: &[&str],
+        timeout: Duration,
+    ) -> Result<ProbeOutput, io::Error> {
         let (program, configured_arguments) =
             command.split_first().ok_or_else(|| {
                 io::Error::new(
@@ -1373,19 +1478,118 @@ impl ProbeCommandRunner for ProcessProbeRunner {
                     "empty provider command",
                 )
             })?;
-        let output = Command::new(program)
+        let mut child = Command::new(program)
             .args(configured_arguments)
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()?;
-        Ok(ProbeOutput {
-            success: output.status.success(),
-            code: output.status.code(),
-            stdout: output.stdout,
-            stderr: output.stderr,
-        })
+            .spawn()?;
+        let result = (|| {
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| io::Error::other("missing probe stdout"))?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| io::Error::other("missing probe stderr"))?;
+            set_pipe_nonblocking(&stdout)?;
+            set_pipe_nonblocking(&stderr)?;
+            let mut output = ProbeOutput {
+                success: false,
+                code: None,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            let deadline = std::time::Instant::now() + timeout;
+            loop {
+                let stdout_closed =
+                    read_probe_pipe(&mut stdout, &mut output.stdout)?;
+                let stderr_closed =
+                    read_probe_pipe(&mut stderr, &mut output.stderr)?;
+                let status = child.try_wait()?;
+                if stdout_closed
+                    && stderr_closed
+                    && let Some(status) = status
+                {
+                    output.success = status.success();
+                    output.code = status.code();
+                    return Ok(output);
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "provider probe exceeded its deadline",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        })();
+        if result.is_err() && child.try_wait()?.is_none() {
+            child.kill()?;
+            if reap_with_deadline(&mut child, Duration::from_millis(250))?
+                .is_none()
+            {
+                thread::spawn(move || {
+                    let _status = child.wait();
+                });
+            }
+        }
+        result
+    }
+}
+
+fn set_pipe_nonblocking(pipe: &impl std::os::fd::AsFd) -> io::Result<()> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    let flags = fcntl(pipe, FcntlArg::F_GETFL).map_err(io::Error::from)?;
+    fcntl(
+        pipe,
+        FcntlArg::F_SETFL(OFlag::from_bits_retain(flags) | OFlag::O_NONBLOCK),
+    )
+    .map_err(io::Error::from)?;
+    Ok(())
+}
+
+fn read_probe_pipe(
+    reader: &mut impl Read,
+    output: &mut Vec<u8>,
+) -> io::Result<bool> {
+    let mut buffer = [0; 8192];
+    // A bounded batch keeps a noisy stream from starving the other pipe or the deadline.
+    for _ in 0..8 {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(count) => {
+                if output.len() + count > 1024 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "provider probe output exceeded 1 MiB",
+                    ));
+                }
+                output.extend_from_slice(&buffer[..count]);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(false);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+fn reap_with_deadline(
+    child: &mut Child,
+    timeout: Duration,
+) -> io::Result<Option<std::process::ExitStatus>> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let status = child.try_wait()?;
+        if status.is_some() || std::time::Instant::now() >= deadline {
+            return Ok(status);
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -1586,6 +1790,10 @@ pub(crate) mod fake {
         sessions: BTreeMap<String, FakeSession>,
         launches: Vec<FakeLaunch>,
         next_session: u64,
+        #[cfg(test)]
+        ignored_controls: BTreeSet<&'static str>,
+        #[cfg(test)]
+        pub(crate) controls: Vec<(SessionScope, &'static str)>,
         capabilities: BTreeSet<ProviderCapability>,
         compatibility: ProviderCompatibility,
         #[cfg(test)]
@@ -1601,6 +1809,10 @@ pub(crate) mod fake {
                 sessions: BTreeMap::new(),
                 launches: Vec::new(),
                 next_session: 1,
+                #[cfg(test)]
+                ignored_controls: BTreeSet::new(),
+                #[cfg(test)]
+                controls: Vec::new(),
                 capabilities: BTreeSet::from([
                     ProviderCapability::StartupInstructions,
                     ProviderCapability::ForegroundInteractive,
@@ -1618,6 +1830,27 @@ pub(crate) mod fake {
                 #[cfg(test)]
                 missing_recoveries: std::cell::RefCell::new(VecDeque::new()),
             }
+        }
+
+        #[cfg(test)]
+        pub(crate) fn ignoring_controls(
+            mut self,
+            controls: impl IntoIterator<Item = &'static str>,
+        ) -> Self {
+            self.ignored_controls.extend(controls);
+            self
+        }
+
+        #[cfg(test)]
+        fn control(
+            &mut self,
+            session: &ProviderSessionHandle,
+            kind: &'static str,
+        ) -> Option<Result<SessionObservation, ProviderError>> {
+            self.controls.push((session.scope, kind));
+            self.ignored_controls
+                .contains(kind)
+                .then(|| self.observe(session))
         }
 
         #[cfg(test)]
@@ -1796,6 +2029,10 @@ pub(crate) mod fake {
             &mut self,
             session: &ProviderSessionHandle,
         ) -> Result<SessionObservation, ProviderError> {
+            #[cfg(test)]
+            if let Some(result) = self.control(session, "interrupt") {
+                return result;
+            }
             self.stop(session, SessionObservation::interrupted())
         }
 
@@ -1803,6 +2040,21 @@ pub(crate) mod fake {
             &mut self,
             session: &ProviderSessionHandle,
         ) -> Result<SessionObservation, ProviderError> {
+            #[cfg(test)]
+            if let Some(result) = self.control(session, "terminate") {
+                return result;
+            }
+            self.stop(session, SessionObservation::terminated())
+        }
+
+        fn kill(
+            &mut self,
+            session: &ProviderSessionHandle,
+        ) -> Result<SessionObservation, ProviderError> {
+            #[cfg(test)]
+            if let Some(result) = self.control(session, "kill") {
+                return result;
+            }
             self.stop(session, SessionObservation::terminated())
         }
     }
@@ -2304,6 +2556,108 @@ mod tests {
                 "/tmp/project",
             ]
         );
+    }
+
+    #[test]
+    fn probe_timeouts_and_output_limits_reap_the_owned_child() {
+        for (script, expected) in [
+            ("while :; do :; done", std::io::ErrorKind::TimedOut),
+            (
+                "while :; do printf '0123456789012345678901234567890123456789012345678901234567890123456789\\n'; done",
+                std::io::ErrorKind::InvalidData,
+            ),
+        ] {
+            let directory = TestDirectory::new();
+            let pid_file = directory.0.join("pid");
+            let executable = directory.executable(
+                "probe",
+                &format!("#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\n{script}\n"),
+            );
+            let started = std::time::Instant::now();
+            let result = super::ProcessProbeRunner.run_bounded(
+                &[
+                    executable.into_os_string(),
+                    pid_file.clone().into_os_string(),
+                ],
+                &[],
+                Duration::from_millis(
+                    if expected == std::io::ErrorKind::TimedOut {
+                        100
+                    } else {
+                        2_000
+                    },
+                ),
+            );
+            assert_eq!(result.err().unwrap().kind(), expected);
+            assert!(started.elapsed() < Duration::from_secs(3));
+            let pid = std::fs::read_to_string(pid_file).unwrap();
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        }
+    }
+
+    #[test]
+    fn fake_and_codex_share_phased_termination_conformance() {
+        let directory = TestDirectory::new();
+        let executable = directory.executable("controlled-worker", "#!/bin/sh\ntrap ':' INT TERM\nprintf '%s\\n' '{\"type\":\"thread.started\"}'\nwhile :; do :; done\n");
+        let running = SessionObservation {
+            lifecycle: LifecycleState::Running,
+            activity: super::ActivityState::Busy,
+            exit: None,
+        };
+        let mut fake = FakeProvider::new([FakeScript::new([
+            super::fake::FakeEvent::observation(running),
+        ])])
+        .ignoring_controls(["interrupt", "terminate"]);
+        let mut codex = CodexProvider::new([executable.as_os_str()]);
+        for (provider, is_fake) in [
+            (&mut fake as &mut dyn Provider, true),
+            (&mut codex as &mut dyn Provider, false),
+        ] {
+            let handle = provider
+                .launch_job(
+                    &specification_in(&directory.0),
+                    &job_environment_in(&directory.0),
+                )
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let event = provider.next_event(&handle).unwrap();
+                let ready = if is_fake {
+                    event
+                        .as_ref()
+                        .and_then(|event| event.observation())
+                        .is_some_and(|state| {
+                            state.lifecycle == LifecycleState::Running
+                        })
+                } else {
+                    matches!(
+                        event.as_ref().map(|event| &event.kind),
+                        Some(ProviderEventKind::Output(_))
+                    )
+                };
+                if ready {
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                !provider.interrupt(&handle).unwrap().lifecycle.is_terminal()
+            );
+            assert!(
+                !provider.terminate(&handle).unwrap().lifecycle.is_terminal()
+            );
+            provider.kill(&handle).unwrap();
+            while !provider.observe(&handle).unwrap().lifecycle.is_terminal() {
+                provider.next_event(&handle).unwrap();
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                provider.observe(&handle).unwrap().lifecycle,
+                LifecycleState::Exited
+            );
+        }
     }
 
     #[test]

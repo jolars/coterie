@@ -14,6 +14,7 @@ use crate::providers::{
     ProviderCapability, ProviderError, ProviderEvent, ProviderEventKind,
     ProviderRecovery, ProviderSessionHandle, SessionObservation,
 };
+use crate::state::supervision::LaunchAdmission;
 use crate::state::{
     AgentRecord, EventKind, ExternalResourceState, NewEvent,
     SessionCredentialRecord, SessionProcessOwner, SessionRecord,
@@ -96,6 +97,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         store: &mut Store,
         launch: &AgentLaunch,
         assignment_id: Option<AssignmentId>,
+        attempted_at: i64,
     ) -> Result<Option<LaunchedAgent>, AgentSessionError> {
         let session = store.transaction(|repositories| {
             repositories.session(launch.scope.session_id)
@@ -118,6 +120,14 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             });
         }
         match session.reconciliation_state {
+            ExternalResourceState::Observed
+                if session.state == LifecycleState::Quarantined =>
+            {
+                Err(AgentSessionError::RestartLimited {
+                    session_id: session.id,
+                    retry_at: None,
+                })
+            }
             ExternalResourceState::Observed => Ok(None),
             ExternalResourceState::Desired => {
                 validate_provider_probe(&probe, launch)?;
@@ -130,20 +140,8 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                     return Ok(None);
                 }
                 let token = AgentToken::generate()?;
-                store.transaction(|repositories| {
-                    repositories.replace_desired_session_credential(
-                        &SessionCredentialRecord {
-                            session_id: launch.scope.session_id,
-                            run_id: launch.scope.run_id,
-                            agent_id: launch.scope.agent_id,
-                            generation: launch.scope.generation,
-                            token_verifier: token.verifier(launch.scope),
-                            created_at: launch.created_at,
-                            revoked_at: None,
-                        },
-                    )
-                })?;
-                self.start_and_record(store, launch, token).map(Some)
+                self.start_and_record(store, launch, token, attempted_at)
+                    .map(Some)
             }
             state @ (ExternalResourceState::Lost
             | ExternalResourceState::Unknown) => {
@@ -168,7 +166,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             agent_exists,
             assignment_id,
         )?;
-        self.start_and_record(store, launch, token)
+        self.start_and_record(store, launch, token, launch.created_at)
     }
 
     fn start_and_record(
@@ -176,7 +174,50 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         store: &mut Store,
         launch: &AgentLaunch,
         token: AgentToken,
+        attempted_at: i64,
     ) -> Result<LaunchedAgent, AgentSessionError> {
+        let policy = crate::config::compiled_defaults().supervision;
+        let admission = store.transaction(|repositories| {
+            repositories.admit_session_launch(
+                launch.scope,
+                attempted_at,
+                policy,
+            )
+        })?;
+        match admission {
+            LaunchAdmission::Allowed => {}
+            LaunchAdmission::Backoff { until } => {
+                return Err(AgentSessionError::RestartLimited {
+                    session_id: launch.scope.session_id,
+                    retry_at: Some(until),
+                });
+            }
+            LaunchAdmission::Quarantined => {
+                return Err(AgentSessionError::RestartLimited {
+                    session_id: launch.scope.session_id,
+                    retry_at: None,
+                });
+            }
+            LaunchAdmission::Unknown => {
+                return Err(AgentSessionError::UnresolvedIntent {
+                    session_id: launch.scope.session_id,
+                    state: ExternalResourceState::Unknown,
+                });
+            }
+        }
+        store.transaction(|repositories| {
+            repositories.replace_desired_session_credential(
+                &SessionCredentialRecord {
+                    session_id: launch.scope.session_id,
+                    run_id: launch.scope.run_id,
+                    agent_id: launch.scope.agent_id,
+                    generation: launch.scope.generation,
+                    token_verifier: token.verifier(launch.scope),
+                    created_at: launch.created_at,
+                    revoked_at: None,
+                },
+            )
+        })?;
         let launched = match self.start_provider(launch, token) {
             Ok(launched) => launched,
             Err(AgentSessionError::ScopeMismatch { expected, observed }) => {
@@ -192,7 +233,36 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                     observed,
                 });
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                let safe_to_retry = matches!(&error, AgentSessionError::Provider(provider) if provider.proves_no_process_started());
+                if safe_to_retry {
+                    store.transaction(|repositories| {
+                        if repositories.fail_session_launch(
+                            launch.scope,
+                            attempted_at,
+                            policy,
+                        )? {
+                            Self::record_reconciliation_in(
+                                repositories,
+                                launch.scope,
+                                ExternalResourceState::Observed,
+                                LifecycleState::Quarantined,
+                                attempted_at,
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                } else {
+                    self.record_reconciliation(
+                        store,
+                        launch.scope,
+                        ExternalResourceState::Unknown,
+                        LifecycleState::Unknown,
+                        attempted_at,
+                    )?;
+                }
+                return Err(error);
+            }
         };
         self.record_launch_observation(
             store,
@@ -518,6 +588,14 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 continue;
             }
             let Some(provider_session_id) = session.provider_session_id else {
+                if session.reconciliation_state
+                    == ExternalResourceState::Desired
+                    && store.transaction(|repositories| {
+                        repositories.session_launch_is_retryable(scope)
+                    })?
+                {
+                    continue;
+                }
                 self.record_reconciliation(
                     store,
                     scope,
@@ -592,94 +670,109 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         reconciled_at: i64,
     ) -> Result<(), AgentSessionError> {
         store.transaction(|repositories| {
-            let Some(session) = repositories.session(scope.session_id)? else {
-                return Ok(());
-            };
-            let reconciliation = repositories
-                .record_session_reconciliation_state(
-                    scope,
-                    reconciliation_state,
-                    reconciled_at,
-                )?;
-            if reconciliation == SessionTransitionOutcome::Applied {
-                repositories.append_event(&NewEvent {
-                    run_id: scope.run_id,
-                    kind: EventKind::SessionReconciliationChanged,
-                    actor: "reconciler".to_owned(),
-                    subject: scope.session_id.to_string(),
-                    project_id: None,
-                    agent_id: Some(scope.agent_id),
-                    task_id: None,
-                    operation_id: None,
-                    correlation_id: None,
-                    causation_id: None,
-                    data: json!({
-                        "previous_state": session.reconciliation_state.as_str(),
-                        "state": reconciliation_state.as_str(),
-                    }),
-                    summary: format!(
-                        "Session {} reconciliation changed from {} to {}.",
-                        scope.session_id,
-                        session.reconciliation_state,
-                        reconciliation_state
-                    ),
-                    created_at: reconciled_at,
-                })?;
-            }
-            let lifecycle_outcome = repositories.record_session_lifecycle(
+            Self::record_reconciliation_in(
+                repositories,
                 scope,
+                reconciliation_state,
                 lifecycle,
                 reconciled_at,
-            )?;
-            if lifecycle_outcome == SessionTransitionOutcome::Applied {
-                let session_event = repositories.append_event(&NewEvent {
-                    run_id: scope.run_id,
-                    kind: EventKind::SessionLifecycleChanged,
-                    actor: "reconciler".to_owned(),
-                    subject: scope.session_id.to_string(),
-                    project_id: None,
-                    agent_id: Some(scope.agent_id),
-                    task_id: None,
-                    operation_id: None,
-                    correlation_id: None,
-                    causation_id: None,
-                    data: json!({
-                        "generation": scope.generation,
-                        "previous_state": session.state.as_str(),
-                        "provider": session.provider,
-                        "state": lifecycle.as_str(),
-                    }),
-                    summary: format!(
-                        "Session {} changed from {} to {}.",
-                        scope.session_id, session.state, lifecycle
-                    ),
-                    created_at: reconciled_at,
-                })?;
-                repositories.append_event(&NewEvent {
-                    run_id: scope.run_id,
-                    kind: EventKind::AgentLifecycleChanged,
-                    actor: "reconciler".to_owned(),
-                    subject: scope.agent_id.to_string(),
-                    project_id: None,
-                    agent_id: Some(scope.agent_id),
-                    task_id: None,
-                    operation_id: None,
-                    correlation_id: Some(session_event.id),
-                    causation_id: Some(session_event.id),
-                    data: json!({
-                        "generation": scope.generation,
-                        "previous_state": session.state.as_str(),
-                        "state": lifecycle.as_str(),
-                    }),
-                    summary: format!(
-                        "Agent {} changed from {} to {}.",
-                        scope.agent_id, session.state, lifecycle
-                    ),
-                    created_at: reconciled_at,
-                })?;
-            }
-            Ok(())
+            )
         })?;
+        Ok(())
+    }
+
+    fn record_reconciliation_in(
+        repositories: &crate::state::Repositories<'_, '_>,
+        scope: SessionScope,
+        reconciliation_state: ExternalResourceState,
+        lifecycle: LifecycleState,
+        reconciled_at: i64,
+    ) -> Result<(), StoreError> {
+        let Some(session) = repositories.session(scope.session_id)? else {
+            return Ok(());
+        };
+        let reconciliation = repositories.record_session_reconciliation_state(
+            scope,
+            reconciliation_state,
+            reconciled_at,
+        )?;
+        if reconciliation == SessionTransitionOutcome::Applied {
+            repositories.append_event(&NewEvent {
+                run_id: scope.run_id,
+                kind: EventKind::SessionReconciliationChanged,
+                actor: "reconciler".to_owned(),
+                subject: scope.session_id.to_string(),
+                project_id: None,
+                agent_id: Some(scope.agent_id),
+                task_id: None,
+                operation_id: None,
+                correlation_id: None,
+                causation_id: None,
+                data: json!({
+                    "previous_state": session.reconciliation_state.as_str(),
+                    "state": reconciliation_state.as_str(),
+                }),
+                summary: format!(
+                    "Session {} reconciliation changed from {} to {}.",
+                    scope.session_id,
+                    session.reconciliation_state,
+                    reconciliation_state
+                ),
+                created_at: reconciled_at,
+            })?;
+        }
+        let lifecycle_outcome = repositories.record_session_lifecycle(
+            scope,
+            lifecycle,
+            reconciled_at,
+        )?;
+        if lifecycle_outcome == SessionTransitionOutcome::Applied {
+            let session_event = repositories.append_event(&NewEvent {
+                run_id: scope.run_id,
+                kind: EventKind::SessionLifecycleChanged,
+                actor: "reconciler".to_owned(),
+                subject: scope.session_id.to_string(),
+                project_id: None,
+                agent_id: Some(scope.agent_id),
+                task_id: None,
+                operation_id: None,
+                correlation_id: None,
+                causation_id: None,
+                data: json!({
+                    "generation": scope.generation,
+                    "previous_state": session.state.as_str(),
+                    "provider": session.provider,
+                    "state": lifecycle.as_str(),
+                }),
+                summary: format!(
+                    "Session {} changed from {} to {}.",
+                    scope.session_id, session.state, lifecycle
+                ),
+                created_at: reconciled_at,
+            })?;
+            repositories.append_event(&NewEvent {
+                run_id: scope.run_id,
+                kind: EventKind::AgentLifecycleChanged,
+                actor: "reconciler".to_owned(),
+                subject: scope.agent_id.to_string(),
+                project_id: None,
+                agent_id: Some(scope.agent_id),
+                task_id: None,
+                operation_id: None,
+                correlation_id: Some(session_event.id),
+                causation_id: Some(session_event.id),
+                data: json!({
+                    "generation": scope.generation,
+                    "previous_state": session.state.as_str(),
+                    "state": lifecycle.as_str(),
+                }),
+                summary: format!(
+                    "Agent {} changed from {} to {}.",
+                    scope.agent_id, session.state, lifecycle
+                ),
+                created_at: reconciled_at,
+            })?;
+        }
         Ok(())
     }
 
@@ -825,6 +918,143 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         Ok(observation)
     }
 
+    /// Applies durable deadlines without treating silence as semantic idleness.
+    pub(crate) fn drive_controls(
+        &mut self,
+        store: &mut Store,
+        run_id: crate::id::RunId,
+        now_ms: i64,
+    ) -> Result<(), AgentSessionError> {
+        use crate::state::supervision::{ControlPhase, ControlReason};
+        let policy = crate::config::compiled_defaults().supervision;
+        store.transaction(|repositories| {
+            let shutdown = repositories.run_shutdown(run_id)?;
+            for session in repositories.sessions(run_id)? {
+                if session.state.is_terminal() {
+                    continue;
+                }
+                let scope = SessionScope {
+                    run_id,
+                    agent_id: session.agent_id,
+                    session_id: session.id,
+                    generation: session.generation,
+                };
+                let elapsed =
+                    (now_ms / 1000).saturating_sub(session.created_at);
+                let reason = if shutdown.is_some() {
+                    Some(ControlReason::Shutdown)
+                } else if (session.state == LifecycleState::Starting
+                    || session.provider_session_id.is_none())
+                    && elapsed >= policy.startup_timeout_seconds
+                {
+                    Some(ControlReason::StartupTimeout)
+                } else if session.process_owner
+                    == SessionProcessOwner::Supervisor
+                    && elapsed >= policy.job_timeout_seconds
+                {
+                    Some(ControlReason::ExecutionTimeout)
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    let requested_at = shutdown
+                        .as_ref()
+                        .map_or(now_ms, |shutdown| shutdown.requested_at_ms);
+                    let grace = shutdown.as_ref().map_or(
+                        policy.interrupt_grace_ms,
+                        |shutdown| {
+                            shutdown.interrupt_until_ms
+                                - shutdown.requested_at_ms
+                        },
+                    );
+                    let timeout = shutdown.as_ref().map_or(
+                        policy.shutdown_timeout_ms,
+                        |shutdown| {
+                            shutdown.deadline_ms - shutdown.requested_at_ms
+                        },
+                    );
+                    repositories.request_session_control(
+                        scope,
+                        reason,
+                        requested_at,
+                        grace,
+                        timeout,
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        let controls = store.transaction(|repositories| {
+            repositories.session_controls(run_id)
+        })?;
+        for mut control in controls {
+            let session = store.transaction(|repositories| {
+                if !repositories.session_scope_is_current(control.scope)? {
+                    return Ok(None);
+                }
+                repositories.session(control.scope.session_id)
+            })?;
+            let Some(session) = session else {
+                continue;
+            };
+            let phase = if session.state.is_terminal() {
+                ControlPhase::Completed
+            } else if now_ms >= control.deadline_ms {
+                ControlPhase::TimedOut
+            } else if now_ms >= control.kill_at_ms {
+                ControlPhase::Kill
+            } else if now_ms >= control.interrupt_until_ms {
+                ControlPhase::Terminate
+            } else {
+                ControlPhase::Interrupt
+            };
+            let phase = phase.max(control.phase);
+            if phase != control.phase {
+                store.transaction(|repositories| {
+                    repositories.set_control_phase(&control, phase, now_ms)
+                })?;
+                control.phase = phase;
+                control.delivered = false;
+            }
+            if control.delivered
+                || matches!(
+                    phase,
+                    ControlPhase::Completed | ControlPhase::TimedOut
+                )
+                || session.process_owner == SessionProcessOwner::Foreground
+            {
+                continue;
+            }
+            let Some(handle) = self.sessions.get(&session.id).cloned() else {
+                continue;
+            };
+            if handle.scope != control.scope {
+                continue;
+            }
+            let observation = match phase {
+                ControlPhase::Interrupt => self.provider.interrupt(&handle),
+                ControlPhase::Terminate => self.provider.terminate(&handle),
+                ControlPhase::Kill => self.provider.kill(&handle),
+                ControlPhase::Completed | ControlPhase::TimedOut => {
+                    unreachable!()
+                }
+            };
+            // Unproved control remains pending; one failed target must not starve its peers.
+            if let Ok(observation) = observation {
+                self.record_observation(
+                    store,
+                    &handle,
+                    observation,
+                    now_ms / 1000,
+                )?;
+                store.transaction(|repositories| {
+                    repositories.mark_control_delivered(&control)
+                })?;
+            }
+        }
+        Ok(())
+    }
+
     fn record_observation(
         &mut self,
         store: &mut Store,
@@ -838,6 +1068,20 @@ impl<P: Provider> AgentSessionSupervisor<P> {
             else {
                 return Ok(());
             };
+            let mut observation = observation;
+            if !session.state.is_terminal()
+                && observation.exit.is_some_and(|exit| {
+                    exit.reason == crate::providers::ExitReason::Process
+                        && exit.code != Some(0)
+                })
+                && repositories.record_session_failure(
+                    handle.scope,
+                    observed_at,
+                    crate::config::compiled_defaults().supervision,
+                )?
+            {
+                observation.lifecycle = LifecycleState::Quarantined;
+            }
             let reconciliation_state = match observation.lifecycle {
                 LifecycleState::Lost => ExternalResourceState::Lost,
                 LifecycleState::Unknown => ExternalResourceState::Unknown,
@@ -1043,6 +1287,13 @@ pub(crate) fn validate_provider_capabilities(
 /// A provider event could not be applied to its durable session generation.
 #[derive(Debug, Error)]
 pub(crate) enum AgentSessionError {
+    #[error(
+        "session `{session_id}` restart is limited (retry timestamp: {retry_at:?}); inspect its events and preserved work"
+    )]
+    RestartLimited {
+        session_id: SessionId,
+        retry_at: Option<i64>,
+    },
     #[error(transparent)]
     State(#[from] StoreError),
     #[error(transparent)]
@@ -1156,7 +1407,12 @@ mod tests {
         );
         assert!(
             supervisor
-                .ensure_existing_launch(&mut store, &launch, None)
+                .ensure_existing_launch(
+                    &mut store,
+                    &launch,
+                    None,
+                    launch.created_at
+                )
                 .is_err()
         );
         assert_eq!(supervisor.provider.launches().len(), 1);
@@ -1296,6 +1552,289 @@ mod tests {
             .reconcile_after_restart(&mut store, launch.scope.run_id, 13)
             .expect("reconcile");
         assert!(supervisor.sessions.is_empty());
+    }
+
+    #[test]
+    fn backoff_keeps_the_unlaunched_credential_unchanged() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let launch = launch(RUN_ID.parse().unwrap());
+        let mut supervisor =
+            AgentSessionSupervisor::new(FakeProvider::new([]), &directory.0);
+        assert!(supervisor.launch(&mut store, &launch).is_err());
+        let credential = store
+            .transaction(|repositories| {
+                repositories.active_session_credential(
+                    launch.scope.run_id,
+                    launch.scope.agent_id,
+                    launch.scope.session_id,
+                )
+            })
+            .unwrap();
+        assert!(
+            supervisor
+                .ensure_existing_launch(&mut store, &launch, None, 10)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .transaction(|repositories| repositories
+                    .active_session_credential(
+                        launch.scope.run_id,
+                        launch.scope.agent_id,
+                        launch.scope.session_id
+                    ))
+                .unwrap(),
+            credential
+        );
+    }
+
+    #[test]
+    fn launch_failures_back_off_and_quarantine_across_supervisor_restarts() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let launch = launch(RUN_ID.parse().unwrap());
+        let mut supervisor =
+            AgentSessionSupervisor::new(FakeProvider::new([]), &directory.0);
+        assert!(supervisor.launch(&mut store, &launch).is_err());
+        for (now, expected) in [(10, 1), (11, 2), (12, 2), (13, 3)] {
+            drop(supervisor);
+            drop(store);
+            store = Store::open(&directory.0.join("state.sqlite3")).unwrap();
+            supervisor = AgentSessionSupervisor::new(
+                FakeProvider::new([]),
+                &directory.0,
+            );
+            supervisor
+                .reconcile_after_restart(&mut store, launch.scope.run_id, now)
+                .unwrap();
+            assert!(
+                supervisor
+                    .ensure_existing_launch(&mut store, &launch, None, now)
+                    .is_err()
+            );
+            store
+                .transaction(|repositories| {
+                    let attempts = repositories.session_launch_attempt_count(
+                        launch.scope.session_id,
+                    )?;
+                    assert_eq!(attempts, expected);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        let mut repaired = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([])]),
+            &directory.0,
+        );
+        assert!(
+            repaired
+                .ensure_existing_launch(&mut store, &launch, None, 100)
+                .is_err()
+        );
+        assert!(repaired.provider.launches().is_empty());
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .session(launch.scope.session_id)?
+                        .unwrap()
+                        .state,
+                    LifecycleState::Quarantined
+                );
+                assert!(
+                    repositories
+                        .active_session_credential(
+                            launch.scope.run_id,
+                            launch.scope.agent_id,
+                            launch.scope.session_id
+                        )?
+                        .is_none()
+                );
+                assert_eq!(
+                    repositories
+                        .events_after(launch.scope.run_id, 0, 100)?
+                        .iter()
+                        .filter(|event| event.event_type
+                            == "session.restart_limited")
+                        .count(),
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn launch_retry_window_expires_without_reusing_an_in_flight_attempt() {
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let launch = launch(RUN_ID.parse().unwrap());
+        let mut supervisor =
+            AgentSessionSupervisor::new(FakeProvider::new([]), &directory.0);
+        assert!(supervisor.launch(&mut store, &launch).is_err());
+        for now in [70, 130, 190] {
+            assert!(
+                supervisor
+                    .ensure_existing_launch(&mut store, &launch, None, now)
+                    .is_err()
+            );
+        }
+        let mut repaired = AgentSessionSupervisor::new(
+            FakeProvider::new([FakeScript::new([])]),
+            &directory.0,
+        );
+        assert!(
+            repaired
+                .ensure_existing_launch(&mut store, &launch, None, 191)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            repaired
+                .ensure_existing_launch(&mut store, &launch, None, 1_000)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(repaired.provider.launches().len(), 1);
+    }
+
+    #[test]
+    fn shutdown_controls_escalate_once_and_survive_recovery() {
+        use crate::state::supervision::{ControlPhase, ControlReason};
+        let directory = TestDirectory::new();
+        let mut store = store_with_run(&directory);
+        let launch = launch(RUN_ID.parse().unwrap());
+        let provider = FakeProvider::new([FakeScript::new([])])
+            .ignoring_controls(["interrupt", "terminate"]);
+        let mut supervisor =
+            AgentSessionSupervisor::new(provider, &directory.0);
+        supervisor.launch(&mut store, &launch).unwrap();
+        store
+            .transaction(|repositories| {
+                repositories.request_session_control(
+                    launch.scope,
+                    ControlReason::Shutdown,
+                    10_000,
+                    250,
+                    5_000,
+                )
+            })
+            .unwrap();
+        for now in [10_000, 10_100, 10_249] {
+            supervisor
+                .drive_controls(&mut store, launch.scope.run_id, now)
+                .unwrap();
+        }
+        assert_eq!(supervisor.provider.controls, [(launch.scope, "interrupt")]);
+        let mut supervisor =
+            AgentSessionSupervisor::new(supervisor.provider, &directory.0);
+        supervisor
+            .reconcile_after_restart(&mut store, launch.scope.run_id, 10)
+            .unwrap();
+        for now in [10_250, 10_250, 11_000, 12_500, 12_600, 15_000] {
+            supervisor
+                .drive_controls(&mut store, launch.scope.run_id, now)
+                .unwrap();
+        }
+        assert_eq!(
+            supervisor.provider.controls,
+            [
+                (launch.scope, "interrupt"),
+                (launch.scope, "terminate"),
+                (launch.scope, "kill")
+            ]
+        );
+        store
+            .transaction(|repositories| {
+                assert_eq!(
+                    repositories
+                        .session(launch.scope.session_id)?
+                        .unwrap()
+                        .state,
+                    LifecycleState::Exited
+                );
+                assert_eq!(
+                    repositories.session_controls(launch.scope.run_id)?[0]
+                        .phase,
+                    ControlPhase::Completed
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn session_timeouts_are_bounded_and_unknown_processes_are_never_signaled() {
+        use crate::state::supervision::{ControlPhase, ControlReason};
+        for running in [false, true] {
+            let directory = TestDirectory::new();
+            let mut store = store_with_run(&directory);
+            let launch = launch(RUN_ID.parse().unwrap());
+            let provider = FakeProvider::new([FakeScript::new([])])
+                .ignoring_controls(["interrupt", "terminate", "kill"]);
+            let mut supervisor =
+                AgentSessionSupervisor::new(provider, &directory.0);
+            supervisor.launch(&mut store, &launch).unwrap();
+            if running {
+                let handle =
+                    supervisor.handle(launch.scope.session_id).unwrap().clone();
+                supervisor
+                    .record_observation(
+                        &mut store,
+                        &handle,
+                        SessionObservation {
+                            lifecycle: LifecycleState::Running,
+                            activity: ActivityState::Unknown,
+                            exit: None,
+                        },
+                        10,
+                    )
+                    .unwrap();
+            }
+            let deadline = if running { 3_610_000 } else { 40_000 };
+            supervisor
+                .drive_controls(&mut store, launch.scope.run_id, deadline - 1)
+                .unwrap();
+            assert!(supervisor.provider.controls.is_empty());
+            supervisor.sessions.clear();
+            for now in [
+                deadline,
+                deadline + 250,
+                deadline + 2_500,
+                deadline + 5_000,
+                deadline + 6_000,
+                deadline,
+            ] {
+                supervisor
+                    .drive_controls(&mut store, launch.scope.run_id, now)
+                    .unwrap();
+            }
+            assert!(supervisor.provider.controls.is_empty());
+            store
+                .transaction(|repositories| {
+                    let control =
+                        &repositories.session_controls(launch.scope.run_id)?[0];
+                    assert_eq!(control.phase, ControlPhase::TimedOut);
+                    assert_eq!(
+                        control.reason,
+                        if running {
+                            ControlReason::ExecutionTimeout
+                        } else {
+                            ControlReason::StartupTimeout
+                        }
+                    );
+                    assert!(
+                        !repositories
+                            .session(launch.scope.session_id)?
+                            .unwrap()
+                            .state
+                            .is_terminal()
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
     #[test]

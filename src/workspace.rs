@@ -195,6 +195,33 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         Ok(())
     }
 
+    /// Inspects shutdown survivors without materializing missing workspaces.
+    pub(crate) fn reconcile_for_shutdown(
+        &mut self,
+        store: &mut Store,
+        run_id: RunId,
+        reconciled_at: i64,
+    ) -> Result<(), WorkspaceError> {
+        for workspace in
+            store.transaction(|repositories| repositories.workspaces(run_id))?
+        {
+            let (_, project) = match workspace_records(store, workspace.scope())
+            {
+                Ok(records) => records,
+                Err(WorkspaceError::State(StoreError::StaleAssignment {
+                    ..
+                })) => continue,
+                Err(error) => return Err(error),
+            };
+            let state = self
+                .backend
+                .observe(&workspace, &project)
+                .unwrap_or(ExternalResourceState::Unknown);
+            self.record_state(store, &workspace, state, reconciled_at)?;
+        }
+        Ok(())
+    }
+
     /// Resolves the immutable commit from which a workspace will be created.
     pub(crate) fn base_commit(
         &self,
@@ -2656,6 +2683,21 @@ mod tests {
                 .is_none(),
             "workspace creation must not write through a state symlink"
         );
+    }
+
+    #[test]
+    fn shutdown_reconciliation_never_materializes_missing_work() {
+        let (mut store, workspace) = store_with_workspace();
+        let mut supervisor = WorkspaceSupervisor::new(FakeWorkspace::new());
+        for now in [11, 12] {
+            supervisor
+                .reconcile_for_shutdown(&mut store, workspace.run_id, now)
+                .unwrap();
+        }
+        assert_eq!(supervisor.backend().successful_creations(), 0);
+        let stored = stored_workspace(&mut store, workspace.assignment_id);
+        assert_eq!(stored.state, ExternalResourceState::Lost);
+        assert_eq!(stored.reconciled_at, Some(11));
     }
 
     #[test]
