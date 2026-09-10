@@ -113,8 +113,8 @@ JSON data is the newly written lock. It resolves current configuration even when
 the old lock is invalid or mismatched. Locks record the archetype, configuration
 schema, compatible Coterie version range, enabled roles' provider mode and
 permission requirements, and a SHA-256 fingerprint. Commands and arguments,
-environment values, provenance paths, project identity, and installed provider
-versions are excluded. The digest includes the complete selected archetype,
+environment values, allowed project roots, provenance paths, project identity,
+and installed provider versions are excluded. The digest includes the complete selected archetype,
 effective roles, limits, supervision policy, and provider requirements. The
 [configuration design](../DESIGN.md#declarative-configuration) specifies canonical
 encoding; the [example lock](../examples/config/coterie.lock) corresponds to the
@@ -193,6 +193,57 @@ coterie prime
 Reconstruct the caller's identity, project, peers, tasks, ready work, active
 assignment, and authorized command list. Agents use this durable context after
 a fresh session or context compaction.
+
+### `coterie project list`
+
+```console
+coterie project list [--json]
+```
+
+List the run's projects with their `id`, unique `alias`, canonical `root`, and
+`access`. JSON places this array in `data.projects`. Attachment membership does
+not expand a provider's filesystem permissions. Status, project listing, and
+other operator commands discover the same supervisor from any attached root.
+Starting a foreground session from a secondary project reports the owning run
+and its primary root; launch or recover the foreground from that primary root.
+
+### `coterie project attach`
+
+```console
+coterie project attach <path> [--alias <name>] [--operation-id <id>] [--json]
+```
+
+Attach a canonical Git worktree or non-Git directory to an existing run. Relative
+paths resolve from the caller's directory. Symlinks resolve before authorization;
+linked Git worktrees have distinct identities. The alias defaults to the canonical
+root's directory name and accepts ASCII letters, digits, underscores, and hyphens.
+An identity can have only one alias within a run. Attachment preserves repository
+files, including dirty work and `AGENTS.md`.
+
+Agents need `project:attach` and a root beneath a trusted global
+`allowed_project_roots` entry. This global-only array defaults to empty, accepts
+absolute existing directories, and resolves symlinks when configuration loads.
+Its canonical values are snapshotted with the run and excluded from portable
+locks. Changing it requires resolving the run's configuration conflict.
+An operator can explicitly attach outside the allowlist; the event records that
+authorization and the resolved identity.
+
+JSON returns the operation ID and `data.project`, using the same project fields
+as `list`. Successful retries return the recorded result. Alias, identity,
+configuration, and lease conflicts return `conflict` (exit 5); invalid paths or
+aliases return `invalid_argument` (exit 2); missing agent authority returns
+`permission_denied` (exit 6). Lease acquisition never waits. A foreign index is
+preserved with a diagnostic identifying the run to recover or stop.
+
+The current attachment foundation accepts absent project configuration or a
+configuration and lock that agree with the run's effective policy. Differing
+restrictions fail visibly until per-project overlays are implemented. Attachment
+records durable intent before acquiring a lease and publishing an index.
+Interrupted intents recover with the same identities; unresolved attempts remain
+visible in `doctor` and events. Recovery reacquires all attached leases before
+resuming work. Shutdown retires secondary indexes before the primary index and
+then releases the leases. A partial shutdown preserves the primary recovery
+entrypoint and any newer run's index.
 
 ### `coterie task create`
 
@@ -376,8 +427,8 @@ timeout returns `unavailable` (exit 7), leaves the run active, and keeps launche
 blocked. Inspect `events --json` and retry with the same operation ID to recheck
 progress. Retries and supervisor restarts retain the original deadline. When
 all processes are proved terminal, Coterie reconciles workspace observations,
-marks the run stopped, and retires its socket and project index before releasing
-the lease. It preserves unfinished tasks, claims, draining assignments,
+marks the run stopped, and retires its socket and project indexes before releasing
+the leases. It preserves unfinished tasks, claims, draining assignments,
 transcripts, worktrees, and owned references. Only the operator may call this
 mutation.
 

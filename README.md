@@ -20,8 +20,9 @@ The current command slice can launch or reconnect to a durable local run,
 open its foreground Codex TUI, inspect durable state, create and close tasks,
 spawn Codex workers in isolated Git worktrees, finish assignments, exchange
 durable messages, read and follow transcripts and events, diagnose runtime state
-with `doctor`, explicitly integrate submitted
-Git worktrees through a guarded operation, and stop the run while preserving
+with `doctor`, attach canonical projects under unique aliases, explicitly
+integrate submitted Git worktrees through a guarded operation, and stop the run
+while preserving
 recoverable work. Run
 `coterie --help` for the generated command reference; see the [CLI
 contract](docs/cli-contract.md) for programmatic output and retry rules.

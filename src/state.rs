@@ -93,6 +93,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "configuration_snapshots",
         sql: include_str!("state/migrations/0011_configuration_snapshots.sql"),
     },
+    Migration {
+        version: 12,
+        name: "project_root_policy",
+        sql: include_str!("state/migrations/0012_project_root_policy.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -235,12 +240,14 @@ pub(crate) struct ConfigurationSnapshotRecord {
 }
 
 /// A project attached to a run.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ProjectRecord {
     pub(crate) id: ProjectId,
     pub(crate) run_id: RunId,
     pub(crate) alias: String,
+    #[serde(with = "crate::project::path_bytes")]
     pub(crate) original_path: PathBuf,
+    #[serde(with = "crate::project::path_bytes")]
     pub(crate) canonical_path: PathBuf,
     pub(crate) identity: ProjectIdentity,
     pub(crate) is_primary: bool,
@@ -5222,6 +5229,11 @@ mod tests {
                     ],
                 )
                 .expect("legacy workspace");
+            if prior_count >= 11 {
+                connection
+                    .execute_batch(MIGRATIONS[10].sql)
+                    .expect("the prior runtime saved its historical policy");
+            }
             drop(connection);
 
             let store =
@@ -5238,6 +5250,18 @@ mod tests {
                     &Default::default()
                 )
                 .unwrap()
+            );
+            assert!(configuration.allowed_project_roots.is_empty());
+            let document: String = store.connection.query_row("SELECT document_json FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
+            let document: serde_json::Value =
+                serde_json::from_str(&document).unwrap();
+            assert_eq!(
+                document["effective"]["allowed_project_roots"],
+                json!([])
+            );
+            assert_eq!(
+                document["provenance"]["allowed_project_roots"]["source"]["layer"],
+                "compiled"
             );
             let applied = store
                 .connection

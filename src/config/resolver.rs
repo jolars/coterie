@@ -78,6 +78,8 @@ impl ConfigError {
 pub(crate) struct EffectiveConfig {
     pub(crate) archetype: ArchetypeDefinition,
     pub(crate) providers: BTreeMap<String, ProviderBinding>,
+    #[serde(default)]
+    pub(crate) allowed_project_roots: Vec<PathBuf>,
     pub(crate) limits: RunLimits,
     pub(crate) supervision: SupervisionPolicy,
     pub(crate) roles: BTreeMap<String, EffectiveRole>,
@@ -127,6 +129,23 @@ pub(crate) fn resolve(
         "supervision",
         "supervision",
         ConfigLayer::Compiled,
+    );
+    let allowed_project_roots =
+        global.allowed_project_roots.clone().unwrap_or_default();
+    if allowed_project_roots.iter().any(|path| !path.is_absolute()) {
+        return Err(invalid_global(
+            "allowed_project_roots",
+            "project roots must be absolute paths",
+        ));
+    }
+    provenance::record(
+        &mut provenance,
+        "allowed_project_roots",
+        if global.allowed_project_roots.is_some() {
+            ConfigLayer::Global
+        } else {
+            ConfigLayer::Compiled
+        },
     );
     let mut providers = defaults.providers;
     for (name, input) in &global.providers {
@@ -246,6 +265,7 @@ pub(crate) fn resolve(
     let mut effective = EffectiveConfig {
         archetype,
         providers,
+        allowed_project_roots,
         limits: trusted_limits,
         supervision,
         roles,

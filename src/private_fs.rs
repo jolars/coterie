@@ -26,14 +26,17 @@ fn validate(
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
-                "private path {} must be owned by the current user, have mode {}, and be a {}",
+                "private path {} must be owned by the current user, have mode {}, and be a {} (observed uid {}, mode {:04o}, links {})",
                 path.display(),
                 if directory { "0700" } else { "0600" },
                 if directory {
                     "directory"
                 } else {
                     "regular file with one link"
-                }
+                },
+                metadata.uid(),
+                metadata.mode() & 0o7777,
+                metadata.nlink()
             ),
         ));
     }

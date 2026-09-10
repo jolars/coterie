@@ -4,6 +4,16 @@
   "description": "Trusted operator definitions. Included files use the same partial format.",
   "type": "object",
   "properties": {
+    "allowed_project_roots": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "items": {
+        "type": "string"
+      }
+    },
     "archetype": {
       "type": [
         "string",

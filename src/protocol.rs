@@ -14,7 +14,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 4;
+pub(crate) const PROTOCOL_VERSION: u16 = 5;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -96,6 +96,13 @@ pub(crate) enum RpcRequest {
     Doctor,
     Whoami,
     Prime,
+    ProjectList,
+    ProjectAttach {
+        operation_id: OperationId,
+        #[serde(with = "crate::project::path_bytes")]
+        path: std::path::PathBuf,
+        alias: Option<String>,
+    },
     TaskCreate {
         operation_id: OperationId,
         title: String,
@@ -239,6 +246,13 @@ pub(crate) enum RpcResponse {
         ready_tasks: Vec<TaskSummary>,
         active_task: Option<Box<TaskSummary>>,
         commands: Vec<String>,
+    },
+    Projects {
+        projects: Vec<ProjectSummary>,
+    },
+    ProjectAttached {
+        operation_id: OperationId,
+        project: ProjectSummary,
     },
     TaskCreated {
         operation_id: OperationId,
@@ -536,7 +550,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 4,
+                    "protocol_version": 5,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -649,7 +663,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 4,
+                    "protocol_version": 5,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

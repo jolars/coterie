@@ -11,9 +11,11 @@ milestone acceptance criteria.
 Coterie implements the single-project operator loop and has passed the M4
 reliability and safety gates and the M5 declarative configuration gate. Runs
 snapshot resolved policy for launches and recovery. The first MVP release gate
-remains separate in `TODO.md`. M6 and later milestones own attached projects
-and the remaining initial product scope. Do not imply that those features
-exist before their acceptance criteria pass.
+remains separate in `TODO.md`. M6 now provides project attachment, root policy,
+leases, and run discovery. Per-project overlays and the remaining cross-project
+workflow gates are still owned by M6; later milestones complete the initial
+product scope. Do not imply that those features exist before their acceptance
+criteria pass.
 
 ## Project priorities
 

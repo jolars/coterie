@@ -52,6 +52,7 @@ pub(crate) struct GlobalConfig {
     pub(crate) schema_version: ConfigSchemaVersion,
     pub(crate) archetype: Option<String>,
     pub(crate) includes: Option<Vec<PathBuf>>,
+    pub(crate) allowed_project_roots: Option<Vec<PathBuf>>,
     pub(crate) providers: BTreeMap<String, ProviderInput>,
     pub(crate) limits: LimitOverrides,
     pub(crate) supervision: SupervisionOverrides,

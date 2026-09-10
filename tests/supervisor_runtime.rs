@@ -119,6 +119,403 @@ fn rejected(fixture: &TestEnvironment, arguments: &[&str], message: &str) {
 }
 
 #[test]
+fn project_attachment_discovers_one_run_and_retires_every_index() {
+    let fixture = TestEnvironment::new();
+    fixture.launch(&[]);
+    let library = fixture.root.join("library");
+    Repository::init(&library).unwrap();
+    let alias_path = fixture.root.join("library-link");
+    std::os::unix::fs::symlink(&library, &alias_path).unwrap();
+    let operation = "co-01ARZ3NDEKTSV4RRFFQ69G5FAX";
+    let args = [
+        "project",
+        "attach",
+        alias_path.to_str().unwrap(),
+        "--alias",
+        "library",
+        "--operation-id",
+        operation,
+        "--json",
+    ];
+    let attached = fixture.run_json(&args);
+    assert_eq!(
+        attached["data"]["project"]["root"],
+        library.to_str().unwrap()
+    );
+    assert_eq!(fixture.run_json(&args), attached);
+    assert_eq!(fixture.index_entry_count(), 2);
+    let primary = fixture.run_json(&["status", "--json"]);
+    let output = run({
+        let mut command = fixture.command();
+        command.current_dir(&library).args(["status", "--json"]);
+        command
+    });
+    assert!(output.status.success(), "{output:?}");
+    let secondary: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(primary, secondary);
+    let listed = fixture.run_json(&["project", "list", "--json"]);
+    assert_eq!(listed["data"]["projects"].as_array().unwrap().len(), 2);
+    rejected(
+        &fixture,
+        &[
+            "project",
+            "attach",
+            library.to_str().unwrap(),
+            "--alias",
+            "primary",
+            "--json",
+        ],
+        "alias",
+    );
+    let output = run({
+        let mut command = fixture.command();
+        command.current_dir(&library).args(["stop", "--json"]);
+        command
+    });
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fixture.index_entry_count(), 0);
+}
+
+#[test]
+fn project_attachment_preserves_non_utf8_directory_identity() {
+    use std::os::unix::ffi::OsStringExt;
+    let fixture = TestEnvironment::new_plain();
+    fixture.launch(&[]);
+    let directory = fixture
+        .root
+        .join(std::ffi::OsString::from_vec(b"directory-\xff".to_vec()));
+    fs::create_dir(&directory).unwrap();
+    let output = run({
+        let mut command = fixture.command();
+        command.args(["project", "attach"]).arg(&directory).args([
+            "--alias",
+            "directory",
+            "--json",
+        ]);
+        command
+    });
+    assert!(output.status.success(), "{output:?}");
+    let attached: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let status = fixture.run_json(&["status", "--json"]);
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(status["data"]["run_id"].as_str().unwrap())
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let root: Vec<u8> = connection
+        .query_row(
+            "SELECT canonical_path FROM projects WHERE id = ?1",
+            [attached["data"]["project"]["id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(root, directory.as_os_str().as_bytes());
+    let output = run({
+        let mut command = fixture.command();
+        command.current_dir(&directory).args(["project", "list"]);
+        command
+    });
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("directory"));
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn project_attachment_recovery_reacquires_all_leases_before_serving() {
+    let fixture = TestEnvironment::new();
+    let mut supervisor = fixture
+        .command()
+        .args(["__supervisor", RUN_ID, PROJECT_ID])
+        .arg(&fixture.project)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("primary publication", || fixture.index_entry_count() == 1);
+    let library = fixture.root.join("library");
+    Repository::init(&library).unwrap();
+    let attached = fixture.run_json(&[
+        "project",
+        "attach",
+        library.to_str().unwrap(),
+        "--json",
+    ]);
+    let before = fixture.run_json(&["status", "--json"]);
+    let indexes = fs::read_dir(fixture.state.join("coterie/projects")).unwrap();
+    let entry: Value = indexes
+        .filter_map(Result::ok)
+        .filter_map(|file| fs::read(file.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .find(|entry| entry["project_id"] == attached["data"]["project"]["id"])
+        .unwrap();
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+    let lease_path = fixture
+        .runtime
+        .join("coterie/projects")
+        .join(format!("{}.lock", entry["project_key"].as_str().unwrap()));
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lease_path)
+        .unwrap();
+    lease.try_lock().unwrap();
+    let output = run({
+        let mut command = fixture.command();
+        command
+            .args(["__supervisor", RUN_ID, PROJECT_ID])
+            .arg(&fixture.project);
+        command
+    });
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lease"));
+    drop(lease);
+    assert!(run(fixture.connect_command()).status.success());
+    assert_eq!(fixture.run_json(&["status", "--json"]), before);
+    let output = run({
+        let mut command = fixture.command();
+        command.current_dir(&library).args(["status", "--json"]);
+        command
+    });
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        before
+    );
+    fixture.run_json(&["stop", "--json"]);
+    assert_eq!(fixture.index_entry_count(), 0);
+}
+
+#[test]
+fn project_attachment_enforces_agent_roots_and_capabilities() {
+    for authorized in [true, false] {
+        let fixture = TestEnvironment::new();
+        let allowed = fixture.root.join("allowed");
+        let library = allowed.join("library");
+        Repository::init(&library).unwrap();
+        let outside = fixture.root.join("outside");
+        Repository::init(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, allowed.join("escape")).unwrap();
+        let root_link = fixture.root.join("root-link");
+        std::os::unix::fs::symlink(&allowed, &root_link).unwrap();
+        let custom = if authorized {
+            String::new()
+        } else {
+            include_str!("../examples/config/global.toml").to_owned()
+        };
+        write_global(
+            &fixture,
+            &format!("allowed_project_roots = [{root_link:?}]\n{custom}"),
+        );
+        let script = FAKE_CODEX.replace("is_job=false", r#"
+if [ "${COTERIE_ROLE-}" = lead ] || [ "${COTERIE_ROLE-}" = coordinator ]; then
+  coterie="${0%/*}/coterie"
+  base="$COTERIE_PRIMARY_PROJECT_ROOT/.."
+  "$coterie" project attach "$base/outside" --json > "$0.outside.out" 2> "$0.outside.err"
+  [ "$?" = 6 ] || exit 91
+  "$coterie" project attach "$base/allowed/escape" --alias escape --json > "$0.escape.out" 2> "$0.escape.err"
+  [ "$?" = 6 ] || exit 92
+  ln -sfn "$base/outside" "$base/root-link" || exit 93
+  "$coterie" project attach "$base/root-link" --alias retargeted --json > "$0.retargeted.out" 2> "$0.retargeted.err"
+  [ "$?" = 6 ] || exit 94
+  "$coterie" project attach "$base/allowed/library" --json > "$0.allowed.out" 2> "$0.allowed.err"
+  printf '%s' "$?" > "$0.allowed.status"
+  exit 0
+fi
+is_job=false"#);
+        let provider = fixture.root.join("bin/codex");
+        fs::write(&provider, script).unwrap();
+        fixture.launch(&[]);
+        assert_eq!(
+            fs::read_to_string(provider.with_extension("allowed.status"))
+                .unwrap(),
+            if authorized { "0" } else { "6" }
+        );
+        assert_eq!(fixture.index_entry_count(), if authorized { 2 } else { 1 });
+        let denied: Value = serde_json::from_slice(
+            &fs::read(provider.with_extension("outside.err")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(denied["error"]["code"], "permission_denied");
+        // An explicit operator attachment can grant a root outside the allowlist.
+        fixture.run_json(&[
+            "project",
+            "attach",
+            outside.to_str().unwrap(),
+            "--json",
+        ]);
+        fixture.run_json(&["stop", "--json"]);
+    }
+}
+
+#[test]
+fn project_attachment_races_and_cross_run_leases_fail_without_waiting() {
+    let fixture = TestEnvironment::new();
+    fixture.launch(&[]);
+    let second = fixture.root.join("second");
+    let shared = fixture.root.join("shared");
+    Repository::init(&second).unwrap();
+    Repository::init(&shared).unwrap();
+    let output = run({
+        let mut command = fixture.connect_command();
+        command.current_dir(&second);
+        command
+    });
+    assert!(output.status.success(), "{output:?}");
+    let first = fixture
+        .command()
+        .args(["project", "attach"])
+        .arg(&shared)
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let second_output = run({
+        let mut command = fixture.command();
+        command
+            .current_dir(&second)
+            .args(["project", "attach"])
+            .arg(&shared)
+            .arg("--json");
+        command
+    });
+    let first_output = first.wait_with_output().unwrap();
+    let status = first_output.status;
+    assert_eq!(
+        [status.success(), second_output.status.success()]
+            .into_iter()
+            .filter(|value| *value)
+            .count(),
+        1
+    );
+    assert!(
+        status.code() == Some(5) || second_output.status.code() == Some(5),
+        "{first_output:?}, {second_output:?}"
+    );
+    rejected(
+        &fixture,
+        &[
+            "project",
+            "attach",
+            second.to_str().unwrap(),
+            "--alias",
+            "second",
+            "--json",
+        ],
+        "lease",
+    );
+    let output = run({
+        let mut command = fixture.command();
+        command
+            .current_dir(&second)
+            .args(["project", "attach"])
+            .arg(&fixture.project)
+            .arg("--json");
+        command
+    });
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    fixture.run_json(&["stop", "--json"]);
+    let output = run({
+        let mut command = fixture.command();
+        command.current_dir(&second).args(["stop", "--json"]);
+        command
+    });
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fixture.index_entry_count(), 0);
+}
+
+#[test]
+fn project_attachment_keeps_linked_worktrees_distinct_and_validates_aliases() {
+    let fixture = TestEnvironment::new();
+    let linked = fixture.root.join("linked");
+    let repository = Repository::open(&fixture.project).unwrap();
+    repository.worktree("linked", &linked, None).unwrap();
+    fixture.launch(&[]);
+    let attached =
+        fixture.run_json(&["project", "attach", "../linked", "--json"]);
+    let list = fixture.run_json(&["project", "list", "--json"]);
+    assert_ne!(
+        attached["data"]["project"]["id"],
+        list["data"]["projects"][0]["id"]
+    );
+    rejected(
+        &fixture,
+        &[
+            "project",
+            "attach",
+            "../linked",
+            "--alias",
+            "renamed",
+            "--json",
+        ],
+        "identity",
+    );
+    let output = run({
+        let mut command = fixture.command();
+        command.args([
+            "project",
+            "attach",
+            "../linked",
+            "--alias",
+            "../invalid",
+            "--json",
+        ]);
+        command
+    });
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let output = run({
+        let mut command = fixture.command();
+        command.current_dir(&linked);
+        command
+    });
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("project belongs to run")
+    );
+    assert_eq!(fixture.index_entry_count(), 2);
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn project_attachment_rejects_incompatible_restrictions_and_invalid_locks() {
+    let fixture = TestEnvironment::new();
+    fixture.launch(&[]);
+    let library = fixture.root.join("library");
+    Repository::init(&library).unwrap();
+    fs::write(
+        library.join("coterie.toml"),
+        "[roles.worker]\nmax_instances = 1",
+    )
+    .unwrap();
+    rejected(
+        &fixture,
+        &["project", "attach", library.to_str().unwrap(), "--json"],
+        "restriction overlays",
+    );
+    fs::remove_file(library.join("coterie.toml")).unwrap();
+    fs::write(library.join("coterie.lock"), "invalid lock").unwrap();
+    let output = run({
+        let mut command = fixture.command();
+        command
+            .args(["project", "attach"])
+            .arg(&library)
+            .arg("--json");
+        command
+    });
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(fixture.index_entry_count(), 1);
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
 fn configured_capabilities_authorize_calls_and_concrete_recipient_roles() {
     let fixture = TestEnvironment::new();
     let provider = fixture.root.join("bin/codex");

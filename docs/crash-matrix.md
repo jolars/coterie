@@ -28,7 +28,8 @@ point to have a scenario.
 | Worktree creation | Parent directories, owned references, worktree creation, and database observations | Exactly one owned worktree and reference remain. Recovery reuses recorded identities and preserves worker commits and repository instructions. |
 | Integration | Fast-forward and merge plans, individual checkout progress callbacks, commit creation, reference advancement, and database observations | Completed integrations have the expected target commit and one reference advancement. Partial changes that cannot be safely completed remain inspectable with an `unknown` operation and a diagnostic. |
 | Transcripts | Private directory and file creation, append, and sync | The stored prefix is preserved exactly, and a partial final JSONL frame is never repeated by recovery. |
-| Runtime coordination | Directory permissions, lease acquisition and publication, socket creation and permissions, temporary index writes, sync, rename, retirement, and lease release | A stopped run retires its index and socket and releases its lease. An unverifiable socket is reported and preserved. |
+| Project attachment | Durable intent, lease acquisition, project record, and index publication | Retries retain one project identity and alias. Conflicts remain visible. A second recovery changes neither records nor coordination files. |
+| Runtime coordination | Directory permissions, lease acquisition and publication, socket creation and permissions, temporary index writes, sync, rename, retirement, and lease release | A stopped run retires its secondary indexes, primary index, and socket and releases all leases. An unverifiable socket is reported and preserved. |
 
 After recovery converges, every database table is compared, including events,
 credentials, operations, and reconciliation counters. Repository files, Git

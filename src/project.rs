@@ -35,7 +35,7 @@ pub(crate) enum ProjectIdentity {
 }
 
 /// A stable, filesystem-safe digest of a resolved project identity.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ProjectKey(String);
 
 impl ProjectKey {
@@ -234,7 +234,7 @@ impl CoterieDirectories {
         Self::from_base_directories(runtime, state)
     }
 
-    fn from_base_directories(
+    pub(crate) fn from_base_directories(
         runtime: impl AsRef<Path>,
         state: impl AsRef<Path>,
     ) -> Result<Self, ProjectError> {
@@ -461,6 +461,15 @@ impl ActiveRunIndex {
                 return Ok(None);
             }
             Err(source) => {
+                // Retirement can unlink an already opened inode before its link
+                // count is checked. Confirm absence instead of reporting bad permissions.
+                if source.kind() == io::ErrorKind::PermissionDenied
+                    && fs::symlink_metadata(&path).is_err_and(|error| {
+                        error.kind() == io::ErrorKind::NotFound
+                    })
+                {
+                    return Ok(None);
+                }
                 return Err(ProjectError::IndexIo {
                     action: "open",
                     path,
@@ -851,14 +860,14 @@ fn create_private_directory(path: &Path) -> Result<(), ProjectError> {
     })
 }
 
-mod path_bytes {
+pub(crate) mod path_bytes {
     use std::ffi::OsString;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::path::{Path, PathBuf};
 
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-    pub(super) fn serialize<S>(
+    pub(crate) fn serialize<S>(
         path: &Path,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
@@ -868,7 +877,7 @@ mod path_bytes {
         path.as_os_str().as_bytes().serialize(serializer)
     }
 
-    pub(super) fn deserialize<'de, D>(
+    pub(crate) fn deserialize<'de, D>(
         deserializer: D,
     ) -> Result<PathBuf, D::Error>
     where

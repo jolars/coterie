@@ -118,6 +118,13 @@
       "description": "Resolved values are distinct from the unmodified, versioned archetype.",
       "type": "object",
       "properties": {
+        "allowed_project_roots": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "archetype": {
           "$ref": "#/$defs/ArchetypeDefinition"
         },
@@ -143,6 +150,7 @@
       "required": [
         "archetype",
         "providers",
+        "allowed_project_roots",
         "limits",
         "supervision",
         "roles"

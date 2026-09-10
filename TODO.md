@@ -226,9 +226,12 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 
 ## M6: Cross-project orchestration
 
-- [ ] Attach canonical project roots under unique aliases, enforce global root
+- [x] Attach canonical project roots under unique aliases, enforce global root
   policy and per-project leases, and discover the same active run from every
-  attached project.
+  attached project. The [runtime tests](tests/supervisor_runtime.rs) cover
+  authorization, aliases, symlinks, linked worktrees, discovery, and lease races.
+  The [crash tests](src/supervisor/crash_tests.rs) cover attachment and retirement;
+  migration 12 pins historical root policy. `task check` passes.
 - [ ] Apply and snapshot each attached project's restrictions and lock without
   allowing its archetype selector to replace the run archetype.
 - [ ] Give every task exactly one writable target and explicit read-only input

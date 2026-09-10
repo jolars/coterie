@@ -1,6 +1,7 @@
 //! Desired-state reconciliation and process ownership.
 
 mod doctor;
+mod projects;
 mod session;
 
 #[cfg(test)]
@@ -252,6 +253,12 @@ pub(crate) async fn run(
                     json_output,
                 )
                 .await;
+            }
+            let mut request = request;
+            if let RpcRequest::ProjectAttach { path, .. } = &mut request {
+                *path = std::path::absolute(&*path)
+                    .map_err(SupervisorError::CurrentDirectory)
+                    .map_err(|error| command_error(error, operation_id))?;
             }
             let response = client
                 .request(request)
@@ -826,6 +833,26 @@ fn public_request(
     command: CliCommand,
 ) -> (RpcRequest, Option<OperationId>, bool) {
     match command {
+        CliCommand::Project(arguments) => match arguments.command {
+            crate::cli::ProjectCommand::List => {
+                (RpcRequest::ProjectList, None, false)
+            }
+            crate::cli::ProjectCommand::Attach(arguments) => {
+                let operation_id = arguments
+                    .mutation
+                    .operation_id
+                    .unwrap_or_else(OperationId::generate);
+                (
+                    RpcRequest::ProjectAttach {
+                        operation_id,
+                        path: arguments.path,
+                        alias: arguments.alias,
+                    },
+                    Some(operation_id),
+                    false,
+                )
+            }
+        },
         CliCommand::Status => (RpcRequest::Status, None, false),
         CliCommand::Doctor => unreachable!("doctor is dispatched locally"),
         CliCommand::Whoami => (RpcRequest::Whoami, None, false),
@@ -1167,6 +1194,22 @@ async fn connect_or_start_with_overrides(
     directories: &CoterieDirectories,
     overrides: &crate::cli::config::Overrides,
 ) -> Result<SupervisorClient, SupervisorError> {
+    if let Some(entry) =
+        ActiveRunIndex::new(directories).lookup(&project.identity)?
+    {
+        let mut store = open_configuration_store(directories, entry.run_id)?;
+        let primary = store.transaction(|repositories| {
+            Ok(repositories
+                .projects(entry.run_id)?
+                .into_iter()
+                .find(|project| project.is_primary))
+        })?;
+        if let Some(primary) = primary
+            && primary.id != entry.project_id
+        {
+            return Err(conflict(format!("project belongs to run {}; launch or recover its foreground from {}", entry.run_id, primary.canonical_path.display())).into());
+        }
+    }
     let configuration = load_configuration_with_overrides(project, overrides)?;
     directories.prepare()?;
     let index = ActiveRunIndex::new(directories);
@@ -1403,17 +1446,20 @@ async fn serve_with_overrides(
         &configuration,
     )?;
     let socket_path = checked_socket_path(&directories, active.run_id)?;
-    if store.transaction(|repositories| {
+    let stopped = store.transaction(|repositories| {
         Ok(repositories
             .run(active.run_id)?
             .is_some_and(|run| run.status == "stopped"))
-    })? {
+    })?;
+    let mut projects = projects::AttachedProjects::new(
+        directories.clone(),
+        active.clone(),
+        lease,
+    );
+    projects.recover(&mut store, active.run_id, stopped)?;
+    if stopped {
         remove_stale_socket(&socket_path).await?;
-        ActiveRunIndex::new(&directories).retire(
-            &project.identity,
-            active.run_id,
-            &lease,
-        )?;
+        projects.retire()?;
         return Ok(());
     }
     remove_stale_socket(&socket_path).await?;
@@ -1442,8 +1488,14 @@ async fn serve_with_overrides(
                 source,
             }
         })?;
-    let index = ActiveRunIndex::new(&directories);
-    index.publish(&active, &lease)?;
+
+    let primary = store
+        .transaction(|repositories| repositories.project(active.project_id))?
+        .ok_or(SupervisorError::RunStateMismatch {
+            run_id: active.run_id,
+            project_id: active.project_id,
+        })?;
+    projects.publish(&primary)?;
     let mut sessions = runtime_sessions(&run_directories.state);
     let mut workspaces = runtime_workspaces(&run_directories.state);
     let reconciled_at = unix_timestamp()?;
@@ -1486,16 +1538,17 @@ async fn serve_with_overrides(
         &mut store,
         &mut sessions,
         &mut workspaces,
+        &mut projects,
     )
     .await;
     let socket_result = remove_owned_socket(&socket_path, &owned_socket).await;
     let index_result = if serve_result.is_ok() && socket_result.is_ok() {
-        index.retire(&project.identity, active.run_id, &lease)
+        projects.retire()
     } else {
         Ok(())
     };
     crate::fault::point("lease.release.before");
-    drop(lease);
+    drop(projects);
     crate::fault::point("lease.release.after");
 
     serve_result?;
@@ -1504,6 +1557,7 @@ async fn serve_with_overrides(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_listener<P: Provider, B: WorkspaceBackend>(
     listener: UnixListener,
     active: ActiveRunEntry,
@@ -1512,6 +1566,7 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
     store: &mut Store,
     sessions: &mut AgentSessionSupervisor<P>,
     workspaces: &mut WorkspaceSupervisor<B>,
+    projects: &mut projects::AttachedProjects,
 ) -> Result<(), SupervisorError> {
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
     let (command_tx, mut command_rx) = mpsc::channel(16);
@@ -1558,6 +1613,17 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
                 ));
             }
             Some(command) = command_rx.recv() => {
+                let command = match command {
+                    SupervisorCommand::ProjectHandshake { request, response } => {
+                        let _disconnected = response.send(projects.proof(&request));
+                        continue;
+                    }
+                    SupervisorCommand::Dispatch { caller, request: request @ RpcRequest::ProjectAttach { .. }, response } => {
+                        let _disconnected = response.send(projects.attach(store, active.run_id, &caller, request));
+                        continue;
+                    }
+                    command => command,
+                };
                 handle_command(
                     store,
                     sessions,
@@ -1681,7 +1747,7 @@ fn reconcile_operations<P: Provider, B: WorkspaceBackend>(
             continue;
         }
         match operation.kind.as_str() {
-            "run.stop" => {}
+            "run.stop" | "project.attach" => {}
             "agent.launch_foreground" => {
                 reconcile_foreground_operation(
                     runtime.store,
@@ -1984,6 +2050,10 @@ fn record_operation_reconciliation(
 }
 
 enum SupervisorCommand {
+    ProjectHandshake {
+        request: HandshakeRequest,
+        response: oneshot::Sender<Result<ActiveRunEntry, RpcFailure>>,
+    },
     AuthenticateAgent {
         agent_id: AgentId,
         session_id: SessionId,
@@ -2027,6 +2097,11 @@ fn handle_command<P: Provider, B: WorkspaceBackend>(
     foreground: &mut ForegroundCoordination,
 ) {
     match command {
+        SupervisorCommand::ProjectHandshake { response, .. } => {
+            let _disconnected = response.send(Err(conflict(
+                "project handshake requires the lease-owning runtime",
+            )));
+        }
         SupervisorCommand::AuthenticateAgent {
             agent_id,
             session_id,
@@ -2432,6 +2507,9 @@ fn active_background_session_ids(
 
 fn supervisor_rpc_failure(error: SupervisorError) -> RpcFailure {
     match error {
+        SupervisorError::Rejected { code, message } => {
+            RpcFailure::new(code, message)
+        }
         SupervisorError::State(error) => rpc_state_failure(error),
         error => RpcFailure::new(RpcFailureCode::Internal, error.to_string()),
     }
@@ -2483,15 +2561,11 @@ struct RuntimePaths<'a> {
     socket_path: &'a Path,
 }
 
-fn execute_request<P: Provider, B: WorkspaceBackend>(
+fn require_current_caller(
     store: &mut Store,
-    sessions: &mut AgentSessionSupervisor<P>,
-    workspaces: &mut WorkspaceSupervisor<B>,
-    paths: RuntimePaths<'_>,
     run_id: RunId,
     caller: &AuthenticatedCaller,
-    request: RpcRequest,
-) -> Result<RpcResponse, RpcFailure> {
+) -> Result<(), RpcFailure> {
     if let AuthenticatedCaller::Agent(scope) = caller {
         let current = store
             .transaction(|repositories| {
@@ -2514,6 +2588,19 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             ));
         }
     }
+    Ok(())
+}
+
+fn execute_request<P: Provider, B: WorkspaceBackend>(
+    store: &mut Store,
+    sessions: &mut AgentSessionSupervisor<P>,
+    workspaces: &mut WorkspaceSupervisor<B>,
+    paths: RuntimePaths<'_>,
+    run_id: RunId,
+    caller: &AuthenticatedCaller,
+    request: RpcRequest,
+) -> Result<RpcResponse, RpcFailure> {
+    require_current_caller(store, run_id, caller)?;
     if matches!(
         &request,
         RpcRequest::Spawn { .. } | RpcRequest::LaunchForeground { .. }
@@ -2609,6 +2696,11 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             .map_err(rpc_state_failure)?;
             Ok(RpcResponse::Doctor { report })
         }
+        RpcRequest::ProjectList => projects::list(store, run_id),
+        RpcRequest::ProjectAttach { .. } => Err(RpcFailure::new(
+            RpcFailureCode::Internal,
+            "project attachment requires the lease-owning runtime",
+        )),
         RpcRequest::Status => status(store, run_id, caller),
         RpcRequest::Whoami => whoami(store, run_id, caller),
         RpcRequest::Prime => prime(store, run_id, caller),
@@ -4999,10 +5091,11 @@ fn available_commands(
     run_id: RunId,
     caller: &AuthenticatedCaller,
 ) -> Result<Vec<String>, RpcFailure> {
-    let mut commands = vec!["whoami", "prime"];
+    let mut commands = vec!["whoami", "prime", "project list"];
     if caller.is_operator() {
         commands.extend([
             "status",
+            "project attach",
             "task create",
             "task ready",
             "task close",
@@ -5021,6 +5114,7 @@ fn available_commands(
             caller.agent_id().expect("agent caller has an ID"),
         )?;
         for (namespace, action, command) in [
+            ("project", "attach", "project attach"),
             ("task", "create", "task create"),
             ("task", "close", "task close"),
             ("logs", "*", "logs"),
@@ -5847,6 +5941,32 @@ async fn serve_connection(
         }
     };
 
+    let active = if handshake.protocol_version == PROTOCOL_VERSION
+        && handshake.expected_run_id == active.run_id
+        && handshake.project_key != active.project_key
+    {
+        let (response, receiver) = oneshot::channel();
+        commands
+            .send(SupervisorCommand::ProjectHandshake {
+                request: handshake.clone(),
+                response,
+            })
+            .await
+            .map_err(|_| SupervisorError::CommandChannelClosed)?;
+        match receiver
+            .await
+            .map_err(|_| SupervisorError::CommandChannelClosed)?
+        {
+            Ok(entry) => entry,
+            Err(failure) => {
+                reject(&mut stream, failure).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        active
+    };
+
     if let Some(failure) = validate_handshake(&handshake, &active) {
         reject(&mut stream, failure).await?;
         return Ok(());
@@ -6483,7 +6603,8 @@ mod tests {
                     operation_id,
                     response,
                 } => (operation_id, response),
-                SupervisorCommand::AuthenticateAgent { .. } => {
+                SupervisorCommand::AuthenticateAgent { .. }
+                | SupervisorCommand::ProjectHandshake { .. } => {
                     panic!(
                         "the operator ping must not use agent authentication"
                     )
@@ -6552,7 +6673,7 @@ mod tests {
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
             .unwrap();
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
-        let (command_tx, _command_rx) = mpsc::channel(1);
+        let (command_tx, mut command_rx) = mpsc::channel(1);
         let server = tokio::spawn(async move {
             let (stream, _) =
                 listener.accept().await.expect("the client should connect");
@@ -6560,6 +6681,19 @@ mod tests {
                 .await
         });
 
+        let command_server = tokio::spawn(async move {
+            let SupervisorCommand::ProjectHandshake { response, .. } =
+                command_rx.recv().await.unwrap()
+            else {
+                panic!("expected project handshake");
+            };
+            response
+                .send(Err(crate::protocol::RpcFailure::new(
+                    RpcFailureCode::ProjectMismatch,
+                    "project mismatch",
+                )))
+                .unwrap();
+        });
         let error =
             SupervisorClient::connect_operator_at(&socket, &client_entry)
                 .await
@@ -6572,6 +6706,7 @@ mod tests {
                 ..
             }
         ));
+        command_server.await.unwrap();
         server
             .await
             .expect("the server task should finish")
@@ -7067,6 +7202,9 @@ mod tests {
                 &mut store,
                 &mut sessions,
                 &mut workspaces,
+                &mut super::projects::AttachedProjects::empty_for_test(
+                    &run_state_directory,
+                ),
             )
             .await
         });
@@ -7773,6 +7911,9 @@ mod tests {
                 &mut store,
                 &mut sessions,
                 &mut workspaces,
+                &mut super::projects::AttachedProjects::empty_for_test(
+                    &run_state_directory,
+                ),
             )
             .await
         });

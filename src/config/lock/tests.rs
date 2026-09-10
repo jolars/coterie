@@ -13,6 +13,7 @@ fn fingerprint_covers_all_portable_policy_and_ignores_host_bindings() {
     host.providers.get_mut("codex").unwrap().command =
         vec!["/another/host/codex".into(), "secret".into()];
     host.provenance.clear();
+    host.allowed_project_roots = vec!["/another/host/projects".into()];
     assert_eq!(ConfigLock::for_config(&host), expected);
 
     let mut changes = Vec::new();

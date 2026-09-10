@@ -13,6 +13,21 @@ const TASK: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAX";
 const OPERATION: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FAY";
 
 #[test]
+fn crash_matrix_attached_run_publication_and_retirement() {
+    matrix("runtime-attachment");
+}
+
+#[test]
+fn crash_matrix_project_attachment() {
+    matrix("attachment");
+}
+
+#[test]
+fn crash_matrix_project_attachment_recovery() {
+    recovery_matrix("attachment", "project.attach.record.after");
+}
+
+#[test]
 fn crash_matrix_initialization() {
     matrix("initialize");
 }
@@ -139,6 +154,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         include_str!("../state.rs"),
         include_str!("../supervisor.rs"),
         include_str!("session.rs"),
+        include_str!("projects.rs"),
         include_str!("../providers.rs"),
         include_str!("../project.rs"),
         include_str!("../private_fs.rs"),
@@ -161,6 +177,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
     let mut covered = std::collections::BTreeSet::new();
     for case in [
         "initialize",
+        "attachment",
         "task",
         "spawn",
         "finish",
@@ -172,6 +189,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "acknowledge",
         "close",
         "runtime",
+        "runtime-attachment",
         "process",
         "interrupt-process",
         "terminate-process",
@@ -396,8 +414,12 @@ fn crash_child() {
         process_child(root, &mode, &case);
         return;
     }
-    if case == "runtime" {
-        runtime_child(&root, &mode);
+    if case == "attachment" {
+        attachment_child(&root, &mode);
+        return;
+    }
+    if case == "runtime" || case == "runtime-attachment" {
+        runtime_child(&root, &mode, case == "runtime-attachment");
         return;
     }
     if mode.starts_with("recover") {
@@ -825,9 +847,81 @@ fn wait_for_file(path: &Path) {
     }
 }
 
-fn runtime_child(root: &Path, mode: &str) {
+fn attachment_child(root: &Path, mode: &str) {
     if mode == "exercise" {
         prepare_project(root);
+        Repository::init(root.join("library")).unwrap();
+    }
+    crate::private_fs::directory(&root.join("rt")).unwrap();
+    let mut fixture = Fixture::open(root.to_owned());
+    let project = DiscoveredProject::discover(root.join("project")).unwrap();
+    let active = ActiveRunEntry::new(
+        RUN.parse().unwrap(),
+        PROJECT.parse().unwrap(),
+        project.identity.clone(),
+    );
+    let directories = CoterieDirectories::from_environment().unwrap();
+    directories.prepare().unwrap();
+    let LeaseAttempt::Acquired(lease) = ProjectLease::try_acquire(
+        &directories,
+        &project.identity,
+        active.run_id,
+    )
+    .unwrap() else {
+        panic!("primary lease unavailable");
+    };
+    let mut projects = projects::AttachedProjects::new(
+        directories.clone(),
+        active.clone(),
+        lease,
+    );
+    if mode == "exercise" {
+        injection::arm(
+            &root.join("trace"),
+            std::env::var("COTERIE_CRASH_TEST_INDEX")
+                .unwrap()
+                .parse()
+                .ok(),
+        );
+    } else {
+        projects
+            .recover(&mut fixture.store, active.run_id, false)
+            .unwrap();
+    }
+    projects
+        .attach(
+            &mut fixture.store,
+            active.run_id,
+            &AuthenticatedCaller::Operator,
+            RpcRequest::ProjectAttach {
+                operation_id: OPERATION.parse().unwrap(),
+                path: root.join("library"),
+                alias: Some("library".into()),
+            },
+        )
+        .unwrap();
+    injection::disarm();
+    let stored = fixture
+        .store
+        .transaction(|repositories| repositories.projects(active.run_id))
+        .unwrap();
+    assert_eq!(stored.len(), 2);
+    let library = DiscoveredProject::discover(root.join("library")).unwrap();
+    let entry = ActiveRunIndex::new(&directories)
+        .lookup(&library.identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry.run_id, active.run_id);
+    assert!(stored.iter().any(|project| project.id == entry.project_id
+        && project.identity == entry.project_identity));
+}
+
+fn runtime_child(root: &Path, mode: &str, attach: bool) {
+    if mode == "exercise" {
+        prepare_project(root);
+        if attach {
+            Repository::init(root.join("library")).unwrap();
+        }
     }
     crate::private_fs::directory(&root.join("rt")).unwrap();
     let project = DiscoveredProject::discover(root.join("project")).unwrap();
@@ -851,6 +945,7 @@ fn runtime_child(root: &Path, mode: &str) {
     let result = runtime.block_on(async {
         let socket = directories.socket_path(active.run_id);
         let operator_entry = active.clone();
+        let library = root.join("library");
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let operator_done = Arc::clone(&done);
         // The operator performs its RPC on another thread so its filesystem
@@ -874,6 +969,19 @@ fn runtime_child(root: &Path, mode: &str) {
                             )
                             .await
                         {
+                            if attach {
+                                client
+                                    .request(RpcRequest::ProjectAttach {
+                                        operation_id:
+                                            "co-01ARZ3NDEKTSV4RRFFQ69G5FAZ"
+                                                .parse()
+                                                .unwrap(),
+                                        path: library.clone(),
+                                        alias: Some("library".into()),
+                                    })
+                                    .await
+                                    .unwrap();
+                            }
                             client
                                 .shutdown(OPERATION.parse().unwrap())
                                 .await

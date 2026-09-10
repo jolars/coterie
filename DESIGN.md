@@ -238,8 +238,8 @@ versioned semantics.
 
 Configuration files use `schema_version = 1`, with omission also meaning
 version 1. The global format contains `archetype`, `includes`, `providers`,
-`limits`, `supervision`, `permission_profiles`, and `archetypes`. Includes use
-the same partial format: fields may be supplied across files, but required
+`limits`, `supervision`, `allowed_project_roots`, `permission_profiles`, and
+`archetypes`. Includes use the same partial format: fields may be supplied across files, but required
 definition fields must exist after merging. A provider table supplies a
 `command` argument array whose first element is a nonempty executable.
 
@@ -500,8 +500,8 @@ schema version 1, the complete selected archetype definition, effective roles,
 run limits, supervision policy, and provider requirements. Archetype instructions
 and capabilities therefore participate in the digest without being copied into
 the lock. Provider command arrays, unused provider bindings, provenance, source
-and include paths, project identity, environment values, and installed executable
-versions are excluded. Moving files, changing host command bindings, or making
+and include paths, allowed project roots, project identity, environment values,
+and installed executable versions are excluded. Moving files, changing host command bindings, or making
 an equal explicit assignment leaves the fingerprint unchanged.
 
 Lock verification rejects unknown fields, unsupported schemas, malformed
@@ -528,6 +528,14 @@ instructions, hooks, host paths, environment-variable passthrough, capabilities,
 or permission profiles. Effective project settings are intersected with trusted
 global policy. Commands are represented as argument arrays and executed
 directly; Coterie never evaluates configuration with `sh -c`.
+
+The M6 attachment foundation provides `project attach` and `project list`,
+canonical roots and unique aliases, exclusive leases, and discovery from every
+attached project. Until the separate per-project overlay item passes, attachment
+accepts absent project configuration or configuration and locks that match the
+run's effective policy. Differing restrictions fail attachment explicitly.
+Foreground invocation from a secondary project reports the owning run and primary
+root; operator commands connect to the same supervisor from either root.
 
 The primary project selects the run archetype. When another project is attached,
 Coterie loads that project's restrictions and lock, applies them to work
@@ -1061,7 +1069,10 @@ reopen work automatically, materialize missing workspaces, or delete owned
 references. Workspace observations and run completion precede socket and index
 retirement and lease release. Recovery can finish retirement if a crash occurs
 after the stopped state commits. M4 applies these phases to the primary project;
-M6 extends lease and index retirement to attached projects.
+Attachment retirement removes secondary indexes before the primary index, then
+releases all leases. The primary index therefore remains a recovery entrypoint
+after an interrupted retirement. Recovery of a stopped run acquires only the
+projects still indexed to that run and preserves indexes belonging to newer runs.
 
 ## Events and observability
 
@@ -1140,7 +1151,12 @@ Workspace isolation prevents concurrent Git changes from colliding; it does not
 by itself restrict filesystem or network access.
 
 An agent with `project:attach` may attach only a canonical path beneath a
-trusted global `allowed_project_roots` entry. Merely mentioning a path in task
+trusted global `allowed_project_roots` entry. The array defaults to empty and
+accepts only absolute existing directories. Loading configuration resolves its
+symlinks, and the run snapshot pins the canonical roots. Portable locks exclude
+these host paths. Migration 12 adds an explicit empty allowlist and compiled
+provenance to older snapshots without changing their portable fingerprints or
+other saved policy. Merely mentioning a path in task
 text or repository content never grants access. The operator may explicitly
 attach a path outside those roots through the operator channel; the decision and
 resolved identity are recorded. Project configuration cannot extend the

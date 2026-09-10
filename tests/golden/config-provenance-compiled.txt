@@ -1,3 +1,4 @@
+allowed_project_roots <- compiled:-:allowed_project_roots
 archetype.lead <- builtin:-:archetypes.builtin:standard@1.lead
 archetype.permission_profiles.interactive.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.approvals
 archetype.permission_profiles.interactive.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.filesystem

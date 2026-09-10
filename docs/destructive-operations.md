@@ -19,6 +19,11 @@ The guards live in [project.rs](../src/project.rs),
 | `remove_stale_socket`: unlink a stale socket | Startup holds the project lease and verifies the run database. Pin a current-user, mode-0600, single-link socket inode, require a private parent and a refused connection, and recheck the inode after the probe. | Responsive, inaccessible, timed-out, replaced, or insecure paths are preserved. A missing socket needs no removal. `stale_socket_repair_preserves_responsive_or_insecure_paths` and the runtime crash cases verify these outcomes. |
 | `remove_owned_socket`: unlink this supervisor's socket | Retain an open handle to the filesystem inode recorded at binding. After the listener closes, require that same inode, its private mode, one link, and a refused connection. | A replacement file, symlink, hard link, socket, or insecure parent is preserved. Failed removal also preserves the index for recovery. `owned_socket_retirement_preserves_unverified_paths` and `owned_socket_retirement_requires_listener_inactivity` exercise those cases. |
 
+Attached projects use these same guards. Secondary indexes retire before the
+primary index so interrupted shutdown retains its recovery entrypoint. Recovery
+of a stopped run preserves projects already leased and indexed by a newer run.
+The two-project runtime crash matrix covers publication and retirement.
+
 Lease files are never unlinked. Removing a locked file would allow another
 supervisor to acquire a different inode at the same pathname. Coterie releases
 the lock by dropping its own file handle.

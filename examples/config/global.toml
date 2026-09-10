@@ -1,6 +1,9 @@
 # A trusted two-role archetype for foreground coordination and background work.
 schema_version = 1
 archetype = "global:pair@1"
+# To permit agents with `project:attach` to attach additional projects, list
+# existing absolute parent directories here. An omitted list denies attachment.
+# allowed_project_roots = ["/home/you/projects"]
 
 [providers.codex]
 command = ["codex"]

@@ -74,6 +74,28 @@ pub(crate) fn load(
             }
             error
         })?;
+    // Pin symlink resolution before untrusted agents can use attachment authority.
+    for root in &mut effective.allowed_project_roots {
+        let canonical =
+            fs::canonicalize(&*root).map_err(|source| ConfigError::Io {
+                path: root.clone(),
+                source,
+            })?;
+        if !canonical.is_dir() {
+            return Err(ConfigError::Invalid {
+                layer: ConfigLayer::Global,
+                field: "allowed_project_roots".into(),
+                reason: "project roots must be existing directories",
+                path: source_file(
+                    ConfigLayer::Global,
+                    "allowed_project_roots",
+                    &sources,
+                    locations,
+                ),
+            });
+        }
+        *root = canonical;
+    }
     for value in effective.provenance.values_mut() {
         for source in
             std::iter::once(&mut value.source).chain(value.selected_by.as_mut())

@@ -63,6 +63,43 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn allowed_project_roots_are_trusted_canonical_and_snapshotted() {
+    let fixture = Fixture::new();
+    let allowed = fixture.0.join("allowed");
+    fs::create_dir(&allowed).unwrap();
+    let alias = fixture.0.join("alias");
+    symlink(&allowed, &alias).unwrap();
+    fixture.write(
+        "roots.toml",
+        &format!("allowed_project_roots = [{alias:?}]"),
+    );
+    fixture.write("config.toml", "includes = ['roots.toml']");
+    let config = fixture.load().unwrap();
+    assert_eq!(config.allowed_project_roots, vec![allowed.clone()]);
+    assert_eq!(
+        config.provenance["allowed_project_roots"].source.file,
+        Some(fixture.0.join("roots.toml"))
+    );
+    let snapshot = RunConfiguration::new(config.clone());
+    let mut different = config;
+    different.allowed_project_roots.clear();
+    assert_eq!(
+        snapshot.differences(&different),
+        vec!["allowed_project_roots"]
+    );
+    fixture.write(
+        "config.toml",
+        "includes = ['roots.toml']\nallowed_project_roots = []",
+    );
+    assert!(fixture.load().unwrap().allowed_project_roots.is_empty());
+    fixture.write("coterie.toml", "allowed_project_roots = ['/']");
+    assert!(fixture.load().is_err());
+    fs::remove_file(fixture.0.join("coterie.toml")).unwrap();
+    fixture.write("config.toml", "allowed_project_roots = ['relative']");
+    assert!(fixture.load().unwrap_err().to_string().contains("absolute"));
+}
+
+#[test]
 fn absent_layers_resolve_to_the_compiled_policy() {
     let effective = resolve(
         &GlobalConfig::default(),

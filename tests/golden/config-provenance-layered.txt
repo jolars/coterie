@@ -1,3 +1,4 @@
+allowed_project_roots <- compiled:-:allowed_project_roots
 archetype.lead <- global:parts/first.toml:archetypes.global:custom@1.lead
 archetype.permission_profiles.safe.approvals <- global:parts/first.toml:permission_profiles.safe.approvals
 archetype.permission_profiles.safe.filesystem <- global:parts/first.toml:permission_profiles.safe.filesystem

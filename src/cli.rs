@@ -52,6 +52,8 @@ pub(crate) enum Command {
     Whoami,
     /// Reconstruct the caller's current orchestration context.
     Prime,
+    /// Attach projects to the active run or list its projects.
+    Project(ProjectArguments),
     /// Create, inspect, or close durable tasks.
     Task(TaskArguments),
     /// Launch one configured role for a ready task.
@@ -77,6 +79,31 @@ pub(crate) enum Command {
     SupervisorConnect,
     #[command(name = "__supervisor-shutdown", hide = true)]
     SupervisorShutdown,
+}
+
+/// Run-scoped project commands.
+#[derive(Debug, Args)]
+pub(crate) struct ProjectArguments {
+    #[command(subcommand)]
+    pub(crate) command: ProjectCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum ProjectCommand {
+    /// List canonical projects attached to the current run.
+    List,
+    /// Attach a canonical root, using its directory name as the default alias.
+    Attach(ProjectAttachArguments),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ProjectAttachArguments {
+    pub(crate) path: PathBuf,
+    /// A unique run-local name containing ASCII letters, digits, `_`, or `-`.
+    #[arg(long)]
+    pub(crate) alias: Option<String>,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
 }
 
 /// Task commands.
