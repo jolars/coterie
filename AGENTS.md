@@ -165,3 +165,9 @@ messages, and include `Fixes`, `Closes`, or `Refs` when a change corresponds to
 an issue. Create a branch when a change spans multiple project areas, alters a
 public interface or schema, or requires a migration; otherwise work on the
 default branch.
+
+## Dogfooding
+
+If coterie is used in this repo, take the opportunity to raise issues, propose
+design changes, and add tests if you encounter any problems. Suggest to add
+these to TODO.md after concluding the current work.
