@@ -231,7 +231,7 @@ Observed on September 11, 2026, in run
 reviewer. These are follow-ups to the M3-M5 workflow. Specify any new commands,
 capabilities, or recovery transitions in `DESIGN.md` before implementation.
 
-- [ ] **Reject incomplete worktree submissions.** A worker called
+- [x] **Reject incomplete worktree submissions.** A worker called
   `finish --status completed` with uncommitted changes, so the recorded result
   was the unchanged base commit `27ae246`. Reject staged, unstaged, and
   non-ignored untracked changes before recording a completed Git result; keep
@@ -239,6 +239,10 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   the validate, commit, finish sequence in bootstrap guidance and CLI help.
   Test each dirty state, commit-hook failure, and legitimate clean submissions
   with no new commit, including review and non-code assignments.
+  Implemented with bounded, escaped path diagnostics, unreadable-path checks,
+  and hidden-index guards. The [submission tests](tests/supervisor_runtime/finish.rs)
+  cover rejected retries, successful replay, failing commit hooks, and clean
+  non-code results. `NEXTEST_TEST_THREADS=1 task check` passes.
 - [ ] **Recover an incorrect submitted result.** The worker subsequently
   committed `320ea60`, but another `finish` failed because it had no active
   assignment. Integration then refused the mismatch between the worktree tip
@@ -271,7 +275,7 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   should point agents to an authorized inspection command. Test custom roles,
   restricted capabilities, and active versus submitted assignments without
   adding runtime semantics for built-in role names.
-- [ ] **Provide compact progress updates for authorized agents.** The lead
+- [x] **Provide compact progress updates for authorized agents.** The lead
   repeatedly polled `prime` and `inbox` to discover task submissions and worker
   exits; `prime` repeated complete task descriptions and results. Full `status`
   and `events` are operator-only. Add a scoped, bounded inspection or wait
@@ -279,6 +283,11 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   Distinguish task submission from provider exit, and report changed state
   without replaying every task body. Test reconnects, timeouts, multiple
   completions, and authorization without requiring provider live steering.
+  Implemented as `coterie progress` with caller-scoped cursors, bounded lifecycle
+  pages, and optional waits. The [progress tests](tests/supervisor_runtime/progress.rs)
+  cover authorization, reconnects, supervisor restart, and concurrent mutations
+  during waits; unit tests cover paging, session renewal, and legacy payloads.
+  `NEXTEST_TEST_THREADS=1 task check` passes.
 - [ ] **Add concise transcript inspection.** Inspecting recent worker progress
   required paging through large, JSON-escaped transcripts from byte zero and
   extracting relevant records locally. Offer bounded tail or structured-event
