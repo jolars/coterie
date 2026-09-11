@@ -68,6 +68,8 @@ fn foreground_shutdown(signal: Option<Signal>, stubborn: bool) {
             r#"if [ "${{COTERIE_FAKE_MODE-}}" = "terminal" ]; then
   trap 'printf "hup\n" >> "$COTERIE_FAKE_CAPTURE"' HUP
   trap 'printf "int\n" >> "$COTERIE_FAKE_CAPTURE"' INT
+  # Catch QUIT explicitly so Bash and Dash both exercise shutdown escalation.
+  trap 'printf "quit\n" >> "$COTERIE_FAKE_CAPTURE"' QUIT
   trap 'printf "term\n" >> "$COTERIE_FAKE_CAPTURE"; {handler}' TERM
   printf '%s\n' "$$" > "$COTERIE_FAKE_READY"
   while :; do :; done
@@ -153,6 +155,9 @@ if [ "${{COTERIE_FAKE_MODE-}}" = "signals" ]; then"#,
         "the owned provider must be reaped before the wrapper exits"
     );
     let signals = fs::read_to_string(capture).unwrap();
+    if signal == Some(Signal::SIGQUIT) {
+        assert!(signals.contains("quit\n"), "{signals}");
+    }
     assert!(signals.contains("term\n"), "{signals}");
     let after = fixture.run_json(&["status", "--json"]);
     assert_eq!(after["data"]["run_id"], before["data"]["run_id"]);
