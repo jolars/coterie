@@ -12,6 +12,9 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde_json::Value;
 
+#[path = "supervisor_runtime/finish.rs"]
+mod finish;
+
 const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
 const FAKE_CODEX: &str = r#"#!/bin/sh
@@ -1406,6 +1409,9 @@ fn foreground_codex_inherits_streams_directory_identity_and_agents_discovery() {
     assert!(arguments[9].starts_with("developer_instructions=\""));
     assert!(arguments[9].contains("Run `coterie prime`"));
     assert!(arguments[9].contains("AGENTS.md"));
+    assert!(arguments[9].contains("validate the work and commit"));
+    assert!(arguments[9].contains("coterie finish --status completed"));
+    assert!(arguments[9].contains("no new commit"));
     for variable in [
         "COTERIE_PROJECT_ROOT",
         "COTERIE_PROJECT_ID",

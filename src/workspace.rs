@@ -1010,6 +1010,7 @@ impl WorkspaceBackend for GitWorkspace {
             WORKTREE_WORKSPACE => {
                 let repository =
                     self.owned_worktree_repository(workspace, project)?;
+                require_complete_worktree(&repository, workspace)?;
                 let commit = repository
                     .head()
                     .and_then(|head| head.peel_to_commit())
@@ -1341,17 +1342,62 @@ fn repository_is_clean(
     if repository.state() != RepositoryState::Clean {
         return Ok(false);
     }
+    Ok(repository_status(repository)?.is_empty())
+}
+
+fn repository_status(
+    repository: &Repository,
+) -> Result<git2::Statuses<'_>, WorkspaceBackendError> {
     let mut options = StatusOptions::new();
-    options.include_untracked(true).recurse_untracked_dirs(true);
-    let statuses =
-        repository.statuses(Some(&mut options)).map_err(|source| {
-            WorkspaceBackendError::Git {
-                action: "inspect repository status",
-                path: repository.path().to_owned(),
-                source,
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(false);
+    repository.statuses(Some(&mut options)).map_err(|source| {
+        WorkspaceBackendError::Git {
+            action: "inspect repository status",
+            path: repository.path().to_owned(),
+            source,
+        }
+    })
+}
+
+fn require_complete_worktree(
+    repository: &Repository,
+    workspace: &WorkspaceRecord,
+) -> Result<(), WorkspaceBackendError> {
+    require_visible_index(repository)?;
+    let statuses = repository_status(repository)?;
+    if !statuses.is_empty() {
+        let mut paths = Vec::new();
+        for entry in statuses.iter() {
+            for delta in entry
+                .head_to_index()
+                .into_iter()
+                .chain(entry.index_to_workdir())
+            {
+                for file in [delta.old_file(), delta.new_file()] {
+                    if let Some(path) = file.path() {
+                        paths.push(path.to_owned());
+                    }
+                }
             }
-        })?;
-    Ok(statuses.is_empty())
+        }
+        paths.sort();
+        paths.dedup();
+        return Err(WorkspaceBackendError::UncommittedChanges {
+            assignment_id: workspace.assignment_id,
+            path: workspace.path.clone(),
+            paths,
+        });
+    }
+    if repository.state() != RepositoryState::Clean {
+        return Err(WorkspaceBackendError::UnfinishedGitOperation {
+            assignment_id: workspace.assignment_id,
+            path: workspace.path.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn require_visible_index(
@@ -2049,6 +2095,21 @@ pub(crate) enum WorkspaceBackendError {
         assignment_id: AssignmentId,
         path: PathBuf,
     },
+    #[error(
+        "workspace `{assignment_id}` has uncommitted changes at {path:?}: {paths:?}; validate the work, commit the intended changes successfully, then retry `coterie finish --status completed`; the assignment remains active"
+    )]
+    UncommittedChanges {
+        assignment_id: AssignmentId,
+        path: PathBuf,
+        paths: Vec<PathBuf>,
+    },
+    #[error(
+        "workspace `{assignment_id}` has an unfinished Git operation at {path:?}; resolve it, validate and commit the intended changes, then retry `coterie finish --status completed`; the assignment remains active"
+    )]
+    UnfinishedGitOperation {
+        assignment_id: AssignmentId,
+        path: PathBuf,
+    },
     #[error("integration target project `{project_id}` is dirty at {path:?}")]
     DirtyTarget {
         project_id: crate::id::ProjectId,
@@ -2364,6 +2425,109 @@ mod tests {
                 .expect("the created workspace should be observable"),
             ExternalResourceState::Observed
         );
+    }
+
+    #[test]
+    fn git_backend_rejects_uncommitted_result_paths_without_recording_a_commit()
+    {
+        for change in ["staged", "unstaged", "untracked", "deleted"] {
+            let fixture = GitFixture::new();
+            let (backend, workspace) = fixture.materialized_workspace();
+            let repository = Repository::open(&workspace.path).unwrap();
+            let path = if change == "untracked" {
+                fs::create_dir(workspace.path.join("nested")).unwrap();
+                "nested/result.txt"
+            } else {
+                "README.md"
+            };
+            if change == "deleted" {
+                fs::remove_file(workspace.path.join(path)).unwrap();
+            } else {
+                fs::write(workspace.path.join(path), "unfinished\n").unwrap();
+            }
+            if change == "staged" {
+                let mut index = repository.index().unwrap();
+                index.add_path(Path::new(path)).unwrap();
+                index.write().unwrap();
+            }
+            let mut store = store_with_workspace_records(
+                fixture.project.clone(),
+                workspace.clone(),
+            );
+            let supervisor = WorkspaceSupervisor::new(backend);
+            for _ in 0..2 {
+                let error = supervisor
+                    .record_result_commit(&mut store, workspace.scope())
+                    .expect_err(change);
+                assert!(error.to_string().contains(path), "{change}: {error}");
+                assert!(
+                    stored_workspace(&mut store, workspace.assignment_id)
+                        .result_commit
+                        .is_none(),
+                    "{change} must not pin the base commit as the result"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn git_backend_accepts_unchanged_results_and_ignored_untracked_files() {
+        let fixture = GitFixture::new();
+        let (backend, workspace) = fixture.materialized_workspace();
+        assert_eq!(
+            backend.result_commit(&workspace, &fixture.project).unwrap(),
+            Some(fixture.base.clone())
+        );
+        let project =
+            Repository::open(&fixture.project.canonical_path).unwrap();
+        fs::write(project.path().join("info/exclude"), "ignored/\n").unwrap();
+        fs::create_dir(workspace.path.join("ignored")).unwrap();
+        fs::write(workspace.path.join("ignored/output.txt"), "test output\n")
+            .unwrap();
+        assert_eq!(
+            backend.result_commit(&workspace, &fixture.project).unwrap(),
+            Some(fixture.base.clone())
+        );
+    }
+
+    #[test]
+    fn git_backend_rejects_results_with_hidden_changes_or_unfinished_operations()
+     {
+        for (flags, extended) in [
+            (git2::IndexEntryFlag::VALID.bits(), 0),
+            (
+                git2::IndexEntryFlag::EXTENDED.bits(),
+                git2::IndexEntryExtendedFlag::SKIP_WORKTREE.bits(),
+            ),
+        ] {
+            let fixture = GitFixture::new();
+            let (backend, workspace) = fixture.materialized_workspace();
+            let repository = Repository::open(&workspace.path).unwrap();
+            let mut index = repository.index().unwrap();
+            let mut entry = index.get_path(Path::new("README.md"), 0).unwrap();
+            entry.flags |= flags;
+            entry.flags_extended |= extended;
+            index.add(&entry).unwrap();
+            index.write().unwrap();
+            fs::write(workspace.path.join("README.md"), "hidden edits\n")
+                .unwrap();
+            assert!(matches!(
+                backend.result_commit(&workspace, &fixture.project),
+                Err(WorkspaceBackendError::UnverifiableIndex { .. })
+            ));
+        }
+        let fixture = GitFixture::new();
+        let (backend, workspace) = fixture.materialized_workspace();
+        let repository = Repository::open(&workspace.path).unwrap();
+        fs::write(
+            repository.path().join("MERGE_HEAD"),
+            format!("{}\n", fixture.base),
+        )
+        .unwrap();
+        assert!(matches!(
+            backend.result_commit(&workspace, &fixture.project),
+            Err(WorkspaceBackendError::UnfinishedGitOperation { .. })
+        ));
     }
 
     #[test]

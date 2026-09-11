@@ -5246,7 +5246,7 @@ fn bootstrap_instruction(
         .and_then(|role| role.instructions.as_deref())
         .unwrap_or_default();
     format!(
-        "You are a {role} agent for Coterie run {run_id}. Run `coterie prime` now for current orchestration context. Follow the repository's AGENTS.md instructions.\n{instructions}"
+        "You are a {role} agent for Coterie run {run_id}. Run `coterie prime` now for current orchestration context. Follow the repository's AGENTS.md instructions. Before `coterie finish --status completed`, validate the work and commit any intended Git worktree changes successfully. Uncommitted changes keep the assignment active; resolve them and retry finish. A clean assignment may finish with no new commit.\n{instructions}"
     )
 }
 
@@ -5290,6 +5290,8 @@ fn rpc_workspace_failure(error: WorkspaceError) -> RpcFailure {
     match error {
         WorkspaceError::Backend(
             WorkspaceBackendError::DirtyWorkspace { .. }
+            | WorkspaceBackendError::UncommittedChanges { .. }
+            | WorkspaceBackendError::UnfinishedGitOperation { .. }
             | WorkspaceBackendError::UnverifiableIndex { .. }
             | WorkspaceBackendError::DirtyTarget { .. }
             | WorkspaceBackendError::UnexpectedWorkspaceTip { .. }

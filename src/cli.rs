@@ -61,6 +61,13 @@ pub(crate) enum Command {
     /// Inspect or integrate assignment workspaces.
     Workspace(WorkspaceArguments),
     /// Finish the caller's active assignment.
+    ///
+    /// Validate the work, commit any intended Git worktree changes successfully,
+    /// then finish with --status completed. Staged, unstaged, and non-ignored
+    /// untracked changes reject completion and leave the assignment active;
+    /// resolve them and retry, optionally with the same operation ID. Clean
+    /// worktrees may finish with no new commit, including review and non-code
+    /// assignments. --status failed preserves dirty work and reopens the task.
     Finish(FinishArguments),
     /// Send a durable message to another agent.
     Send(SendArguments),

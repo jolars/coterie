@@ -862,6 +862,25 @@ also records the reported base and result commits and moves the task to
 the task's acceptance condition is met; otherwise the submitted task remains
 visibly awaiting integration, review, or lead action.
 
+Before recording a completed Git worktree result, the workspace backend must
+prove the index and working tree are clean. Staged changes, unstaged changes,
+and non-ignored untracked files reject submission with a conflict diagnostic
+identifying the affected paths. Unfinished Git operations and index flags that
+hide changes also prevent proof of cleanliness. Ignored untracked files do not
+block submission. A rejected attempt records no result or finish operation and
+leaves the task, claim, and assignment active, so the agent can validate its
+work, commit the intended changes successfully, and retry `finish`, including
+with the same operation ID. A failed commit hook is not a successful commit.
+An already successful operation replays its recorded outcome without inspecting
+subsequent worktree changes.
+
+Clean worktrees may submit their unchanged base commit, including review and
+non-code assignments; Coterie does not require a new commit or infer task quality
+from Git changes. Project and read-only assignments retain their existing
+submission behavior, and `finish --status failed` remains available with dirty
+work preserved. Bootstrap instructions and finish help explain the sequence:
+validate, commit any intended changes, then finish.
+
 `coterie workspace integrate` is an explicit, capability-checked operation
 requested by the lead or operator. It uses the workspace backend to apply a
 submitted result to that task's target project and records exact

@@ -331,6 +331,22 @@ result commit when applicable and moves the task to `submitted`; it does not
 close the task. `failed` releases the assignment and reopens the task. Only an
 assigned agent may call this mutation.
 
+For a Git worktree assignment, validate the work, commit any intended changes
+successfully, and then run `finish --status completed`. A failed commit hook
+leaves the changes uncommitted. Staged, unstaged, and non-ignored untracked
+changes reject completion with `conflict` (exit 5) and a diagnostic listing the
+affected paths. An unfinished Git operation or index flags that hide changes
+also prevent submission. Rejection preserves the active task, claim, and
+assignment without recording a result or finish operation. Resolve the reported
+changes and retry; the same operation ID remains usable. A successful operation
+retry replays its recorded outcome even if the worktree later changes.
+
+Ignored untracked files do not block completion, and a clean worktree needs no
+new commit. Review and non-code assignments may therefore report successful
+validation without making a commit. Project and read-only assignments keep
+their existing submission behavior. `finish --status failed` preserves dirty
+work and remains available when an assignment cannot be completed.
+
 ### `coterie send`
 
 ```console
