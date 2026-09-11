@@ -296,6 +296,41 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   handling. Test UTF-8 boundaries, oversized records, partial final JSONL
   frames, session selection, and recovery after a reader disconnects.
 
+## Follow-ups from the submission and progress run
+
+Observed on September 11, 2026, in run
+`cr-01M27MHPXV53BPGWT9CC6GSV3P`. Specify changes to commands, workspace
+ownership, or recovery transitions in `DESIGN.md` before implementation.
+
+- [ ] **Allow repeated read-only review assignments.** After the first review
+  finished, another `spawn reviewer` failed with
+  `UNIQUE constraint failed: workspaces.run_id, workspaces.path` because both
+  assignments used the primary project path. Model repeated use of project
+  and read-only workspaces without deleting historical assignment records or
+  weakening isolated-worktree ownership. Test sequential reviews in one run,
+  configured custom roles, retries, recovery, and concurrent assignments where
+  policy permits them; retain exclusive writable workspace guards.
+- [ ] **Recover work from exited agents before submission.** The progress
+  worker exited with uncommitted implementation and review fixes, leaving its
+  task `in_progress`. A continuation copied the preserved candidate into a new
+  worktree and completed, while the original assignment remained active in
+  durable state. Provide an authorized, explicit path to retire or supersede
+  the interrupted assignment and link its continuation, preserving its
+  workspace, edits, commits, and history. Require verified process inactivity
+  before transferring writable ownership. Test exits and timeouts before
+  commit or finish, stale sessions and late output, retries, crashes during
+  recovery, continuation integration, and dependency release only after
+  accepted closure. Diagnostics should name the supported next action.
+- [ ] **Make crash-matrix tests reliable under parallel execution.** Parallel
+  validation produced a shutdown trace mismatch and timeouts in the runtime
+  and attached-run publication/retirement matrices. Those cases passed
+  serially, and the final gate required `NEXTEST_TEST_THREADS=1`. Investigate
+  wall-clock and scheduling dependencies in the
+  [crash tests](src/supervisor/crash_tests.rs), using controlled time and
+  explicit synchronization where needed. Retain every crash boundary and
+  repeated-recovery assertion. Verify repeated default parallel `task check`
+  runs under load; serial execution alone does not satisfy this follow-up.
+
 ## M6: Cross-project orchestration
 
 - [x] Attach canonical project roots under unique aliases, enforce global root
