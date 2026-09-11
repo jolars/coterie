@@ -514,8 +514,25 @@ pub(crate) struct TaskTransitionMutation {
     pub(crate) task_id: TaskId,
     pub(crate) transition: TaskTransition,
     pub(crate) result: Option<JsonValue>,
+    pub(crate) operator_override: Option<OperatorClosureOverride>,
     pub(crate) summary: Option<String>,
     pub(crate) transitioned_at: i64,
+}
+
+/// Operator acceptance evidence, distinct from a workspace integration record.
+#[derive(
+    Clone, Debug, Deserialize, Eq, PartialEq, Serialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OperatorClosureOverride {
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) project_id: ProjectId,
+    pub(crate) base_commit: String,
+    pub(crate) result_commit: String,
+    pub(crate) target_reference: String,
+    pub(crate) target_commit: String,
+    pub(crate) reason: String,
+    pub(crate) validation_summary: String,
 }
 
 /// The durable result of trying to change a task's lifecycle state.
@@ -1061,6 +1078,12 @@ impl Store {
         transition: &TaskTransitionMutation,
         request_fingerprint: Option<&str>,
     ) -> Result<MutationOutcome<TaskTransitionResult>, StoreError> {
+        let mut transition = transition.clone();
+        if let Some(evidence) = &transition.operator_override {
+            let result = transition.result.get_or_insert_with(|| json!({}));
+            result["operator_override"] = serde_json::to_value(evidence)?;
+        }
+        let transition = &transition;
         let mutation = Mutation {
             id: transition.operation_id,
             run_id: transition.run_id,
@@ -1101,6 +1124,15 @@ impl Store {
                             reason: "the transitioned task disappeared"
                                 .to_owned(),
                         })?;
+                    let mut event_data = json!({
+                        "previous_status": previous_status,
+                        "status": status,
+                        "transition": transition.transition,
+                    });
+                    if let Some(evidence) = &transition.operator_override {
+                        event_data["operator_override"] =
+                            serde_json::to_value(evidence)?;
+                    }
                     let task_event = repositories.append_event(&NewEvent {
                     run_id: transition.run_id,
                     kind: EventKind::TaskLifecycleChanged,
@@ -1112,11 +1144,7 @@ impl Store {
                     operation_id: Some(transition.operation_id),
                     correlation_id: None,
                     causation_id: None,
-                    data: json!({
-                        "previous_status": previous_status,
-                        "status": status,
-                        "transition": transition.transition,
-                    }),
+                    data: event_data,
                     summary: format!(
                         "Task {} changed from {previous_status} to {status}.",
                         transition.task_id
@@ -2233,7 +2261,37 @@ impl Repositories<'_, '_> {
             ));
         };
 
-        if mutation.transition == TaskTransition::Close
+        if let Some(evidence) = &mutation.operator_override {
+            let valid = mutation.actor_agent_id.is_none()
+                && mutation.transition == TaskTransition::Close
+                && task.status == TaskStatus::Submitted
+                && evidence.project_id == task.project_id
+                && !evidence.reason.trim().is_empty()
+                && !evidence.validation_summary.trim().is_empty()
+                && self
+                    .latest_assignment_for_task(mutation.run_id, task.id)?
+                    .is_some_and(|assignment| {
+                        assignment.id == evidence.assignment_id
+                            && assignment.state == "completed"
+                    })
+                && self.workspace(evidence.assignment_id)?.is_some_and(
+                    |workspace| {
+                        workspace.run_id == mutation.run_id
+                            && workspace.project_id == task.project_id
+                            && workspace.kind == "worktree"
+                            && workspace.target_commit.is_none()
+                            && workspace.base_commit.as_deref()
+                                == Some(evidence.base_commit.as_str())
+                            && workspace.result_commit.as_deref()
+                                == Some(evidence.result_commit.as_str())
+                    },
+                );
+            if !valid {
+                return Ok(TaskTransitionResult::Rejected(
+                    TaskTransitionRejection::AcceptanceNotMet,
+                ));
+            }
+        } else if mutation.transition == TaskTransition::Close
             && task.status == TaskStatus::Submitted
             && let Some(assignment) = self
                 .latest_assignment_for_task(mutation.run_id, mutation.task_id)?
@@ -5067,6 +5125,111 @@ mod tests {
     }
 
     #[test]
+    fn closure_override_requires_operator_and_matching_unintegrated_assignment()
+    {
+        for rejection in [
+            "agent",
+            "assignment",
+            "project",
+            "result",
+            "integrated",
+            "json-only",
+            "none",
+        ] {
+            let mut store = Store::open_in_memory().unwrap();
+            let records = Records::fixture();
+            insert_claim_prerequisites(&mut store, &records);
+            store.claim_task(&claim_mutation(&records)).unwrap();
+            store
+                .transition_task(&TaskTransitionMutation {
+                    operation_id: OperationId::generate(),
+                    ..transition_mutation(&records, TaskTransition::Submit)
+                })
+                .unwrap();
+            let mut workspace = records.workspace.clone();
+            workspace.state = ExternalResourceState::Observed;
+            workspace.result_commit =
+                Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned());
+            if rejection == "integrated" {
+                workspace.target_commit = workspace.result_commit.clone();
+            }
+            store
+                .transaction(|r| r.insert_workspace(&workspace))
+                .unwrap();
+            let mut evidence = super::OperatorClosureOverride {
+                assignment_id: workspace.assignment_id,
+                project_id: workspace.project_id,
+                base_commit: workspace.base_commit.clone().unwrap(),
+                result_commit: workspace.result_commit.clone().unwrap(),
+                target_reference: "refs/heads/main".to_owned(),
+                target_commit: "cccccccccccccccccccccccccccccccccccccccc"
+                    .to_owned(),
+                reason: "Reviewed external cherry-pick.".to_owned(),
+                validation_summary: "Tests passed.".to_owned(),
+            };
+            match rejection {
+                "assignment" => {
+                    evidence.assignment_id = AssignmentId::generate()
+                }
+                "project" => evidence.project_id = ProjectId::generate(),
+                "result" => {
+                    evidence.result_commit =
+                        "dddddddddddddddddddddddddddddddddddddddd".to_owned()
+                }
+                _ => (),
+            }
+            let mutation = TaskTransitionMutation {
+                operation_id: OperationId::generate(),
+                actor_agent_id: (rejection == "agent")
+                    .then_some(records.agent.id),
+                operator_override: (rejection != "json-only")
+                    .then_some(evidence.clone()),
+                result: Some(json!({"operator_override": evidence})),
+                ..transition_mutation(&records, TaskTransition::Close)
+            };
+            let observed = store.transition_task(&mutation).unwrap();
+            if rejection == "none" {
+                assert!(matches!(
+                    observed,
+                    MutationOutcome::Applied(
+                        TaskTransitionResult::Transitioned {
+                            status: TaskStatus::Closed,
+                            ..
+                        }
+                    )
+                ));
+            } else {
+                assert_eq!(
+                    observed,
+                    MutationOutcome::Applied(TaskTransitionResult::Rejected(
+                        TaskTransitionRejection::AcceptanceNotMet
+                    )),
+                    "{rejection}"
+                );
+                assert_eq!(
+                    store
+                        .transaction(|r| r.task(records.task.id))
+                        .unwrap()
+                        .unwrap()
+                        .status,
+                    TaskStatus::Submitted
+                );
+            }
+            assert_eq!(
+                store.transition_task(&mutation).unwrap(),
+                observed.as_replayed()
+            );
+            assert_eq!(
+                store
+                    .transaction(|r| r.workspace(workspace.assignment_id))
+                    .unwrap()
+                    .unwrap(),
+                workspace
+            );
+        }
+    }
+
+    #[test]
     fn a_transition_refuses_corrupt_in_progress_ownership_atomically() {
         let mut store = Store::open_in_memory().expect("the store should open");
         let mut records = Records::fixture();
@@ -6305,6 +6468,7 @@ mod tests {
             task_id: records.task.id,
             transition,
             result: Some(json!({"summary": "finished"})),
+            operator_override: None,
             summary: Some("Finished the task.".to_owned()),
             transitioned_at: records.claim.claimed_at + 1,
         }

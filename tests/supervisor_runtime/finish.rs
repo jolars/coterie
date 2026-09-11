@@ -263,16 +263,16 @@ fn finish_help_explains_validation_commit_and_retry() {
     }
 }
 
-struct FinishFixture {
-    environment: TestEnvironment,
-    agent_environment: Vec<(String, String)>,
-    workspace: PathBuf,
+pub(super) struct FinishFixture {
+    pub(super) environment: TestEnvironment,
+    pub(super) agent_environment: Vec<(String, String)>,
+    pub(super) workspace: PathBuf,
     run_id: String,
-    base: String,
+    pub(super) base: String,
 }
 
 impl FinishFixture {
-    fn new(role: &str, title: &str) -> Self {
+    pub(super) fn new(role: &str, title: &str) -> Self {
         let environment = TestEnvironment::new();
         let capture = r#"parent=$PPID
   capture="$COTERIE_SOCKET.$COTERIE_AGENT_ID"
@@ -347,14 +347,14 @@ impl FinishFixture {
         command
     }
 
-    fn finish(&self, status: &str) -> Value {
+    pub(super) fn finish(&self, status: &str) -> Value {
         let output = run(self.finish_command(status));
         assert!(output.status.success(), "{output:?}");
         assert!(output.stderr.is_empty(), "{output:?}");
         serde_json::from_slice(&output.stdout).unwrap()
     }
 
-    fn database(&self) -> rusqlite::Connection {
+    pub(super) fn database(&self) -> rusqlite::Connection {
         rusqlite::Connection::open_with_flags(
             self.environment
                 .state

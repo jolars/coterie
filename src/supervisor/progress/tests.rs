@@ -355,6 +355,7 @@ fn progress_enforces_rpc_bounds_and_never_confuses_submission_with_exit() {
                 actor_agent_id: Some(fixture.scope.agent_id),
                 task_id: task,
                 transition: TaskTransition::Submit,
+                operator_override: None,
                 result: None,
                 summary: Some("private summary".into()),
                 transitioned_at: 3,

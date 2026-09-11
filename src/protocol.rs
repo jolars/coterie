@@ -127,6 +127,8 @@ pub(crate) enum RpcRequest {
         operation_id: OperationId,
         task_id: TaskId,
         summary: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_override: Option<Box<ClosureOverrideRequest>>,
     },
     Spawn {
         operation_id: OperationId,
@@ -167,6 +169,16 @@ pub(crate) enum RpcRequest {
     Shutdown {
         operation_id: OperationId,
     },
+}
+
+/// Explicit operator acceptance of a result applied outside Coterie.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClosureOverrideRequest {
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) result_commit: String,
+    pub(crate) target_commit: String,
+    pub(crate) reason: String,
 }
 
 /// The durable task outcome reported by an assigned agent.

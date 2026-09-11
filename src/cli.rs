@@ -183,6 +183,21 @@ pub(crate) struct TaskCloseArguments {
     /// A concise account of the validation performed.
     #[arg(long)]
     pub(crate) summary: String,
+    /// Accept externally integrated work (operator only). Preserves the worktree.
+    #[arg(long = "override", requires_all = ["assignment", "result_commit", "target_commit", "reason"])]
+    pub(crate) operator_override: bool,
+    /// The latest submitted, unintegrated worktree assignment being accepted.
+    #[arg(long, requires = "operator_override")]
+    pub(crate) assignment: Option<crate::id::AssignmentId>,
+    /// The full recorded result commit ID, still at the assignment tip.
+    #[arg(long, requires = "operator_override")]
+    pub(crate) result_commit: Option<String>,
+    /// The full target branch HEAD commit ID that was validated.
+    #[arg(long, requires = "operator_override")]
+    pub(crate) target_commit: Option<String>,
+    /// Why acceptance requires an override; --summary records validation evidence.
+    #[arg(long, requires = "operator_override")]
+    pub(crate) reason: Option<String>,
     #[command(flatten)]
     pub(crate) mutation: MutationArguments,
 }
@@ -1078,3 +1093,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cli/closure_override_tests.rs"]
+mod closure_override_tests;

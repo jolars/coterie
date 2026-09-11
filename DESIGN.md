@@ -729,6 +729,29 @@ must be reconciled with `doctor` and the original integration operation rather
 than superseded. Git validation is read-only and precedes the database-only
 mutation, whose preconditions are checked again transactionally.
 
+For work integrated outside Coterie, the operator may explicitly run
+`coterie task close <task> --override --assignment <assignment>
+--result-commit <full-oid> --target-commit <full-oid> --reason <text>
+--summary <validation-evidence>`. All override fields are required together.
+Only the operator channel may override acceptance; `task:close` never grants
+this authority to an agent. The task must be submitted and the assignment must
+be its latest completed, unintegrated Git worktree assignment. The backend
+verifies repository and workspace ownership, clean worktrees, the recorded
+result at the assignment tip, and the supplied target commit at an unambiguous
+target branch HEAD. Both commit IDs are full object IDs. A moved or dirty target
+requires fresh validation and an updated request, not weaker guards.
+
+The operator judges whether the external change satisfies acceptance, including
+when a cherry-pick has a different commit ID. Coterie does not infer equivalence
+from patches or fabricate integration evidence. Closure atomically records an
+`operator_override` result and lifecycle-event field identifying the assignment,
+project, base, result, target branch and commit, reason, and validation evidence.
+It preserves the original submission and all workspace metadata, files, and
+references. In particular, it does not set the workspace's integration commit
+or authorize cleanup. Dependencies become ready only after this closure commits.
+Successful retries replay the recorded acceptance without rechecking later Git
+changes; changing the request under the same operation ID is a conflict.
+
 Dependencies wait for `closed`, not merely `submitted`. This gives cross-project
 sequences precise semantics: a bindings task remains blocked until the upstream
 library change has been integrated and validated in the library project. The

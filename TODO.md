@@ -257,7 +257,7 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   [crash matrix](docs/crash-matrix.md) cover retries, authorization, stale
   sessions, and concurrent integration. `NEXTEST_TEST_THREADS=1 task check`
   passes (375 tests).
-- [ ] **Record validated work integrated outside Coterie.** The lead
+- [x] **Record validated work integrated outside Coterie.** The lead
   cherry-picked the reviewed implementation as `66117ed`, but task closure
   remained blocked because no Coterie integration record existed. Expose the
   documented operator closure override with the actual result and target
@@ -265,6 +265,13 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   than fabricated integration evidence. Test externally cherry-picked work,
   authorization, retries, and dependency release; preserve the worktree and
   existing dirty-target and unexpected-tip guards.
+  Implemented as operator-only `task close --override`, with exact assignment,
+  result, and target identities, a reason, and validation evidence. The
+  [closure tests](tests/supervisor_runtime/closure_override.rs) cover real
+  external cherry-picks, authorization, retries, concurrent integration,
+  dependency release, and preservation. The external closure crash matrix
+  verifies atomic acceptance and replay. `NEXTEST_TEST_THREADS=1 task check`
+  passes (376 tests).
 - [ ] **Make worker bootstrap tools available in the actual shell.** Both
   workers initially failed to find `coterie` and `rg`; their login shells lost
   the user/devenv tool paths. Investigate the required user-identity and

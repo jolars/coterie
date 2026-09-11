@@ -1,5 +1,6 @@
 //! Desired-state reconciliation and process ownership.
 
+mod closure_override;
 mod doctor;
 mod progress;
 mod projects;
@@ -915,11 +916,29 @@ fn public_request(
                     .mutation
                     .operation_id
                     .unwrap_or_else(OperationId::generate);
+                let operator_override =
+                    arguments.operator_override.then(|| {
+                        Box::new(crate::protocol::ClosureOverrideRequest {
+                            assignment_id: arguments
+                                .assignment
+                                .expect("Clap requires --assignment"),
+                            result_commit: arguments
+                                .result_commit
+                                .expect("Clap requires --result-commit"),
+                            target_commit: arguments
+                                .target_commit
+                                .expect("Clap requires --target-commit"),
+                            reason: arguments
+                                .reason
+                                .expect("Clap requires --reason"),
+                        })
+                    });
                 (
                     RpcRequest::TaskClose {
                         operation_id,
                         task_id: arguments.task_id,
                         summary: arguments.summary,
+                        operator_override,
                     },
                     Some(operation_id),
                     false,
@@ -2686,8 +2705,17 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             *description = crate::redaction::text(description);
             *group = group.as_deref().map(crate::redaction::text);
         }
-        RpcRequest::TaskClose { summary, .. }
-        | RpcRequest::Finish { summary, .. } => {
+        RpcRequest::TaskClose {
+            summary,
+            operator_override,
+            ..
+        } => {
+            *summary = crate::redaction::text(summary);
+            if let Some(evidence) = operator_override {
+                evidence.reason = crate::redaction::text(&evidence.reason);
+            }
+        }
+        RpcRequest::Finish { summary, .. } => {
             *summary = crate::redaction::text(summary)
         }
         RpcRequest::Send { message, .. } => {
@@ -2803,13 +2831,16 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             operation_id,
             task_id,
             summary,
+            operator_override,
         } => close_task(
             store,
+            workspaces,
             run_id,
             caller,
             operation_id,
             task_id,
             summary,
+            operator_override.map(|request| *request),
             Some(&request_fingerprint),
         ),
         RpcRequest::Spawn {
@@ -3814,15 +3845,24 @@ fn ready_tasks(
     })
 }
 
-fn close_task(
+#[allow(clippy::too_many_arguments)]
+fn close_task<B: WorkspaceBackend>(
     store: &mut Store,
+    workspaces: &WorkspaceSupervisor<B>,
     run_id: RunId,
     caller: &AuthenticatedCaller,
     operation_id: OperationId,
     task_id: TaskId,
     summary: String,
+    operator_override: Option<crate::protocol::ClosureOverrideRequest>,
     request_fingerprint: Option<&str>,
 ) -> Result<RpcResponse, RpcFailure> {
+    if operator_override.is_some() {
+        require_operator(
+            caller,
+            "only the operator can override task acceptance; ask the operator to run `coterie task close --override`",
+        )?;
+    }
     require_capability(store, run_id, caller, "task", "close")?;
     if summary.trim().is_empty() {
         return Err(invalid_argument("closure summary cannot be empty"));
@@ -3830,7 +3870,18 @@ fn close_task(
     let existing = store
         .transaction(|repositories| repositories.operation(operation_id))
         .map_err(rpc_state_failure)?;
+    let mut override_evidence = None;
     let result = if let Some(operation) = existing {
+        if operator_override.is_some() {
+            override_evidence = operation
+                .request
+                .get("result")
+                .and_then(|result| result.get("operator_override"))
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|error| rpc_state_failure(error.into()))?;
+        }
         operation
             .request
             .get("result")
@@ -3856,6 +3907,19 @@ fn close_task(
                 Ok((task, assignment, workspace))
             })
             .map_err(rpc_state_failure)?;
+        if let Some(request) = operator_override {
+            override_evidence = Some(closure_override::validate(
+                store,
+                workspaces,
+                run_id,
+                task_id,
+                task.as_ref(),
+                assignment.as_ref(),
+                workspace.as_ref(),
+                &request,
+                &summary,
+            )?);
+        }
         let assignment_result =
             task.as_ref().and_then(|task| task.result.clone());
         let mut result = json!({
@@ -3897,6 +3961,7 @@ fn close_task(
         task_id,
         transition: TaskTransition::Close,
         result,
+        operator_override: override_evidence,
         summary: Some(summary),
         transitioned_at: rpc_timestamp()?,
     };
@@ -4468,6 +4533,7 @@ fn finish_assignment<B: WorkspaceBackend>(
         task_id: assignment.task_id,
         transition,
         result: Some(assignment_result.clone()),
+        operator_override: None,
         summary: Some(summary),
         transitioned_at: rpc_timestamp()?,
     };
@@ -5297,7 +5363,7 @@ fn require_transition(
         TaskTransitionResult::Rejected(
             TaskTransitionRejection::AcceptanceNotMet,
         ) => Err(conflict(format!(
-            "task `{task_id}` cannot close because its worktree assignment has not been integrated"
+            "task `{task_id}` cannot close because its worktree assignment has not been integrated; run `coterie workspace integrate`, or ask the operator to validate external integration and run `coterie task close --override`"
         ))),
     }
 }
@@ -8431,6 +8497,7 @@ mod tests {
             operation_id: close_operation,
             task_id,
             summary: "Integrated and verified.".to_owned(),
+            operator_override: None,
         };
         let closed = operator
             .request(close_request())

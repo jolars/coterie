@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OperatorClosureOverride",
+  "description": "Operator acceptance evidence, distinct from a workspace integration record.",
+  "type": "object",
+  "properties": {
+    "assignment_id": {
+      "$ref": "#/$defs/AssignmentId"
+    },
+    "base_commit": {
+      "type": "string"
+    },
+    "project_id": {
+      "$ref": "#/$defs/ProjectId"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "result_commit": {
+      "type": "string"
+    },
+    "target_commit": {
+      "type": "string"
+    },
+    "target_reference": {
+      "type": "string"
+    },
+    "validation_summary": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "assignment_id",
+    "project_id",
+    "base_commit",
+    "result_commit",
+    "target_reference",
+    "target_commit",
+    "reason",
+    "validation_summary"
+  ],
+  "$defs": {
+    "AssignmentId": {
+      "type": "string",
+      "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "ProjectId": {
+      "type": "string",
+      "pattern": "^cp-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  }
+}

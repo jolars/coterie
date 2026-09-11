@@ -91,6 +91,11 @@ fn crash_matrix_task_closure() {
 }
 
 #[test]
+fn crash_matrix_external_closure() {
+    matrix("external-close");
+}
+
+#[test]
 fn crash_matrix_runtime_publication_and_retirement() {
     matrix("runtime");
 }
@@ -197,6 +202,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "message",
         "acknowledge",
         "close",
+        "external-close",
         "runtime",
         "runtime-attachment",
         "process",
@@ -1177,7 +1183,12 @@ impl Fixture {
         }
         if matches!(
             case,
-            "finish" | "integrate" | "merge" | "close" | "resubmit"
+            "finish"
+                | "integrate"
+                | "merge"
+                | "close"
+                | "resubmit"
+                | "external-close"
         ) {
             let workspace = self.workspace();
             commit(
@@ -1191,7 +1202,10 @@ impl Fixture {
                 "another recoverable change\n",
             );
         }
-        if matches!(case, "integrate" | "merge" | "close" | "resubmit") {
+        if matches!(
+            case,
+            "integrate" | "merge" | "close" | "resubmit" | "external-close"
+        ) {
             self.finish();
         }
         if case == "resubmit" {
@@ -1202,6 +1216,18 @@ impl Fixture {
             )
             .unwrap();
             commit(&workspace.path, "correction.txt", "validated correction\n");
+        }
+        if case == "external-close" {
+            commit(
+                &self.root.join("project"),
+                "result.txt",
+                "recoverable worker result\n",
+            );
+            commit(
+                &self.root.join("project"),
+                "second.txt",
+                "another recoverable change\n",
+            );
         }
         if case == "close" {
             self.integrate();
@@ -1229,7 +1255,8 @@ impl Fixture {
             "integrate" | "merge" => self.integrate(),
             "message" => self.message(),
             "acknowledge" => self.acknowledge(),
-            "close" => self.close(),
+            "close" => self.close(false),
+            "external-close" => self.close(true),
             "transcript" => {
                 let scope = self.scope();
                 TranscriptStore::new(&self.run)
@@ -1257,14 +1284,31 @@ impl Fixture {
         .unwrap();
     }
 
-    fn close(&mut self) {
+    fn close(&mut self, external: bool) {
+        let operator_override = external.then(|| {
+            let workspace = self.workspace();
+            crate::protocol::ClosureOverrideRequest {
+                assignment_id: workspace.assignment_id,
+                result_commit: workspace.result_commit.unwrap(),
+                target_commit: Repository::open(self.root.join("project"))
+                    .unwrap()
+                    .head()
+                    .unwrap()
+                    .target()
+                    .unwrap()
+                    .to_string(),
+                reason: "Applied and validated externally.".to_owned(),
+            }
+        });
         close_task(
             &mut self.store,
+            &self.workspaces,
             RUN.parse().unwrap(),
             &AuthenticatedCaller::Operator,
             "co-01ARZ3NDEKTSV4RRFFQ69G5FB4".parse().unwrap(),
             TASK.parse().unwrap(),
             "Validated the integrated result.".to_owned(),
+            operator_override,
             None,
         )
         .unwrap();
@@ -1425,7 +1469,8 @@ impl Fixture {
             }
             "message" => self.message(),
             "acknowledge" => self.acknowledge(),
-            "close" => self.close(),
+            "close" => self.close(false),
+            "external-close" => self.close(true),
             "initialize" | "finish" | "transcript" => {}
             "resubmit" => self.resubmit(),
             _ => panic!("unknown recovery case: {case}"),
@@ -1528,8 +1573,18 @@ impl Fixture {
                             ),
                             assignments[0].state == "completed"
                         );
-                        if case == "close" {
+                        if matches!(case, "close" | "external-close") {
                             assert_eq!(task.status, TaskStatus::Closed);
+                        }
+                        if case == "external-close" {
+                            let result = task.result.as_ref().unwrap();
+                            assert!(result.get("integration").is_none());
+                            assert_eq!(result["operator_override"]["assignment_id"], json!(assignments[0].id));
+                            assert!(r.workspaces(run_id)?[0].target_commit.is_none());
+                            assert_eq!(events.iter().filter(|event| {
+                                event.event_type == "task.lifecycle_changed"
+                                    && event.payload["data"]["operator_override"] == result["operator_override"]
+                            }).count(), 1);
                         }
                     }
                 }
@@ -1584,7 +1639,12 @@ impl Fixture {
             );
             if matches!(
                 case,
-                "finish" | "integrate" | "merge" | "close" | "resubmit"
+                "finish"
+                    | "integrate"
+                    | "merge"
+                    | "close"
+                    | "resubmit"
+                    | "external-close"
             ) {
                 assert_eq!(
                     fs::read_to_string(workspace.path.join("result.txt"))

@@ -64,6 +64,13 @@ pub(crate) trait WorkspaceBackend {
         })
     }
 
+    fn validate_external_closure(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+        target_commit: &str,
+    ) -> Result<String, WorkspaceBackendError>;
+
     fn prepare_integration(
         &self,
         workspace: &WorkspaceRecord,
@@ -277,6 +284,21 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
             &project,
             expected,
             replacement,
+        )?)
+    }
+
+    /// Checks operator acceptance identities without mutating Git or integration metadata.
+    pub(crate) fn validate_external_closure(
+        &self,
+        store: &mut Store,
+        scope: AssignmentScope,
+        target_commit: &str,
+    ) -> Result<String, WorkspaceError> {
+        let (workspace, project) = workspace_records(store, scope)?;
+        Ok(self.backend.validate_external_closure(
+            &workspace,
+            &project,
+            target_commit,
         )?)
     }
 
@@ -746,7 +768,7 @@ impl GitWorkspace {
         Ok(parent)
     }
 
-    fn integration_inputs(
+    fn closure_inputs(
         &self,
         workspace: &WorkspaceRecord,
         project: &ProjectRecord,
@@ -824,6 +846,31 @@ impl GitWorkspace {
         )?;
         let target_reference = target_reference.to_owned();
         drop(target_head);
+
+        Ok(IntegrationInputs {
+            target_reference,
+            target_commit,
+        })
+    }
+
+    fn integration_inputs(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+    ) -> Result<IntegrationInputs, WorkspaceBackendError> {
+        let inputs = self.closure_inputs(workspace, project)?;
+        let base = parse_workspace_commit(
+            workspace,
+            "base",
+            workspace.base_commit.as_deref(),
+        )?;
+        let result = parse_workspace_commit(
+            workspace,
+            "result",
+            workspace.result_commit.as_deref(),
+        )?;
+        let target = Self::source_repository(project)?;
+        let target_commit = inputs.target_commit;
         validate_integration_history(
             &target,
             workspace,
@@ -839,10 +886,7 @@ impl GitWorkspace {
             target_commit,
         )?;
 
-        Ok(IntegrationInputs {
-            target_reference,
-            target_commit,
-        })
+        Ok(inputs)
     }
 }
 
@@ -1104,6 +1148,23 @@ impl WorkspaceBackend for GitWorkspace {
                 kind: kind.to_owned(),
             }),
         }
+    }
+
+    fn validate_external_closure(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+        target_commit: &str,
+    ) -> Result<String, WorkspaceBackendError> {
+        let inputs = self.closure_inputs(workspace, project)?;
+        if inputs.target_commit.to_string() != target_commit {
+            return Err(WorkspaceBackendError::UnexpectedTargetTip {
+                project_id: project.id,
+                expected: target_commit.to_owned(),
+                actual: inputs.target_commit.to_string(),
+            });
+        }
+        Ok(inputs.target_reference)
     }
 
     fn prepare_integration(
@@ -2065,6 +2126,18 @@ pub(crate) mod fake {
                 .result_commit
                 .clone()
                 .or_else(|| workspace.result_commit.clone()))
+        }
+
+        fn validate_external_closure(
+            &self,
+            workspace: &WorkspaceRecord,
+            _project: &ProjectRecord,
+            _target_commit: &str,
+        ) -> Result<String, WorkspaceBackendError> {
+            Err(WorkspaceBackendError::UnsupportedIntegrationKind {
+                assignment_id: workspace.assignment_id,
+                kind: "fake".to_owned(),
+            })
         }
 
         fn prepare_integration(

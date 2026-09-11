@@ -73,6 +73,12 @@ administrative identity, provider inactivity, clean and reachable or preserved
 commits, and integration or explicit operator approval. An observed workspace
 record alone is insufficient.
 
+An operator closure override observes and records acceptance of work integrated
+outside Coterie. It performs no Git writes, does not populate workspace
+integration metadata, and grants no cleanup authority. The closure override
+runtime tests verify that later dirty files and all owned worktree references
+survive acceptance and shutdown.
+
 ## Processes and durable storage
 
 The process guards live in [providers.rs](../src/providers.rs) and

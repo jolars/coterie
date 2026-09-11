@@ -177,6 +177,7 @@ mod tests {
                 actor_agent_id: Some(agent),
                 task_id: task,
                 transition: TaskTransition::Submit,
+                operator_override: None,
                 result: None,
                 summary: Some("private result".into()),
                 transitioned_at: 3,

@@ -15,6 +15,9 @@ use serde_json::Value;
 #[path = "supervisor_runtime/finish.rs"]
 mod finish;
 
+#[path = "supervisor_runtime/closure_override.rs"]
+mod closure_override;
+
 const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
 const FAKE_CODEX: &str = r#"#!/bin/sh

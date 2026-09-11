@@ -411,6 +411,41 @@ Workers run as supervised `codex exec --json` jobs. Validated JSONL frames are
 appended to the session transcript as they arrive; malformed or oversized
 frames quarantine the session instead of being treated as successful work.
 
+### Operator closure override
+
+```console
+coterie task close <task-id> --override --assignment <assignment-id>
+  --result-commit <full-oid> --target-commit <full-oid>
+  --reason <text> --summary <validation-evidence> [--operation-id <co-ULID>]
+```
+
+After integrating work outside Coterie, the operator may accept the latest
+submitted Git worktree assignment with this explicit override. For example, a
+reviewed cherry-pick has its original assignment result commit and a different
+target commit. Supply both full 40-digit commit IDs, explain the override, and
+record the validation performed in `--summary`. All override fields are required
+together. Agents cannot use this option, including agents with `task:close`.
+
+Coterie checks the recorded result against the assignment tip, ownership,
+cleanliness of both worktrees, and the supplied target commit against the
+attached project's branch HEAD. A stale commit, dirty target, moved assignment,
+unresolved integration operation, or already integrated assignment is a conflict
+(exit 5). Incomplete flags, empty reason or validation evidence, and abbreviated
+or malformed commit IDs are usage errors (exit 2). An agent override is a
+permission error (exit 6). Resolve the diagnostic and retry rejected preflight
+with the same operation ID, or use a new ID when changing a recorded request.
+
+The closure result retains `assignment_result` and `validation_summary` and adds
+[`operator_override`](../schemas/cli-closure-override-v1.schema.json), containing
+`assignment_id`, `project_id`, `base_commit`, `result_commit`, `target_reference`,
+`target_commit`, `reason`, and `validation_summary`. The lifecycle event records
+the same evidence with actor `operator`. There is no `integration` result or
+`workspace.integrated` event. Coterie records the operator's acceptance, not a
+proof of patch equivalence. It preserves the workspace and its integration
+metadata, commits, and references; the override grants no cleanup authority.
+Dependencies release only once the closure commits. A successful retry returns
+the original result even after later Git changes, without duplicating events.
+
 ### `coterie workspace integrate`
 
 ```console
