@@ -6830,6 +6830,59 @@ mod tests {
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
 
     #[test]
+    fn database_sidecars_stay_private_through_startup_and_offline_inspection() {
+        use crate::project::{CoterieDirectories, DiscoveredProject};
+
+        let fixture = TestDirectory::new();
+        let project_path = fixture.join("project");
+        fs::create_dir(&project_path).unwrap();
+        let project = DiscoveredProject::discover(&project_path).unwrap();
+        let active = entry(&project.canonical_path);
+        let directories = CoterieDirectories::from_base_directories(
+            &fixture.0,
+            fixture.join("state"),
+        )
+        .unwrap();
+        let run = directories.prepare_run(active.run_id).unwrap();
+        let database = run.state.join(super::DATABASE_FILE);
+        let assert_private = || {
+            for suffix in ["", "-wal", "-shm"] {
+                let path =
+                    run.state.join(format!("{}{suffix}", super::DATABASE_FILE));
+                crate::private_fs::inspect(&path).unwrap();
+            }
+        };
+
+        for _ in 0..2 {
+            let store =
+                super::initialize_store(&run.state, &active, &project).unwrap();
+            // Securing only the database after opening SQLite leaves sidecars
+            // with the permissions inherited during database creation.
+            assert_private();
+            super::read_configuration(&directories, active.run_id).unwrap();
+            assert_private();
+            drop(store);
+            for suffix in ["-wal", "-shm"] {
+                assert!(
+                    !run.state
+                        .join(format!("{}{suffix}", super::DATABASE_FILE))
+                        .exists()
+                );
+            }
+
+            // An offline reader recreates the sidecars before the supervisor
+            // can reopen the database for recovery.
+            let mut reader =
+                super::open_configuration_store(&directories, active.run_id)
+                    .unwrap();
+            reader.configuration(active.run_id).unwrap();
+            assert_private();
+            drop(reader);
+            crate::private_fs::database(&database, false).unwrap();
+        }
+    }
+
+    #[test]
     fn socket_access_errors_explain_operator_recovery_without_widening_policy()
     {
         for errno in [nix::libc::EACCES, nix::libc::EPERM] {
