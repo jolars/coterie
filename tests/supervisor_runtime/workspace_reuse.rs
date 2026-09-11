@@ -233,3 +233,114 @@ fn custom_shared_workspaces_preserve_limits_and_recover_without_duplicate_bindin
         }
     }
 }
+
+#[test]
+fn recovery_resumes_a_second_review_intent_and_preserves_the_first() {
+    let fixture = TestEnvironment::new();
+    let executable = fixture.root.join("bin/codex");
+    fs::write(&executable, review_script()).unwrap();
+    let mut command = fixture.command();
+    command
+        .args(["__supervisor", RUN_ID, PROJECT_ID])
+        .arg(&fixture.project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut supervisor = command.spawn().unwrap();
+    wait_until("review supervisor", || fixture.index_entry_count() == 1);
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(RUN_ID)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let release = fixture
+        .runtime
+        .join("coterie")
+        .join(format!("{RUN_ID}.sock.release"));
+    fs::write(release, "release").unwrap();
+    let first = fixture.run_json(&["task", "create", "First review", "--json"]);
+    let first_id = first["data"]["task"]["id"].as_str().unwrap();
+    fixture.run_json(&["spawn", "reviewer", "--task", first_id, "--json"]);
+    wait_until("first review exit", || {
+        connection.query_row("SELECT count(*) FROM sessions WHERE state <> 'exited' OR reconciliation_state <> 'observed'", [], |row| row.get::<_, i64>(0)).unwrap() == 0
+    });
+    let previous: String = connection.query_row("SELECT json_object('assignment', assignments.id, 'state', assignments.state, 'summary', assignments.summary, 'session', assignments.session_id, 'path', hex(workspaces.path), 'generation', workspaces.generation) FROM assignments JOIN workspaces ON workspaces.assignment_id = assignments.id WHERE assignments.task_id = ?1", [first_id], |row| row.get(0)).unwrap();
+    let second =
+        fixture.run_json(&["task", "create", "Second review", "--json"]);
+    let second_id = second["data"]["task"]["id"].as_str().unwrap();
+    let operation = format!("co-{}", ulid::Ulid::generate());
+    let args = [
+        "spawn",
+        "reviewer",
+        "--task",
+        second_id,
+        "--operation-id",
+        &operation,
+        "--json",
+    ];
+    fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
+    let failed = run({
+        let mut command = fixture.command();
+        command.args(args);
+        command
+    });
+    assert!(!failed.status.success(), "{failed:?}");
+    let desired: String = connection
+        .query_row(
+            "SELECT reconciliation_state FROM operations WHERE id = ?1",
+            [&operation],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(desired, "desired");
+    let assignment: String = connection
+        .query_row(
+            "SELECT id FROM assignments WHERE task_id = ?1",
+            [second_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM workspaces", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    supervisor.kill().unwrap();
+    supervisor.wait().unwrap();
+    fs::write(&executable, review_script()).unwrap();
+    let restarted = run(fixture.connect_command());
+    assert!(restarted.status.success(), "{restarted:?}");
+    wait_until("recovered second review", || {
+        connection
+            .query_row(
+                "SELECT state = 'completed' FROM assignments WHERE id = ?1",
+                [&assignment],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+    });
+    for _ in 0..2 {
+        let replayed = fixture.run_json(&args);
+        assert_eq!(replayed["data"]["assignment_id"], assignment);
+    }
+    let preserved: String = connection.query_row("SELECT json_object('assignment', assignments.id, 'state', assignments.state, 'summary', assignments.summary, 'session', assignments.session_id, 'path', hex(workspaces.path), 'generation', workspaces.generation) FROM assignments JOIN workspaces ON workspaces.assignment_id = assignments.id WHERE assignments.task_id = ?1", [first_id], |row| row.get(0)).unwrap();
+    assert_eq!(preserved, previous);
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM workspaces", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM sessions", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    fixture.run_json(&["stop", "--json"]);
+}

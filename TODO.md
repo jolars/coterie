@@ -336,8 +336,9 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
   [binding tests](src/state/tests/workspace_reuse.rs) and
   [runtime tests](tests/supervisor_runtime/workspace_reuse.rs) cover history,
   custom roles, concurrent readers, writer exclusion, retries, and recovery in
-  Git and plain directories. Every prior schema upgrades with all three
-  workspace kinds. Default parallel `task check` passes (414 tests, eight
+  Git and plain directories, including a second review's interrupted spawn
+  intent alongside the first review's history. Every prior schema upgrades
+  with all three workspace kinds. Default parallel `task check` passes (415 tests, eight
   opt-in or generation tests skipped).
 - [ ] **Recover work from exited agents before submission.** The progress
   worker exited with uncommitted implementation and review fixes, leaving its
