@@ -2,6 +2,9 @@
 
 pub(crate) mod config;
 
+#[cfg(test)]
+mod progress_tests;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
@@ -52,6 +55,8 @@ pub(crate) enum Command {
     Whoami,
     /// Reconstruct the caller's current orchestration context.
     Prime,
+    /// Inspect compact lifecycle changes; task submission and provider exit are separate.
+    Progress(ProgressArguments),
     /// Attach projects to the active run or list its projects.
     Project(ProjectArguments),
     /// Create, inspect, or close durable tasks.
@@ -280,6 +285,20 @@ pub(crate) struct LogsArguments {
     /// Follow this session's transcript until its terminal observation.
     #[arg(long)]
     pub(crate) follow: bool,
+}
+
+/// Inputs for compact, resumable progress inspection.
+#[derive(Debug, Args)]
+pub(crate) struct ProgressArguments {
+    /// Resume from the last returned cursor for this run and caller.
+    #[arg(long)]
+    pub(crate) after: Option<String>,
+    /// Bound returned changes; continue with next_cursor while has_more is true.
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=100))]
+    pub(crate) limit: u16,
+    /// Wait up to this many seconds when caught up; timeout is a successful empty page.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=5))]
+    pub(crate) wait: u8,
 }
 
 /// Inputs for `events`.

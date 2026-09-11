@@ -1,0 +1,264 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI success response v1",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/ProgressPage"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data"
+  ],
+  "$defs": {
+    "AgentId": {
+      "type": "string",
+      "pattern": "^cg-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "AssignmentId": {
+      "type": "string",
+      "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "AssignmentState": {
+      "description": "Assignment outcomes are independent of the provider lifecycle.",
+      "type": "string",
+      "enum": [
+        "active",
+        "draining",
+        "completed",
+        "released",
+        "canceled"
+      ]
+    },
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "LifecycleState": {
+      "description": "The process-level state of one provider session.",
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "exited",
+        "lost",
+        "unknown",
+        "quarantined"
+      ]
+    },
+    "ProgressChange": {
+      "description": "The durable order is retained even when intervening events are excluded.",
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "task"
+            },
+            "project_id": {
+              "$ref": "#/$defs/ProjectId"
+            },
+            "status": {
+              "$ref": "#/$defs/TaskStatus"
+            },
+            "task_id": {
+              "$ref": "#/$defs/TaskId"
+            }
+          },
+          "required": [
+            "kind",
+            "task_id",
+            "project_id",
+            "status"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "$ref": "#/$defs/AgentId"
+            },
+            "assignment_id": {
+              "$ref": "#/$defs/AssignmentId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "assignment"
+            },
+            "state": {
+              "$ref": "#/$defs/AssignmentState"
+            },
+            "task_id": {
+              "$ref": "#/$defs/TaskId"
+            }
+          },
+          "required": [
+            "kind",
+            "assignment_id",
+            "task_id",
+            "agent_id",
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "$ref": "#/$defs/AgentId"
+            },
+            "assignment_id": {
+              "$ref": "#/$defs/AssignmentId"
+            },
+            "kind": {
+              "type": "string",
+              "const": "assignment_session"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "task_id": {
+              "$ref": "#/$defs/TaskId"
+            }
+          },
+          "required": [
+            "kind",
+            "assignment_id",
+            "task_id",
+            "agent_id",
+            "session_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "$ref": "#/$defs/AgentId"
+            },
+            "generation": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "agent"
+            },
+            "state": {
+              "$ref": "#/$defs/LifecycleState"
+            }
+          },
+          "required": [
+            "kind",
+            "agent_id",
+            "generation",
+            "state"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "$ref": "#/$defs/AgentId"
+            },
+            "generation": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "session"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            },
+            "state": {
+              "$ref": "#/$defs/LifecycleState"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "agent_id",
+            "generation",
+            "state"
+          ]
+        }
+      ],
+      "required": [
+        "sequence"
+      ]
+    },
+    "ProgressPage": {
+      "description": "One bounded page with a cursor scoped to its run and authenticated reader.",
+      "type": "object",
+      "properties": {
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProgressChange"
+          },
+          "maxItems": 100
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "type": "string"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "timed_out": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "run_id",
+        "changes",
+        "next_cursor",
+        "has_more",
+        "timed_out"
+      ]
+    },
+    "ProjectId": {
+      "type": "string",
+      "pattern": "^cp-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "RunId": {
+      "type": "string",
+      "pattern": "^cr-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "SessionId": {
+      "type": "string",
+      "pattern": "^cs-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskId": {
+      "type": "string",
+      "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskStatus": {
+      "description": "A task's durable lifecycle state.",
+      "type": "string",
+      "enum": [
+        "open",
+        "in_progress",
+        "submitted",
+        "closed",
+        "canceled"
+      ]
+    }
+  }
+}

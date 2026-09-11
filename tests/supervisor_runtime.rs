@@ -104,6 +104,9 @@ fi
 exit 0
 "#;
 
+#[path = "supervisor_runtime/progress.rs"]
+mod progress;
+
 fn write_global(fixture: &TestEnvironment, text: &str) {
     let directory = fixture.root.join("config/coterie");
     fs::create_dir_all(&directory).unwrap();

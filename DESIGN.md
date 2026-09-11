@@ -796,6 +796,7 @@ Agents coordinate through the installed Coterie binary:
 ```console
 coterie whoami --json
 coterie prime
+coterie progress --limit 20 --json
 coterie peers --json
 
 coterie project attach ~/projects/eunoia-py --alias eunoia-py
@@ -896,6 +897,52 @@ Checkout preserves ignored files. Index entries marked assume-unchanged or
 skip-worktree make cleanliness unprovable, so integration refuses them with a
 diagnostic. Coterie does not autonomously choose an integration order or
 resolve conflicts.
+
+### Compact progress inspection
+
+`coterie progress [--after <cursor>] [--limit <1..100>] [--wait <0..5>]`
+returns one bounded page of durable lifecycle changes. The default limit is
+100, and the default wait is zero seconds. The operator and authenticated
+agents with `task:read` may inspect this view. It uses the current run-wide
+task and peer visibility of `prime`; role names grant no authority. Every
+poll rechecks the caller's current session generation and capability.
+
+Changes contain sequence numbers and typed IDs and states only: task creation
+and lifecycle, assignment creation, lifecycle, and session association, agent
+creation and lifecycle, and session creation and lifecycle. Agent records
+include the caller as well as peers. Task bodies, titles, results, messages,
+paths, provider details, raw event payloads, and other operator events are
+excluded. Assignment `completed` and task `submitted` report a submission;
+session or agent `exited` reports provider lifecycle independently. Neither
+implies task acceptance. These are historical transitions, not a current-state
+snapshot; consumers apply them in sequence order.
+Preparing a replacement foreground generation records both the agent's new
+`starting` state and the new session atomically, before any provider observation.
+
+The opaque versioned cursor pins the run, caller (operator or agent ID), and
+last scanned durable event sequence. Omitting it starts at zero. Responses
+include `next_cursor`, `has_more`, and `timed_out`. Clients resume with the last
+returned cursor after reconnecting to the same run; a replacement session for
+the same agent may reuse it after authenticating anew. A different caller or
+run, a malformed cursor, or a sequence beyond the durable high-water mark is
+refused. Cursors grant no authority, require no acknowledgement, and do not
+depend on connection memory. Replaying one deliberately repeats its page.
+
+Each inspection scans at most 256 event rows and returns at most the requested
+number of changes. Only fixed-size IDs, numbers, and enumerated states cross
+the boundary, keeping a page below 64 KiB regardless of task or event size.
+Excluded events advance the cursor without exposing their contents. `has_more`
+means the scan has not reached the high-water mark observed in that transaction;
+clients continue even when such a page contains no changes.
+
+Waiting is allowed only while caught up and returns when a change or further
+page becomes available, or when the requested deadline expires. A timeout is a
+successful empty page with `timed_out: true` and an updated cursor. Waiting
+releases the supervisor between bounded polls and stays within the ordinary
+RPC response deadline. Disconnects do not mutate state or acknowledge changes;
+transport failures remain `unavailable`, and callers explicitly reconnect with
+their last cursor. Progress never opens the database from an agent process or
+falls back to operator event inspection. It requires no provider live steering.
 
 ## Providers and session state
 
@@ -1243,7 +1290,7 @@ The complete initial product target includes:
 9. Native `git2` worktree creation, guarded integration, ownership fencing, and
    conservative cleanup in each target project.
 10. Desired-state reconciliation, bounded shutdown, and crash-loop quarantine.
-11. `status`, `logs`, `send`, `spawn`, `finish`, `stop`, `project`, `task`,
+11. `status`, `progress`, `logs`, `send`, `spawn`, `finish`, `stop`, `project`, `task`,
     `workspace`, `events`, `doctor`, and configuration inspection commands.
 12. Versioned structured output, stable exit codes, and operation IDs for every
     agent-facing command.

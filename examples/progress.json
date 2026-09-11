@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "data": {
+    "run_id": "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "changes": [
+      {
+        "sequence": 41,
+        "kind": "task",
+        "task_id": "ct-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "project_id": "cp-01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        "status": "submitted"
+      },
+      {
+        "sequence": 42,
+        "kind": "assignment",
+        "assignment_id": "ca-01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+        "task_id": "ct-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "agent_id": "cg-01ARZ3NDEKTSV4RRFFQ69G5FAY",
+        "state": "completed"
+      },
+      {
+        "sequence": 45,
+        "kind": "session",
+        "session_id": "cs-01ARZ3NDEKTSV4RRFFQ69G5FB0",
+        "agent_id": "cg-01ARZ3NDEKTSV4RRFFQ69G5FAY",
+        "generation": 1,
+        "state": "exited"
+      },
+      {
+        "sequence": 46,
+        "kind": "agent",
+        "agent_id": "cg-01ARZ3NDEKTSV4RRFFQ69G5FAY",
+        "generation": 1,
+        "state": "exited"
+      }
+    ],
+    "next_cursor": "p1:cr-01ARZ3NDEKTSV4RRFFQ69G5FAV:operator:46",
+    "has_more": false,
+    "timed_out": false
+  }
+}

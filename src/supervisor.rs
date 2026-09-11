@@ -1,6 +1,7 @@
 //! Desired-state reconciliation and process ownership.
 
 mod doctor;
+mod progress;
 mod projects;
 mod session;
 
@@ -857,6 +858,15 @@ fn public_request(
         CliCommand::Doctor => unreachable!("doctor is dispatched locally"),
         CliCommand::Whoami => (RpcRequest::Whoami, None, false),
         CliCommand::Prime => (RpcRequest::Prime, None, false),
+        CliCommand::Progress(arguments) => (
+            RpcRequest::Progress {
+                after: arguments.after,
+                limit: arguments.limit,
+                wait_seconds: arguments.wait,
+            },
+            None,
+            false,
+        ),
         CliCommand::Task(arguments) => match arguments.command {
             TaskCommand::Create(arguments) => {
                 let operation_id = arguments
@@ -2704,6 +2714,18 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
         RpcRequest::Status => status(store, run_id, caller),
         RpcRequest::Whoami => whoami(store, run_id, caller),
         RpcRequest::Prime => prime(store, run_id, caller),
+        RpcRequest::Progress {
+            after,
+            limit,
+            wait_seconds,
+        } => progress::poll(
+            store,
+            run_id,
+            caller,
+            after.as_deref(),
+            limit,
+            wait_seconds,
+        ),
         RpcRequest::TaskCreate {
             operation_id,
             title,
@@ -2952,6 +2974,26 @@ fn launch_foreground(
                             .to_owned(),
                     });
                 }
+                repositories.append_event(&NewEvent {
+                    run_id,
+                    kind: EventKind::AgentLifecycleChanged,
+                    actor: event_actor(caller),
+                    subject: agent.id.to_string(),
+                    project_id: None,
+                    agent_id: Some(agent.id),
+                    task_id: None,
+                    operation_id: Some(operation_id),
+                    correlation_id: None,
+                    causation_id: None,
+                    data: json!({
+                        "previous_generation": agent.generation,
+                        "generation": generation,
+                        "previous_state": agent.state.as_str(),
+                        "state": LifecycleState::Starting.as_str(),
+                    }),
+                    summary: format!("Starting generation {generation} for agent {}.", agent.id),
+                    created_at: now,
+                })?;
                 (agent.id, generation)
             } else {
                 repositories.insert_agent(&AgentRecord {
@@ -5104,6 +5146,7 @@ fn available_commands(
             "send",
             "logs",
             "events",
+            "progress",
             "stop",
         ]);
     } else {
@@ -5114,6 +5157,7 @@ fn available_commands(
             caller.agent_id().expect("agent caller has an ID"),
         )?;
         for (namespace, action, command) in [
+            ("task", "read", "progress"),
             ("project", "attach", "project attach"),
             ("task", "create", "task create"),
             ("task", "close", "task close"),
@@ -5323,7 +5367,8 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
             RpcFailureCode::Conflict
         }
         StoreError::EventTooLarge { .. } => RpcFailureCode::InvalidArgument,
-        StoreError::InvalidConfigurationSnapshot { .. }
+        StoreError::InvalidProgressEvent { .. }
+        | StoreError::InvalidConfigurationSnapshot { .. }
         | StoreError::Database(_)
         | StoreError::EncodeJson(_)
         | StoreError::ModifiedMigration { .. }
@@ -6058,6 +6103,21 @@ async fn serve_connection(
                             )
                         }
                     }
+                    RpcRequest::Progress {
+                        after,
+                        limit,
+                        wait_seconds,
+                    } => (
+                        progress::wait(
+                            &commands,
+                            caller,
+                            after,
+                            limit,
+                            wait_seconds,
+                        )
+                        .await?,
+                        false,
+                    ),
                     request => (
                         request_dispatch(&commands, caller, request).await?,
                         false,
@@ -6087,6 +6147,7 @@ async fn serve_connection(
     }
 }
 
+#[derive(Clone, Copy)]
 enum AuthenticatedCaller {
     Operator,
     Agent(SessionScope),

@@ -314,7 +314,17 @@ impl ProviderSessionHandle {
 }
 
 /// The process-level state of one provider session.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum LifecycleState {
     Starting,
     Running,

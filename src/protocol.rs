@@ -1,5 +1,7 @@
 //! Versioned local RPC framing and ownership handshakes.
 
+pub(crate) mod progress;
+
 use std::io;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -14,7 +16,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 5;
+pub(crate) const PROTOCOL_VERSION: u16 = 6;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -96,6 +98,11 @@ pub(crate) enum RpcRequest {
     Doctor,
     Whoami,
     Prime,
+    Progress {
+        after: Option<String>,
+        limit: u16,
+        wait_seconds: u8,
+    },
     ProjectList,
     ProjectAttach {
         operation_id: OperationId,
@@ -246,6 +253,10 @@ pub(crate) enum RpcResponse {
         ready_tasks: Vec<TaskSummary>,
         active_task: Option<Box<TaskSummary>>,
         commands: Vec<String>,
+    },
+    Progress {
+        #[serde(flatten)]
+        page: progress::ProgressPage,
     },
     Projects {
         projects: Vec<ProjectSummary>,
@@ -550,7 +561,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 5,
+                    "protocol_version": 6,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -663,7 +674,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 5,
+                    "protocol_version": 6,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

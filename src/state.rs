@@ -2,6 +2,7 @@
 
 mod configuration;
 mod diagnostics;
+mod progress;
 pub(crate) mod supervision;
 
 #[cfg(test)]
@@ -110,6 +111,8 @@ struct Migration {
 /// A failure to open, migrate, or access durable run state.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
+    #[error("event sequence {sequence} has an invalid progress projection")]
+    InvalidProgressEvent { sequence: i64 },
     #[error(
         "run {run_id} has a missing or invalid configuration snapshot; preserve the run state and inspect it with `coterie doctor`"
     )]

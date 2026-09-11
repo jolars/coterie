@@ -194,6 +194,72 @@ Reconstruct the caller's identity, project, peers, tasks, ready work, active
 assignment, and authorized command list. Agents use this durable context after
 a fresh session or context compaction.
 
+### `coterie progress`
+
+```console
+coterie progress [--after <cursor>] [--limit <1..100>] [--wait <0..5>] [--json]
+```
+
+Read compact lifecycle changes for the current run. The operator or an
+authenticated agent with `task:read` may use this view. It shares `prime`'s
+run-wide task and agent visibility, including the caller's own lifecycle, and
+does not depend on role names or provider live steering.
+
+The response contains `run_id`, `changes`, `next_cursor`, `has_more`, and
+`timed_out`. Each change contains a durable sequence and one of these `kind`
+values:
+
+| Kind | Fields |
+| --- | --- |
+| `task` | `task_id`, `project_id`, `status` |
+| `assignment` | `assignment_id`, `task_id`, `agent_id`, `state` |
+| `assignment_session` | `assignment_id`, `task_id`, `agent_id`, `session_id` |
+| `agent` | `agent_id`, `generation`, `state` |
+| `session` | `session_id`, `agent_id`, `generation`, `state` |
+
+These are historical changes, not a current-state snapshot. Apply them in
+sequence order. Task `submitted` and assignment `completed` describe a
+submission; agent or session `exited` describes provider lifecycle independently.
+Task acceptance is recorded by task `closed`. Task titles, descriptions,
+results, message bodies, paths, provider details, and raw event payloads are
+excluded. An example containing submission and exit records is
+[`examples/progress.json`](../examples/progress.json).
+
+Omitting `--after` starts at sequence zero. Save the opaque returned cursor and
+pass it unchanged on the next invocation. It is bound to this run and caller,
+so a different agent, the operator, or a replacement run cannot reuse it. A
+renewed session for the same agent may reuse it after authenticating with its
+new credentials. A malformed, mismatched, or future cursor returns
+`invalid_argument` (exit 2). A cursor grants no authority. Deliberately reusing
+one repeats the same historical changes while the durable log remains unchanged.
+
+The default limit is 100 changes. Each page scans at most 256 event rows and
+contains less than 64 KiB, regardless of task or event body size. Excluded
+events advance the cursor without exposing their contents. Continue while
+`has_more` is true, even if `changes` is empty. It means the scan has not reached
+the durable high-water mark observed by this request.
+
+`--wait` defaults to zero seconds. A positive value waits only when caught up,
+returning on the next change, the availability of another page, or the requested
+deadline. The supervisor remains able to process mutations and provider
+observations during the wait, and every poll checks current authorization.
+An expired wait succeeds with an empty page and `timed_out: true`. An ordinary
+nonwaiting empty page has `timed_out: false`. Transport failure returns
+`unavailable` (exit 7), with no acknowledgement or cursor mutation. Reconnect
+explicitly to the same run and resume with the last printed cursor. Progress
+does not start a supervisor or read an offline database on an agent's behalf.
+
+```console
+coterie progress --limit 20 --json
+# Continue with the returned next_cursor until has_more is false.
+coterie progress --after '<next_cursor>' --limit 20 --wait 5 --json
+```
+
+The response schema is generated from the typed CLI envelope and progress data:
+[`cli-progress-v1.schema.json`](../schemas/cli-progress-v1.schema.json).
+Regenerate the schema and example with
+`cargo test cli::progress_tests::regenerate_progress_contract -- --ignored`.
+
 ### `coterie project list`
 
 ```console

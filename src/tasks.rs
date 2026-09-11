@@ -12,7 +12,16 @@ use thiserror::Error;
 use crate::id::TaskId;
 
 /// A task's durable lifecycle state.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Serialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TaskStatus {
     Open,
