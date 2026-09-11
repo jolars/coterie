@@ -83,7 +83,7 @@ impl ConfigLock {
             }
         }
         // An explicit projection prevents new host bindings from entering the portable contract.
-        let portable = serde_json::json!({
+        let mut portable = serde_json::json!({
             "schema_version": ConfigSchemaVersion,
             "archetype": config.archetype,
             "limits": config.limits,
@@ -91,6 +91,14 @@ impl ConfigLock {
             "roles": config.roles,
             "providers": providers,
         });
+        // Disabled idle shutdown is the historical policy, so old snapshots
+        // and locks retain their fingerprint after migration.
+        if config.supervision.idle_timeout_seconds == 0 {
+            portable["supervision"]
+                .as_object_mut()
+                .expect("supervision object")
+                .remove("idle_timeout_seconds");
+        }
         let bytes = serde_json::to_vec(&portable)
             .expect("portable configuration serializes");
         let fingerprint = Sha256::digest(bytes)

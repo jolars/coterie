@@ -356,6 +356,19 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
 Observed on September 11, 2026, in run
 `cr-01M281JZ2J4XRPCJNXPR0DM0J8`.
 
+- [x] **Stop idle supervisors automatically.** An old supervisor remained
+  alive after all agents exited and rejected the upgraded CLI's protocol.
+  Implement the configurable idle shutdown specified in `DESIGN.md`, using
+  durable session and operation state rather than process counts or resource
+  usage. Test timer reset, read-only polling, live and uncertain sessions,
+  pending operations, disabled policy, configuration migration, attached-project
+  retirement, process exit, recovery, and preservation of unfinished work.
+  New runs default to 60 seconds; trusted global policy can change or disable
+  the timeout. Migration 13 preserves disabled shutdown for historical runs.
+  The [idle runtime tests](tests/supervisor_runtime/idle.rs), state and timer
+  tests, configuration upgrade tests, and [crash matrix](docs/crash-matrix.md)
+  cover the gate. Default parallel `task check` passes (401 tests).
+
 - [x] **Keep coordinating while delegated work remains.** The lead ended its
   turn after spawning workers and did not read their durable progress and
   completion messages until the user asked. Add explicit bootstrap guidance

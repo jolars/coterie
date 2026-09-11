@@ -260,6 +260,8 @@ the existing restart window, launch attempts, restart backoff, startup and job
 timeouts, interrupt grace, and shutdown timeout fields with their explicit
 `_seconds` or `_ms` units. These bounds must be positive, fit millisecond
 arithmetic, and leave an interrupt grace shorter than the shutdown timeout.
+The idle shutdown bound, `idle_timeout_seconds`, also accepts zero to disable
+automatic shutdown; its default for new runs is 60 seconds.
 Supervision settings are trusted global policy; project restrictions and
 operator overrides do not change them in this slice.
 
@@ -645,6 +647,21 @@ assignment transactions local to one process.
 The supervisor may outlive the foreground lead while workers are active. It
 exits when the run is stopped or after a configurable idle period with no live
 sessions or pending operations.
+
+New runs default to `supervision.idle_timeout_seconds = 60`, set only in
+trusted global configuration. Zero disables automatic shutdown. Runs created
+before this setting existed retain disabled idle shutdown in their saved
+policy; migration does not silently change an existing run's behavior.
+
+The idle timer requires every recorded session to have an observed exit, no
+pending or uncertain operation, no pending process control, and no unresolved
+workspace creation. Any durable event restarts the timer; read-only polling
+does not. Supervisor recovery starts a fresh full interval. The supervisor
+checks eligibility and records shutdown intent in one transaction, then uses
+the ordinary shutdown phases to mark the run stopped, retire every attached
+project index and the socket, and release leases. Tasks, transcripts, and
+workspaces remain available on disk. Launching after idle shutdown starts a
+new run. Unknown process state never qualifies as idle.
 
 ## Embedded task and state store
 

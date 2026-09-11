@@ -330,6 +330,11 @@
       "description": "Trusted bounds on provider quota and process control, independent of roles.",
       "type": "object",
       "properties": {
+        "idle_timeout_seconds": {
+          "description": "Zero preserves runs until the operator explicitly stops them.",
+          "type": "integer",
+          "format": "int64"
+        },
         "interrupt_grace_ms": {
           "type": "integer",
           "format": "int64"
@@ -366,7 +371,8 @@
         "startup_timeout_seconds",
         "job_timeout_seconds",
         "interrupt_grace_ms",
-        "shutdown_timeout_ms"
+        "shutdown_timeout_ms",
+        "idle_timeout_seconds"
       ]
     },
     "ValueProvenance": {

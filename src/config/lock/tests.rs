@@ -62,6 +62,11 @@ fn fingerprint_covers_all_portable_policy_and_ignores_host_bindings() {
     let mut changed = config.clone();
     changed.supervision.job_timeout_seconds = 120;
     changes.push(changed);
+    for timeout in [0, 120] {
+        let mut changed = config.clone();
+        changed.supervision.idle_timeout_seconds = timeout;
+        changes.push(changed);
+    }
     for changed in changes {
         assert_ne!(
             ConfigLock::for_config(&changed).fingerprint,

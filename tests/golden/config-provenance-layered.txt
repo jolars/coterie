@@ -32,6 +32,7 @@ roles.coordinator.max_instances <- compiled:-:archetypes.global:custom@1.roles.c
 roles.coordinator.permission_profile.approvals <- global:parts/first.toml:permission_profiles.safe.approvals (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
 roles.coordinator.permission_profile.filesystem <- global:parts/first.toml:permission_profiles.safe.filesystem (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
 roles.coordinator.permission_profile.network <- global:parts/second.toml:permission_profiles.safe.network (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
+supervision.idle_timeout_seconds <- compiled:-:supervision.idle_timeout_seconds
 supervision.interrupt_grace_ms <- compiled:-:supervision.interrupt_grace_ms
 supervision.job_timeout_seconds <- global:config.toml:supervision.job_timeout_seconds
 supervision.max_launch_attempts <- compiled:-:supervision.max_launch_attempts

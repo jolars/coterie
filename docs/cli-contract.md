@@ -96,6 +96,18 @@ only for retrying an uncertain launch and cannot be combined with a subcommand.
 Closing the TUI does not stop the run or its workers, and `SIGINT` is forwarded
 to Codex rather than interpreted as `coterie stop`.
 
+New runs automatically stop after `supervision.idle_timeout_seconds` seconds
+with only observed session exits and no pending or uncertain operations,
+workspace creation, or process control. The default is 60 seconds. Trusted
+global configuration can change it; zero disables automatic shutdown. Project
+configuration and CLI overrides cannot change it. Durable events reset the
+timer, read-only commands do not, and supervisor recovery starts a fresh full
+interval. Idle shutdown records `reason: "idle_timeout"` in a
+`run.shutdown_changed` event and follows the same retention and retirement
+rules as `stop`. A later launch starts a new run. Existing runs migrated from
+before this setting retain disabled idle shutdown and their original portable
+fingerprint; their saved policy must still match when reconnecting.
+
 ### `coterie config check`
 
 ```console

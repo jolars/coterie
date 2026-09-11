@@ -50,6 +50,7 @@ roles.worker.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.work
 roles.worker.permission_profile.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.approvals (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
 roles.worker.permission_profile.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.filesystem (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
 roles.worker.permission_profile.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.network (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
+supervision.idle_timeout_seconds <- compiled:-:supervision.idle_timeout_seconds
 supervision.interrupt_grace_ms <- compiled:-:supervision.interrupt_grace_ms
 supervision.job_timeout_seconds <- compiled:-:supervision.job_timeout_seconds
 supervision.max_launch_attempts <- compiled:-:supervision.max_launch_attempts

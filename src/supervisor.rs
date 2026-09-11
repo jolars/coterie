@@ -2,6 +2,7 @@
 
 mod closure_override;
 mod doctor;
+mod idle;
 mod progress;
 mod projects;
 mod resubmit;
@@ -1649,6 +1650,9 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
         pending_shutdown,
         ..ForegroundCoordination::default()
     };
+    let mut idle = idle::IdleShutdown::new(
+        store.configuration(active.run_id)?.supervision,
+    );
     let mut session_poll = tokio::time::interval(SESSION_POLL_INTERVAL);
     session_poll
         .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1715,6 +1719,9 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
                     unix_timestamp()?,
                     MAXIMUM_EVENTS_PER_POLL,
                 )?;
+                if foreground.pending_shutdown.is_none() && idle.begin_if_due(store, active.run_id, Instant::now())? {
+                    foreground.pending_shutdown = Some(PendingShutdown { responses: Vec::new() });
+                }
                 progress_shutdown(
                     store,
                     sessions,

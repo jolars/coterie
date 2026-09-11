@@ -104,6 +104,14 @@ prefixes survive interruption. The provider conformance tests,
 `session_timeouts_are_bounded_and_unknown_processes_are_never_signaled`, and
 `shutdown_controls_escalate_once_and_survive_recovery` verify these guards.
 
+Automatic idle shutdown checks session exits, pending operations, process
+controls, and workspace observations in the same transaction that records its
+shutdown intent. It uses the ordinary stop phases and retention rules. The
+[idle tests](../tests/supervisor_runtime/idle.rs) verify live-session protection,
+process exit, attached-project retirement, and preservation of dirty worktrees
+and transcripts. Its crash matrix verifies one stopped run after repeated
+recovery.
+
 Database writes require a private, single-link file and validated adjacent
 SQLite files. The leased supervisor is the only writer. Forward migrations and
 transactions preserve durable history; Coterie has no runtime database deletion

@@ -521,6 +521,20 @@ fn resolve_supervision(
     apply!(job_timeout_seconds);
     apply!(interrupt_grace_ms);
     apply!(shutdown_timeout_ms);
+    if let Some(value) = input.idle_timeout_seconds {
+        if !(0..=i64::MAX / 1_000).contains(&value) {
+            return Err(invalid_global(
+                "supervision.idle_timeout_seconds",
+                "idle timeout must be nonnegative and fit millisecond arithmetic",
+            ));
+        }
+        policy.idle_timeout_seconds = value;
+        provenance::record(
+            provenance,
+            "supervision.idle_timeout_seconds",
+            ConfigLayer::Global,
+        );
+    }
     if policy.interrupt_grace_ms >= policy.shutdown_timeout_ms {
         return Err(invalid_global(
             "supervision.interrupt_grace_ms",

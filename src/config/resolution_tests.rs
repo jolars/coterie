@@ -819,6 +819,41 @@ fn all_permission_combinations_obey_the_partial_order() {
 }
 
 #[test]
+fn idle_shutdown_policy_is_trusted_configurable_and_can_be_disabled() {
+    let fixture = Fixture::new();
+    let policy =
+        serde_json::to_value(fixture.load().unwrap().supervision).unwrap();
+    assert_eq!(policy["idle_timeout_seconds"], 60);
+    for value in [0, 1, 120] {
+        fixture.write(
+            "config.toml",
+            &format!("[supervision]\nidle_timeout_seconds = {value}"),
+        );
+        let config = fixture.load().unwrap();
+        assert_eq!(
+            serde_json::to_value(config.supervision).unwrap()["idle_timeout_seconds"],
+            value
+        );
+        assert_eq!(
+            config.provenance["supervision.idle_timeout_seconds"]
+                .source
+                .layer,
+            ConfigLayer::Global
+        );
+    }
+    for value in [-1, i64::MAX] {
+        fixture.write(
+            "config.toml",
+            &format!("[supervision]\nidle_timeout_seconds = {value}"),
+        );
+        assert!(fixture.load().is_err());
+    }
+    fixture.write("config.toml", "");
+    fixture.write("coterie.toml", "[supervision]\nidle_timeout_seconds = 0");
+    assert!(fixture.load().is_err());
+}
+
+#[test]
 fn supervision_is_trusted_only_and_requires_consistent_positive_bounds() {
     let fixture = Fixture::new();
     fixture.write(

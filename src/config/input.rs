@@ -102,6 +102,8 @@ pub(crate) struct SupervisionOverrides {
     pub(crate) job_timeout_seconds: Option<i64>,
     pub(crate) interrupt_grace_ms: Option<i64>,
     pub(crate) shutdown_timeout_ms: Option<i64>,
+    /// Seconds without live sessions or pending operations; zero disables shutdown.
+    pub(crate) idle_timeout_seconds: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]

@@ -52,6 +52,8 @@ pub(crate) struct SupervisionPolicy {
     pub(crate) job_timeout_seconds: i64,
     pub(crate) interrupt_grace_ms: i64,
     pub(crate) shutdown_timeout_ms: i64,
+    /// Zero preserves runs until the operator explicitly stops them.
+    pub(crate) idle_timeout_seconds: i64,
 }
 
 /// A trusted command binding for an out-of-process provider.
@@ -299,6 +301,7 @@ pub(crate) fn compiled_defaults() -> CompiledDefaults {
             job_timeout_seconds: 3_600,
             interrupt_grace_ms: 250,
             shutdown_timeout_ms: 5_000,
+            idle_timeout_seconds: 60,
         },
     }
 }

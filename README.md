@@ -41,6 +41,14 @@ configuration changes require restoring the saved policy or stopping the run. Se
 [configuration command contract](docs/cli-contract.md#coterie-config-check)
 and [examples](examples/config).
 
+Closing the foreground leaves active workers running. Once every session has
+an observed exit and no operation is pending or uncertain, new runs stop after
+60 seconds of inactivity. Set `[supervision] idle_timeout_seconds` in trusted
+global configuration to change that interval, or set it to `0` to require
+`coterie stop`. Read-only polling does not keep an idle run alive. Shutdown
+retains tasks, transcripts, and workspaces; the next launch starts a new run.
+Historical runs retain their saved policy with automatic shutdown disabled.
+
 ## Installation
 
 Coterie currently supports Linux. Install the latest prebuilt release with the

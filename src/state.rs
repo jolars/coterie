@@ -100,6 +100,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "project_root_policy",
         sql: include_str!("state/migrations/0012_project_root_policy.sql"),
     },
+    Migration {
+        version: 13,
+        name: "idle_shutdown_policy",
+        sql: include_str!("state/migrations/0013_idle_shutdown_policy.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -5410,6 +5415,11 @@ mod tests {
                     .execute_batch(MIGRATIONS[10].sql)
                     .expect("the prior runtime saved its historical policy");
             }
+            if prior_count >= 12 {
+                connection
+                    .execute_batch(MIGRATIONS[11].sql)
+                    .expect("the prior runtime saved its project root policy");
+            }
             drop(connection);
 
             let store =
@@ -5418,15 +5428,14 @@ mod tests {
             let configuration = store
                 .configuration(RUN_ID.parse().unwrap())
                 .expect("upgrades pin the historical compiled runtime policy");
-            assert_eq!(
-                configuration,
-                crate::config::resolve(
-                    &Default::default(),
-                    &Default::default(),
-                    &Default::default()
-                )
-                .unwrap()
-            );
+            let mut historical = crate::config::resolve(
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+            historical.supervision.idle_timeout_seconds = 0;
+            assert_eq!(configuration, historical);
             assert!(configuration.allowed_project_roots.is_empty());
             let document: String = store.connection.query_row("SELECT document_json FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
             let document: serde_json::Value =
@@ -5434,6 +5443,15 @@ mod tests {
             assert_eq!(
                 document["effective"]["allowed_project_roots"],
                 json!([])
+            );
+            assert_eq!(
+                document["effective"]["supervision"]["idle_timeout_seconds"],
+                0
+            );
+            assert_eq!(
+                document["provenance"]["supervision.idle_timeout_seconds"]["source"]
+                    ["layer"],
+                "compiled"
             );
             assert_eq!(
                 document["provenance"]["allowed_project_roots"]["source"]["layer"],
@@ -6386,6 +6404,151 @@ mod tests {
                 Ok(())
             })
             .expect("the rolled-back store should remain usable");
+    }
+
+    #[test]
+    fn idle_policy_migration_preserves_custom_configuration_and_fingerprint() {
+        let database = TestDatabase::new();
+        let connection = Connection::open(&database.0).unwrap();
+        connection.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, applied_at INTEGER NOT NULL DEFAULT (unixepoch())) STRICT;").unwrap();
+        for migration in &MIGRATIONS[..12] {
+            connection.execute_batch(migration.sql).unwrap();
+            connection.execute("INSERT INTO schema_migrations (version, name, source) VALUES (?1, ?2, ?3)", (migration.version, migration.name, migration.sql)).unwrap();
+        }
+        let mut historical = crate::config::resolve(
+            &toml::from_str("[supervision]\njob_timeout_seconds = 123\n[providers.codex]\ncommand = ['/trusted/custom-codex']").unwrap(),
+            &Default::default(), &Default::default(),
+        ).unwrap();
+        historical.supervision.idle_timeout_seconds = 0;
+        let snapshot = crate::config::RunConfiguration::new(historical.clone());
+        let fingerprint = snapshot.fingerprint();
+        let mut document = serde_json::to_value(snapshot).unwrap();
+        document["effective"]["supervision"]
+            .as_object_mut()
+            .unwrap()
+            .remove("idle_timeout_seconds");
+        document["provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("supervision.idle_timeout_seconds");
+        connection.execute("INSERT INTO runs (id, status, created_at) VALUES (?1, 'active', 1)", [RUN_ID]).unwrap();
+        connection.execute("INSERT INTO configuration_snapshots (run_id, scope, schema_version, fingerprint, document_json, created_at) VALUES (?1, 'run', 1, ?2, ?3, 1)", rusqlite::params![RUN_ID, fingerprint, document.to_string()]).unwrap();
+        drop(connection);
+        for _ in 0..2 {
+            let mut store = Store::open(&database.0).unwrap();
+            assert_eq!(
+                store.configuration(RUN_ID.parse().unwrap()).unwrap(),
+                historical
+            );
+            let stored: String = store.connection.query_row("SELECT fingerprint FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
+            assert_eq!(stored, fingerprint);
+            assert!(store.connection.execute("UPDATE configuration_snapshots SET fingerprint = 'changed'", []).is_err());
+        }
+    }
+
+    #[test]
+    fn idle_shutdown_requires_observed_exits_and_no_pending_effects() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut records = Records::fixture();
+        records.agent.state = LifecycleState::Exited;
+        records.session.state = LifecycleState::Exited;
+        records.session.reconciliation_state = ExternalResourceState::Observed;
+        records.operation.status = "succeeded".into();
+        records.operation.reconciliation_state =
+            Some(ExternalResourceState::Observed);
+        records.workspace.state = ExternalResourceState::Observed;
+        insert_claim_prerequisites(&mut store, &records);
+        store
+            .transaction(|r| {
+                r.insert_session(&records.session)?;
+                r.insert_operation(&records.operation)?;
+                r.insert_claim(&records.claim)?;
+                r.insert_assignment(&records.assignment)?;
+                r.insert_workspace(&records.workspace)?;
+                assert_eq!(r.idle_shutdown_cursor(records.run.id)?, Some(0));
+                assert_eq!(r.idle_shutdown_cursor(RunId::generate())?, None);
+                r.insert_event(&records.event)?;
+                assert_eq!(
+                    r.idle_shutdown_cursor(records.run.id)?,
+                    Some(records.event.sequence)
+                );
+                Ok(())
+            })
+            .unwrap();
+        for (block, restore) in [
+            (
+                "UPDATE sessions SET state = 'starting'",
+                "UPDATE sessions SET state = 'exited'",
+            ),
+            (
+                "UPDATE sessions SET state = 'running'",
+                "UPDATE sessions SET state = 'exited'",
+            ),
+            (
+                "UPDATE sessions SET state = 'unknown'",
+                "UPDATE sessions SET state = 'exited'",
+            ),
+            (
+                "UPDATE sessions SET state = 'lost'",
+                "UPDATE sessions SET state = 'exited'",
+            ),
+            (
+                "UPDATE sessions SET state = 'quarantined'",
+                "UPDATE sessions SET state = 'exited'",
+            ),
+            (
+                "UPDATE sessions SET reconciliation_state = 'unknown'",
+                "UPDATE sessions SET reconciliation_state = 'observed'",
+            ),
+            (
+                "UPDATE agents SET state = 'starting'",
+                "UPDATE agents SET state = 'exited'",
+            ),
+            (
+                "UPDATE operations SET status = 'pending'",
+                "UPDATE operations SET status = 'succeeded'",
+            ),
+            (
+                "UPDATE operations SET reconciliation_state = 'desired'",
+                "UPDATE operations SET reconciliation_state = 'observed'",
+            ),
+            (
+                "UPDATE operations SET reconciliation_state = 'unknown'",
+                "UPDATE operations SET reconciliation_state = 'observed'",
+            ),
+            (
+                "UPDATE workspaces SET state = 'desired'",
+                "UPDATE workspaces SET state = 'observed'",
+            ),
+            (
+                "UPDATE workspaces SET state = 'unknown'",
+                "UPDATE workspaces SET state = 'observed'",
+            ),
+            (
+                "INSERT INTO session_controls (session_id, run_id, agent_id, generation, reason, phase, requested_at_ms, interrupt_until_ms, kill_at_ms, deadline_ms) SELECT id, run_id, agent_id, generation, 'shutdown', 'timed_out', 1, 2, 3, 4 FROM sessions",
+                "DELETE FROM session_controls",
+            ),
+            (
+                "UPDATE runs SET status = 'stopped', stopped_at = 30",
+                "UPDATE runs SET status = 'active', stopped_at = NULL",
+            ),
+        ] {
+            store.connection.execute_batch(block).unwrap();
+            assert_eq!(
+                store
+                    .transaction(|r| r.idle_shutdown_cursor(records.run.id))
+                    .unwrap(),
+                None,
+                "{block}"
+            );
+            store.connection.execute_batch(restore).unwrap();
+            assert!(
+                store
+                    .transaction(|r| r.idle_shutdown_cursor(records.run.id))
+                    .unwrap()
+                    .is_some()
+            );
+        }
     }
 
     struct Records {

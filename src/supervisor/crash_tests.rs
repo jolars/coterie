@@ -76,6 +76,11 @@ fn crash_matrix_shutdown() {
 }
 
 #[test]
+fn crash_matrix_idle_shutdown() {
+    matrix("idle-shutdown");
+}
+
+#[test]
 fn crash_matrix_message() {
     matrix("message");
 }
@@ -168,6 +173,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         include_str!("../supervisor.rs"),
         include_str!("session.rs"),
         include_str!("projects.rs"),
+        include_str!("idle.rs"),
         include_str!("../providers.rs"),
         include_str!("../project.rs"),
         include_str!("../private_fs.rs"),
@@ -199,6 +205,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "merge",
         "transcript",
         "shutdown",
+        "idle-shutdown",
         "message",
         "acknowledge",
         "close",
@@ -1167,7 +1174,7 @@ impl Fixture {
                 })
             })
             .unwrap();
-        if matches!(case, "task" | "spawn") {
+        if matches!(case, "task" | "spawn" | "idle-shutdown") {
             return;
         }
         self.spawn().unwrap();
@@ -1264,6 +1271,7 @@ impl Fixture {
                     .unwrap();
             }
             "shutdown" => self.shutdown(),
+            "idle-shutdown" => self.idle_shutdown(),
             _ => panic!("unknown crash case: {case}"),
         }
     }
@@ -1417,9 +1425,41 @@ impl Fixture {
         assert!(receiver.try_recv().unwrap().is_ok());
     }
 
+    fn idle_shutdown(&mut self) {
+        let run_id = RUN.parse().unwrap();
+        let policy = self.store.configuration(run_id).unwrap().supervision;
+        let mut idle = idle::IdleShutdown::new(policy);
+        let now = Instant::now();
+        idle.begin_if_due(&mut self.store, run_id, now).unwrap();
+        idle.begin_if_due(
+            &mut self.store,
+            run_id,
+            now + Duration::from_secs(policy.idle_timeout_seconds as u64),
+        )
+        .unwrap();
+        let mut foreground = ForegroundCoordination {
+            pending_shutdown: Some(PendingShutdown {
+                responses: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        progress_shutdown_inner(
+            &mut self.store,
+            &mut self.sessions,
+            &mut self.workspaces,
+            run_id,
+            &mut foreground,
+        )
+        .unwrap();
+    }
+
     fn recover(&mut self, case: &str) {
         let run_id = RUN.parse().unwrap();
         let now = unix_timestamp().unwrap();
+        if case == "idle-shutdown" {
+            self.idle_shutdown();
+            return;
+        }
         if case == "shutdown" {
             self.sessions
                 .reconcile_after_restart(&mut self.store, run_id, now)
@@ -1488,7 +1528,7 @@ impl Fixture {
                 assert_eq!(r.projects(run_id)?.len(), 1);
                 assert_eq!(
                     r.run(run_id)?.unwrap().status,
-                    if case == "shutdown" {
+                    if matches!(case, "shutdown" | "idle-shutdown") {
                         "stopped"
                     } else {
                         "active"
@@ -1528,7 +1568,7 @@ impl Fixture {
                         assert!(!readiness.is_ready());
                         assert_eq!(dependent.status, TaskStatus::Open);
                     }
-                    if !matches!(case, "task") {
+                    if !matches!(case, "task" | "idle-shutdown") {
                         let assignments = r
                             .workspaces(run_id)?
                             .into_iter()
@@ -1607,7 +1647,7 @@ impl Fixture {
                     ("task.resubmitted", case == "resubmit"),
                     ("message.sent", matches!(case, "message" | "acknowledge")),
                     ("message.acknowledged", case == "acknowledge"),
-                    ("run.stopped", case == "shutdown"),
+                    ("run.stopped", matches!(case, "shutdown" | "idle-shutdown")),
                 ] {
                     assert_eq!(
                         events
@@ -1620,7 +1660,7 @@ impl Fixture {
                 Ok(())
             })
             .unwrap();
-        if !matches!(case, "initialize" | "task") {
+        if !matches!(case, "initialize" | "task" | "idle-shutdown") {
             let workspace = self.workspace();
             assert!(workspace.path.is_dir());
             assert_eq!(

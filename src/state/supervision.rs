@@ -97,6 +97,31 @@ pub(crate) enum LaunchAdmission {
 }
 
 impl Repositories<'_, '_> {
+    /// Returns an event cursor only when inactivity is positively established.
+    pub(crate) fn idle_shutdown_cursor(
+        &self,
+        run_id: RunId,
+    ) -> Result<Option<i64>, StoreError> {
+        let (eligible, cursor): (bool, i64) = self.transaction.query_row(
+            "SELECT
+                EXISTS(SELECT 1 FROM runs WHERE id = ?1 AND status = 'active')
+                AND NOT EXISTS(SELECT 1 FROM run_shutdowns WHERE run_id = ?1)
+                AND NOT EXISTS(SELECT 1 FROM sessions WHERE run_id = ?1
+                    AND (state <> 'exited' OR reconciliation_state <> 'observed'))
+                AND NOT EXISTS(SELECT 1 FROM agents WHERE run_id = ?1
+                    AND state IN ('starting', 'running', 'unknown'))
+                AND NOT EXISTS(SELECT 1 FROM operations WHERE run_id = ?1
+                    AND (status = 'pending' OR reconciliation_state IN ('desired', 'unknown')))
+                AND NOT EXISTS(SELECT 1 FROM session_controls WHERE run_id = ?1
+                    AND phase <> 'completed')
+                AND NOT EXISTS(SELECT 1 FROM workspaces WHERE run_id = ?1
+                    AND state IN ('desired', 'unknown')),
+                COALESCE((SELECT MAX(sequence) FROM events WHERE run_id = ?1), 0)",
+            [run_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(eligible.then_some(cursor))
+    }
+
     #[cfg(test)]
     pub(crate) fn session_launch_attempt_count(
         &self,

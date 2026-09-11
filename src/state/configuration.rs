@@ -121,7 +121,14 @@ mod tests {
 
     #[test]
     fn current_schema_never_infers_missing_or_invalid_policy() {
-        for damage in ["missing", "schema", "fingerprint", "role", "document"] {
+        for damage in [
+            "missing",
+            "schema",
+            "fingerprint",
+            "role",
+            "document",
+            "idle_policy",
+        ] {
             let mut store = Store::open_in_memory().unwrap();
             let run = run();
             store
@@ -146,6 +153,12 @@ mod tests {
                                 .remove("worker");
                         }
                         "document" => document["schema_version"] = json!(2),
+                        "idle_policy" => {
+                            document["effective"]["supervision"]
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("idle_timeout_seconds");
+                        }
                         _ => (),
                     }
                     repositories.insert_configuration_snapshot(

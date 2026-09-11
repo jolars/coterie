@@ -67,6 +67,7 @@
     "supervision": {
       "$ref": "#/$defs/SupervisionOverrides",
       "default": {
+        "idle_timeout_seconds": null,
         "interrupt_grace_ms": null,
         "job_timeout_seconds": null,
         "max_launch_attempts": null,
@@ -299,6 +300,15 @@
     "SupervisionOverrides": {
       "type": "object",
       "properties": {
+        "idle_timeout_seconds": {
+          "description": "Seconds without live sessions or pending operations; zero disables shutdown.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
         "interrupt_grace_ms": {
           "type": [
             "integer",
