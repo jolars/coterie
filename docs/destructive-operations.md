@@ -96,6 +96,13 @@ synchronous job or probe reaping have deadlines. The foreground wrapper retains
 its child until an exit is observed; the supervisor's shutdown observation
 deadline still bounds the stop request.
 
+Terminal hangup and foreground termination signals also initiate bounded
+cleanup of the wrapper's owned child. They do not stop the run or its workers,
+and repeated signals cannot extend the deadline. Real PTY tests in
+[`terminal.rs`](../tests/supervisor_runtime/terminal.rs) close the controlling
+terminal, verify graceful termination and forced reaping, and reconnect to the
+same run with a worker still active.
+
 Unknown recovered processes receive no signals. Shutdown waits for terminal
 observations before retiring run discovery. Timeouts preserve the active run
 with launches blocked. Tasks, assignments, workspaces, refs, and transcript

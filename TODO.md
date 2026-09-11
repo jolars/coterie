@@ -388,6 +388,21 @@ Observed on September 11, 2026, in run
   integration, validation, closure, and dependency release. Default parallel
   `task check` passed with 393 tests and eight opt-in or generation tests skipped.
 
+## Follow-up from the Sidekick terminal run
+
+Observed on September 11, 2026, in run
+`cr-01M28BJCEK8FB1B908HVK3DQ0H`.
+
+- [ ] **Detect stranded foreground terminals in `doctor`.** Coterie and its
+  foreground provider remained alive after Sidekick deleted their terminal,
+  blocking another foreground launch while `doctor` reported healthy sessions.
+  Diagnose terminal loss using verified process ownership and terminal state,
+  rather than trusting the durable `running` state or a stored PID alone.
+  Keep inspection read-only, preserve uncertainty when ownership cannot be
+  proved, and name a supported recovery action. Test closed PTYs, live terminals
+  hidden by the editor, missing or ambiguous processes, PID reuse, and both
+  human and JSON diagnostics.
+
 ## M6: Cross-project orchestration
 
 - [x] Attach canonical project roots under unique aliases, enforce global root

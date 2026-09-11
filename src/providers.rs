@@ -188,6 +188,7 @@ impl CodexInteractiveProcess {
         crate::fault::point("process.foreground.wait.before");
         let mut termination = Box::pin(termination);
         let mut termination_requested = false;
+        let mut shutdown_started = false;
         let mut terminate_deadline = None;
         let mut kill_deadline = None;
         loop {
@@ -209,13 +210,25 @@ impl CodexInteractiveProcess {
                     {
                         forward_signal(self.process_id(), signal.signal)?;
                     }
+                    // A closed editor terminal cannot host a surviving TUI.
+                    // Bound cleanup even when the provider ignores the signal.
+                    if matches!(signal.signal, SIGHUP | SIGQUIT | SIGTERM)
+                        && !shutdown_started
+                    {
+                        (terminate_deadline, kill_deadline) = self.shutdown_deadlines();
+                        if signal.signal == SIGTERM {
+                            terminate_deadline = None;
+                        }
+                        shutdown_started = true;
+                    }
                 }
                 () = &mut termination, if !termination_requested => {
-                    forward_signal(self.process_id(), SIGINT)?;
+                    if !shutdown_started {
+                        forward_signal(self.process_id(), SIGINT)?;
+                        (terminate_deadline, kill_deadline) = self.shutdown_deadlines();
+                        shutdown_started = true;
+                    }
                     termination_requested = true;
-                    let policy = self.supervision;
-                    terminate_deadline = Some(Instant::now() + Duration::from_millis(policy.interrupt_grace_ms as u64));
-                    kill_deadline = Some(Instant::now() + Duration::from_millis((policy.shutdown_timeout_ms / 2) as u64));
                 }
                 () = wait_for_deadline(terminate_deadline), if terminate_deadline.is_some() => {
                     self.terminate()?;
@@ -229,6 +242,22 @@ impl CodexInteractiveProcess {
                 }
             }
         }
+    }
+
+    fn shutdown_deadlines(&self) -> (Option<Instant>, Option<Instant>) {
+        let now = Instant::now();
+        (
+            Some(
+                now + Duration::from_millis(
+                    self.supervision.interrupt_grace_ms as u64,
+                ),
+            ),
+            Some(
+                now + Duration::from_millis(
+                    (self.supervision.shutdown_timeout_ms / 2) as u64,
+                ),
+            ),
+        )
     }
 }
 

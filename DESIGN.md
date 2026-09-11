@@ -160,6 +160,13 @@ not promise transparent process reattachment.
 the run. Stopping all agents and cleaning up eligible resources requires
 `coterie stop`.
 
+Terminal hangup (`SIGHUP`), `SIGTERM`, and `SIGQUIT` also bound foreground
+cleanup using the run's saved shutdown policy. The wrapper forwards the signal,
+sends `SIGTERM` after the interrupt grace if needed, and kills an unresponsive
+child at the same deadline used by foreground run shutdown. Repeated signals
+and concurrent stop requests do not extend these deadlines. The wrapper reaps
+its child and records the exit before returning; the run and workers survive.
+
 ## Native dependencies and external boundaries
 
 Coterie should be a single compiled Rust binary apart from the agent harnesses

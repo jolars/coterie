@@ -660,6 +660,15 @@ fresh lead session; the Codex MVP does not promise transparent TUI reattachment
 or provider-session resume. The injected bootstrap directs the lead to
 `coterie prime`, which reconstructs its context from durable state.
 
+Closing the editor terminal sends `SIGHUP`. Coterie bounds foreground cleanup
+after this signal, `SIGTERM`, or `SIGQUIT`: it forwards the signal, sends
+`SIGTERM` after the saved interrupt grace if needed, and sends `SIGKILL` at the
+foreground shutdown deadline if the child still has not exited. Defaults are
+250 milliseconds and 2.5 seconds. Repeated signals do not reset the deadlines.
+The wrapper reaps the provider and records its exit before returning, allowing
+a later foreground launch. `SIGINT` alone remains an interrupt without a
+forced-exit deadline.
+
 After a supervisor crash, the next foreground launch reconnects when possible
 or restarts the same run from its database, lease, and index. Startup removes a
 stale owned socket, republishes the same run and project identities, repairs a
