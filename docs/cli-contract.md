@@ -34,6 +34,18 @@ starting with new policy. Provider command changes conflict even when a portable
 lock still verifies; provenance-only changes are compatible. Existing run
 commands and foreground process control remain available if files change.
 
+A supervisor keeps running the executable that started it after Coterie is
+upgraded. If its RPC protocol differs from the current CLI, startup and run
+commands fail with `unavailable` (exit 7) and recovery guidance. Use the matching
+Coterie executable to inspect the run with `status`, then explicitly stop it
+with `stop` when ready. On Linux, `ps -eo pid,args` shows the executable and run
+ID for each `coterie __supervisor` process. For Nix installations, this is normally
+the original `/nix/store/.../bin/coterie` path. Invoke that
+executable from the affected project directory. After stopping, launch the
+current `coterie` to create a new run. The stopped run retains its tasks,
+transcripts, and workspaces, including unfinished work. Coterie does not
+automatically stop an incompatible supervisor or discard its socket and index.
+
 Startup, `config`, and `doctor` accept these configuration options:
 
 | Option | Effective setting |

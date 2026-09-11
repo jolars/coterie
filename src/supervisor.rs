@@ -6584,7 +6584,16 @@ impl SupervisorError {
 }
 
 impl From<RpcFailure> for SupervisorError {
-    fn from(failure: RpcFailure) -> Self {
+    fn from(mut failure: RpcFailure) -> Self {
+        // Client-side guidance also helps when an older supervisor rejects us.
+        if failure.code == RpcFailureCode::ProtocolVersionMismatch {
+            failure.message.push_str(concat!(
+                "; the CLI and running supervisor use incompatible Coterie builds. ",
+                "As the operator, use the Coterie executable that started this run ",
+                "to inspect it with `status` and stop it with `stop`, then relaunch ",
+                "the current `coterie`. Stopping preserves tasks, transcripts, and workspaces."
+            ));
+        }
         Self::Rejected {
             code: failure.code,
             message: failure.message,
@@ -6823,6 +6832,82 @@ mod tests {
                 .code,
             RpcFailureCode::ProtocolVersionMismatch
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_protocol_rejection_explains_recovery_without_retrying() {
+        let fixture = TestDirectory::new();
+        let socket = fixture.join("supervisor.sock");
+        let active = entry(&fixture.join("project"));
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let legacy_message = "client requested protocol version 6, but the supervisor supports 4";
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert!(matches!(
+                read_frame::<_, ClientMessage>(&mut stream).await.unwrap(),
+                ClientMessage::Handshake(_)
+            ));
+            write_frame(
+                &mut stream,
+                &ServerMessage::Rejected(crate::protocol::RpcFailure::new(
+                    RpcFailureCode::ProtocolVersionMismatch,
+                    legacy_message,
+                )),
+            )
+            .await
+            .unwrap();
+            use tokio::io::AsyncReadExt;
+            assert_eq!(stream.read(&mut [0]).await.unwrap(), 0);
+            listener
+        });
+
+        let error = SupervisorClient::connect_operator_at(&socket, &active)
+            .await
+            .expect_err("an incompatible supervisor must remain unavailable");
+        assert!(!error.is_transient_connection_failure());
+        let listener = server.await.unwrap();
+        assert!(socket.exists());
+        let operation_id = OperationId::generate();
+        let diagnostic = error.for_operation(operation_id).diagnostic();
+        let mut stdout = Vec::new();
+        let mut human = Vec::new();
+        let mut json = Vec::new();
+        assert_eq!(
+            crate::cli::render_human_error(
+                &mut stdout,
+                &mut human,
+                &diagnostic,
+            )
+            .unwrap(),
+            crate::cli::ExitCategory::Unavailable
+        );
+        assert_eq!(
+            crate::cli::render_json_error(&mut stdout, &mut json, &diagnostic)
+                .unwrap(),
+            crate::cli::ExitCategory::Unavailable
+        );
+        assert!(stdout.is_empty());
+        let human = String::from_utf8(human).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(json["error"]["code"], "unavailable");
+        assert_eq!(json["operation_id"], operation_id.to_string());
+        for message in [&human, json["error"]["message"].as_str().unwrap()] {
+            assert!(message.contains(legacy_message), "{message}");
+            assert!(
+                message.contains("executable that started this run"),
+                "{message}"
+            );
+            assert!(message.contains("`status`"), "{message}");
+            assert!(message.contains("`stop`"), "{message}");
+            assert!(
+                message
+                    .contains("preserves tasks, transcripts, and workspaces"),
+                "{message}"
+            );
+        }
+        drop(listener);
     }
 
     #[test]
