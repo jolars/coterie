@@ -356,7 +356,7 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
 Observed on September 11, 2026, in run
 `cr-01M281JZ2J4XRPCJNXPR0DM0J8`.
 
-- [ ] **Keep coordinating while delegated work remains.** The lead ended its
+- [x] **Keep coordinating while delegated work remains.** The lead ended its
   turn after spawning workers and did not read their durable progress and
   completion messages until the user asked. Add explicit bootstrap guidance
   for configured coordinating roles: unless the user pauses the work, continue
@@ -369,6 +369,11 @@ Observed on September 11, 2026, in run
   for custom roles and restricted capabilities, and a fake-provider workflow
   with multiple completions through validated closure. Keep coordination
   judgment in agents rather than assigning runtime semantics to role names.
+  The [bootstrap tests](src/supervisor/bootstrap_tests.rs) cover custom names
+  and restricted capabilities; the [runtime workflow](tests/supervisor_runtime/coordination.rs)
+  covers separate cursors, message acknowledgement, two submissions, review,
+  integration, validation, closure, and dependency release. Default parallel
+  `task check` passed with 393 tests and eight opt-in or generation tests skipped.
 
 ## M6: Cross-project orchestration
 

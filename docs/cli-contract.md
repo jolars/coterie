@@ -29,6 +29,29 @@ launching Coterie binary, and the bootstrap names it and the selected permission
 profile. Use `"$COTERIE_BIN" prime` and the same quoted executable for subsequent
 Coterie commands, even when `coterie` is absent from the shell's PATH.
 
+The bootstrap includes conditional guidance for any role coordinating delegated
+work: keep coordinating while work remains, unless the user pauses it. Command
+guidance follows the role's snapshotted capabilities, including custom roles.
+It directs agents through review, integration where needed, validation, and
+accepted task closure, and tells them to report blockers requiring user action.
+Roles lacking monitoring, integration, or closure authority must request help
+from the user or an authorized coordinator for those actions.
+
+While coordinating, poll `progress --after <progress_cursor> --wait 5 --json`
+when `task:read` is granted. Start without `--after`, save each `next_cursor`,
+and drain pages while `has_more` is true, including empty pages. On each cycle,
+including after a timeout, read `inbox --after <inbox_cursor> --json` using its
+separate cursor (initially 0), handle the messages, then acknowledge the handled
+cursor with `inbox ack`. Progress does not read or acknowledge messages. Inspect
+current tasks and result details with `prime`; provider exit and submission are
+not task acceptance. Integrate with `workspace:integrate` and close with
+`task:close` only after their respective review and validation conditions pass.
+
+Durable messages and progress waits do not resume an idle foreground provider
+or start a new turn after one ends. Continued polling requires an active agent.
+Automatic wake-up requires separate, capability-probed provider support; neither
+ordinary message delivery nor a progress wait provides it.
+
 Startup and recovery use a durable snapshot of the resolved run configuration.
 An incompatible file or operator override produces `invalid_configuration`
 (exit 3), identifying the run, snapshot fingerprint, and changed effective fields.

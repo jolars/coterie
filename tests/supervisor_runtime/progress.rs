@@ -136,6 +136,20 @@ fn progress_agent_cli_requires_capability_and_preserves_operator_boundaries() {
             })
         });
         let environment = captured_environment(&capture);
+        let bootstrap = fs::read_to_string(&capture).unwrap();
+        assert!(bootstrap.contains("If you are coordinating delegated work"));
+        assert!(bootstrap.contains("unless the user pauses"));
+        assert!(bootstrap.contains("inbox --after <inbox_cursor>"));
+        assert!(bootstrap.contains("inbox ack <inbox_cursor>"));
+        assert!(
+            bootstrap.contains("do not resume an idle foreground provider")
+        );
+        assert_eq!(
+            bootstrap.contains("progress --after <progress_cursor> --wait 5"),
+            allowed
+        );
+        assert!(!bootstrap.contains("workspace integrate --assignment"));
+        assert!(!bootstrap.contains("task close <task_id> --summary"));
         let output = run({
             let mut command = fixture.agent_command(&environment);
             command.args(["progress", "--json"]);

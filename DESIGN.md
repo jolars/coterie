@@ -803,6 +803,30 @@ bootstrap must avoid conflicting work instructions, while recognizing that the
 provider's instruction hierarchy may place injected developer instructions above
 repository files.
 
+The bootstrap tells agents coordinating delegated work to keep coordinating
+while work remains, unless the user pauses it. This is conditional guidance for
+every configured role, not a runtime classification of role names or an automatic
+assignment of coordination responsibility. The run's snapshotted capabilities
+select command guidance: `task:read` permits continued
+`progress --after <cursor> --wait 5` polling, `workspace:integrate` permits
+explicit integration, and `task:close` permits closure after validation. Agents
+without a needed capability report the blocker to the user or an authorized
+coordinator instead of attempting the restricted command.
+
+Coordinators drain progress pages using `next_cursor` until `has_more` is false,
+read `inbox --after <cursor>` with its separate recipient-local cursor on each
+polling cycle, and acknowledge messages only after handling them. Progress
+cursors neither read nor acknowledge messages. Submissions must be carried
+through review, integration where needed, validation, and accepted task closure
+within granted authority. Submission or provider exit alone is not acceptance.
+Agents report blockers requiring user action rather than silently ending a turn
+with work awaiting coordination.
+
+Durable messages and progress waits do not resume an idle foreground provider
+or start another turn after one ends. An agent must remain active to poll.
+Automatic wake-up requires separate, capability-probed provider support; ordinary
+message persistence, live delivery, and progress polling do not establish it.
+
 Dynamic context is obtained through `coterie prime` so agents can recover after
 compaction, provider resume, or a fresh session. Every agent process receives an
 identity-scoped environment:

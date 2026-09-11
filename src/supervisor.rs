@@ -8,6 +8,8 @@ mod resubmit;
 mod session;
 
 #[cfg(test)]
+mod bootstrap_tests;
+#[cfg(test)]
 mod crash_tests;
 
 use std::collections::BTreeMap;
@@ -5425,9 +5427,52 @@ fn bootstrap_instruction(
         .get(role)
         .and_then(|role| role.instructions.as_deref())
         .unwrap_or_default();
-    format!(
+    let mut bootstrap = format!(
         "You are a {role} agent for Coterie run {run_id}. Run `\"$COTERIE_BIN\" prime` now for current orchestration context. Follow the repository's AGENTS.md instructions. Before `coterie finish --status completed`, validate the work and commit any intended Git worktree changes successfully. Uncommitted changes keep the assignment active; resolve them and retry finish. A clean assignment may finish with no new commit.\n{instructions}"
-    )
+    );
+    let allowed = |namespace, action| {
+        configuration
+            .archetype
+            .authorize(role, Capability::new(namespace, action))
+            == AuthorizationDecision::Allowed
+    };
+    bootstrap.push_str(
+        "\nIf you are coordinating delegated work, keep coordinating while work remains unless the user pauses it. Carry submitted results through review, integration where needed, validation, and accepted task closure within your granted authority. Submission and provider exit alone are not acceptance.",
+    );
+    if allowed("task", "read") {
+        bootstrap.push_str(
+            "\nPoll `\"$COTERIE_BIN\" progress --json` initially, then `\"$COTERIE_BIN\" progress --after <progress_cursor> --wait 5 --json`. Save each next_cursor and drain pages while has_more is true, even when changes is empty. Inspect current tasks and submitted results with `\"$COTERIE_BIN\" prime`.",
+        );
+    } else {
+        bootstrap.push_str(
+            "\nYour role lacks task:read, so progress polling is unavailable. Use `\"$COTERIE_BIN\" prime` for current orchestration context and report any monitoring blocker to the user or an authorized coordinator.",
+        );
+    }
+    bootstrap.push_str(
+        "\nOn each coordination cycle, including after an empty or timed-out progress wait, read `\"$COTERIE_BIN\" inbox --after <inbox_cursor> --json` (start at 0). Keep its next_cursor separate from the progress cursor. Acknowledge messages with `\"$COTERIE_BIN\" inbox ack <inbox_cursor>` only after handling every message through that cursor. Progress does not read or acknowledge messages. Also check the inbox at startup, task boundaries, and before finishing.",
+    );
+    if allowed("workspace", "integrate") {
+        bootstrap.push_str(
+            "\nAfter reviewing a submitted Git result, use `\"$COTERIE_BIN\" workspace integrate --assignment <assignment_id>` when integration is needed, then validate the integrated target.",
+        );
+    } else {
+        bootstrap.push_str(
+            "\nYour role lacks workspace:integrate. If a result needs integration, request it from the user or an authorized coordinator.",
+        );
+    }
+    if allowed("task", "close") {
+        bootstrap.push_str(
+            "\nAfter the acceptance conditions pass, use `\"$COTERIE_BIN\" task close <task_id> --summary <validation_evidence>` to record validated closure.",
+        );
+    } else {
+        bootstrap.push_str(
+            "\nYour role lacks task:close. Report validation evidence to the user or an authorized coordinator for accepted closure.",
+        );
+    }
+    bootstrap.push_str(
+        "\nReport blockers requiring user action. Do not silently end your turn while delegated work still needs coordination. Durable messages and progress waits do not resume an idle foreground provider or start a new turn after yours ends. Automatic wake-up requires separate, capability-probed provider support.",
+    );
+    bootstrap
 }
 
 fn mutation_value<T>(outcome: MutationOutcome<T>) -> T {
