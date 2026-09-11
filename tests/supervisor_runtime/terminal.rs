@@ -114,9 +114,18 @@ if [ "${{COTERIE_FAKE_MODE-}}" = "signals" ]; then"#,
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    wait_until("foreground terminal provider", || ready.exists());
-    let provider_pid: i32 =
-        fs::read_to_string(&ready).unwrap().trim().parse().unwrap();
+    let mut provider_pid = None;
+    wait_until("foreground terminal provider PID", || {
+        // Shell redirection creates the file before printf writes the PID.
+        provider_pid = fs::read_to_string(&ready)
+            .ok()
+            .and_then(|contents| {
+                contents.strip_suffix('\n')?.parse::<i32>().ok()
+            })
+            .filter(|pid| *pid > 0);
+        provider_pid.is_some()
+    });
+    let provider_pid = provider_pid.unwrap();
     if let Some(signal) = signal {
         kill(Pid::from_raw(foreground.id().try_into().unwrap()), signal)
             .unwrap();
