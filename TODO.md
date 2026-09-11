@@ -351,6 +351,25 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
   repeated-recovery assertion. Verify repeated default parallel `task check`
   runs under load; serial execution alone does not satisfy this follow-up.
 
+## Follow-ups from the recovery and bootstrap run
+
+Observed on September 11, 2026, in run
+`cr-01M281JZ2J4XRPCJNXPR0DM0J8`.
+
+- [ ] **Keep coordinating while delegated work remains.** The lead ended its
+  turn after spawning workers and did not read their durable progress and
+  completion messages until the user asked. Add explicit bootstrap guidance
+  for configured coordinating roles: unless the user pauses the work, continue
+  polling `progress --after <cursor> --wait 5`, read `inbox` with its separate
+  cursor, acknowledge handled messages, and carry submitted results through
+  review, integration, validation, and task closure within granted authority.
+  Report blockers that require user action. Document that durable messages and
+  progress waits do not resume an idle foreground provider. Automatic wake-up
+  requires separate, capability-probed provider support. Test injected guidance
+  for custom roles and restricted capabilities, and a fake-provider workflow
+  with multiple completions through validated closure. Keep coordination
+  judgment in agents rather than assigning runtime semantics to role names.
+
 ## M6: Cross-project orchestration
 
 - [x] Attach canonical project roots under unique aliases, enforce global root
