@@ -322,7 +322,7 @@ Observed on September 11, 2026, in run
 `cr-01M27MHPXV53BPGWT9CC6GSV3P`. Specify changes to commands, workspace
 ownership, or recovery transitions in `DESIGN.md` before implementation.
 
-- [ ] **Allow repeated read-only review assignments.** After the first review
+- [x] **Allow repeated read-only review assignments.** After the first review
   finished, another `spawn reviewer` failed with
   `UNIQUE constraint failed: workspaces.run_id, workspaces.path` because both
   assignments used the primary project path. Model repeated use of project
@@ -330,6 +330,15 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
   weakening isolated-worktree ownership. Test sequential reviews in one run,
   configured custom roles, retries, recovery, and concurrent assignments where
   policy permits them; retain exclusive writable workspace guards.
+  Migration 14 preserves per-assignment bindings while allowing shared project
+  directories. Project writers retain ownership until assignment termination
+  and observed process exit; isolated worktree paths remain exclusive. The
+  [binding tests](src/state/tests/workspace_reuse.rs) and
+  [runtime tests](tests/supervisor_runtime/workspace_reuse.rs) cover history,
+  custom roles, concurrent readers, writer exclusion, retries, and recovery in
+  Git and plain directories. Every prior schema upgrades with all three
+  workspace kinds. Default parallel `task check` passes (414 tests, eight
+  opt-in or generation tests skipped).
 - [ ] **Recover work from exited agents before submission.** The progress
   worker exited with uncommitted implementation and review fixes, leaving its
   task `in_progress`. A continuation copied the preserved candidate into a new

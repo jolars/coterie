@@ -105,6 +105,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "idle_shutdown_policy",
         sql: include_str!("state/migrations/0013_idle_shutdown_policy.sql"),
     },
+    Migration {
+        version: 14,
+        name: "workspace_bindings",
+        sql: include_str!("state/migrations/0014_workspace_bindings.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -117,6 +122,10 @@ struct Migration {
 /// A failure to open, migrate, or access durable run state.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
+    #[error(
+        "workspace path is reserved by assignment `{assignment_id}`; inspect it with `coterie progress` and `coterie doctor`; a project writer must finish and have an observed process exit before reuse, and an isolated worktree path cannot be reused"
+    )]
+    WorkspacePathReserved { assignment_id: AssignmentId },
     #[error("event sequence {sequence} has an invalid progress projection")]
     InvalidProgressEvent { sequence: i64 },
     #[error(
@@ -3393,6 +3402,24 @@ impl Repositories<'_, '_> {
         &self,
         workspace: &WorkspaceRecord,
     ) -> Result<(), StoreError> {
+        let reserved = self
+            .transaction
+            .query_row(
+                "SELECT assignment_id FROM workspace_path_ownership \
+             WHERE run_id = ?1 AND path = ?2 \
+               AND (exclusive OR ?3 NOT IN ('project', 'read_only') \
+                    OR (?3 = 'project' AND writer)) LIMIT 1",
+                params![
+                    workspace.run_id,
+                    path_bytes(&workspace.path),
+                    workspace.kind
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(assignment_id) = reserved {
+            return Err(StoreError::WorkspacePathReserved { assignment_id });
+        }
         self.transaction.execute(
             "INSERT INTO workspaces (\
                  assignment_id, run_id, project_id, kind, path, state, base_commit, \
@@ -3913,6 +3940,7 @@ fn decode_session_process_owner(
 
 #[cfg(test)]
 mod tests {
+    mod workspace_reuse;
     use std::cell::Cell;
     use std::collections::BTreeSet;
     use std::ffi::OsString;
@@ -5288,7 +5316,11 @@ mod tests {
 
     #[test]
     fn every_released_schema_upgrades_through_all_forward_migrations() {
-        for prior_count in 1..MIGRATIONS.len() {
+        for (prior_count, workspace_kind) in
+            (1..MIGRATIONS.len()).flat_map(|count| {
+                ["worktree", "project", "read_only"].map(|kind| (count, kind))
+            })
+        {
             let database = TestDatabase::new();
             let connection = Connection::open(&database.0)
                 .expect("the prior database should open");
@@ -5395,9 +5427,9 @@ mod tests {
                 rusqlite::params![ASSIGNMENT_ID, RUN_ID, TASK_ID, AGENT_ID, SESSION_ID],
             ).expect("legacy assignment");
             let workspace_sql = if prior_count >= 8 {
-                "INSERT INTO workspaces (assignment_id, run_id, project_id, kind, path, state, created_at, generation) VALUES (?1, ?2, ?3, 'worktree', ?4, 'observed', 10, 2)"
+                "INSERT INTO workspaces (assignment_id, run_id, project_id, kind, path, state, created_at, generation) VALUES (?1, ?2, ?3, ?5, ?4, 'observed', 10, 2)"
             } else {
-                "INSERT INTO workspaces (assignment_id, run_id, project_id, kind, path, state, created_at) VALUES (?1, ?2, ?3, 'worktree', ?4, 'observed', 10)"
+                "INSERT INTO workspaces (assignment_id, run_id, project_id, kind, path, state, created_at) VALUES (?1, ?2, ?3, ?5, ?4, 'observed', 10)"
             };
             connection
                 .execute(
@@ -5406,7 +5438,8 @@ mod tests {
                         ASSIGNMENT_ID,
                         RUN_ID,
                         PROJECT_ID,
-                        b"/tmp/workspace".as_slice()
+                        b"/tmp/workspace".as_slice(),
+                        workspace_kind
                     ],
                 )
                 .expect("legacy workspace");
@@ -5419,6 +5452,11 @@ mod tests {
                 connection
                     .execute_batch(MIGRATIONS[11].sql)
                     .expect("the prior runtime saved its project root policy");
+            }
+            if prior_count >= 13 {
+                connection
+                    .execute_batch(MIGRATIONS[12].sql)
+                    .expect("the prior runtime saved its idle shutdown policy");
             }
             drop(connection);
 
@@ -5538,6 +5576,27 @@ mod tests {
             let plan: crate::workspace::IntegrationPlan =
                 serde_json::from_str(&plan_json).expect("typed migrated plan");
             assert_eq!(generation, 2);
+            let workspace: (String, Vec<u8>, String, i64) = store.connection.query_row(
+                "SELECT kind, path, state, created_at FROM workspaces WHERE assignment_id = ?1",
+                [ASSIGNMENT_ID], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            ).unwrap();
+            assert_eq!(
+                workspace,
+                (
+                    workspace_kind.into(),
+                    b"/tmp/workspace".to_vec(),
+                    "observed".into(),
+                    10
+                )
+            );
+            assert!(
+                !store
+                    .connection
+                    .prepare("PRAGMA foreign_key_check")
+                    .unwrap()
+                    .exists([])
+                    .unwrap()
+            );
             assert_eq!(plan.generation, generation);
             assert_eq!(plan.run_id.to_string(), RUN_ID);
             for statement in [

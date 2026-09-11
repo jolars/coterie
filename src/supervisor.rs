@@ -4369,6 +4369,20 @@ fn complete_spawn_operation<P: Provider, B: WorkspaceBackend>(
             "the spawn intent belongs to another run or assignment generation",
         ));
     }
+    let observed = store
+        .transaction(|repositories| {
+            Ok(repositories
+                .operation(operation_id)?
+                .is_some_and(|operation| {
+                    operation.reconciliation_state
+                        == Some(ExternalResourceState::Observed)
+                }))
+        })
+        .map_err(rpc_state_failure)?;
+    // A replay must not recreate a historical binding or poll a reaped process.
+    if observed {
+        return Ok(());
+    }
     let primary_project = primary_project.ok_or_else(|| {
         RpcFailure::new(
             RpcFailureCode::Internal,
@@ -5551,6 +5565,7 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         | StoreError::OperationIncomplete { .. }
         | StoreError::RunNotActive { .. }
         | StoreError::StaleAssignment { .. }
+        | StoreError::WorkspacePathReserved { .. }
         | StoreError::ResubmissionConflict { .. }
         | StoreError::WorkspaceResultConflict { .. }
         | StoreError::WorkspaceTargetConflict { .. } => {

@@ -18,6 +18,9 @@ mod finish;
 #[path = "supervisor_runtime/closure_override.rs"]
 mod closure_override;
 
+#[path = "supervisor_runtime/workspace_reuse.rs"]
+mod workspace_reuse;
+
 const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
 const FAKE_CODEX: &str = r#"#!/bin/sh

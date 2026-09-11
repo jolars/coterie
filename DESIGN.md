@@ -1154,6 +1154,29 @@ from the supervisor's or caller's current directory. This rule keeps
 cross-project delegation deterministic even when two repositories have similar
 names or layouts.
 
+Workspace records are immutable bindings to individual assignments, not a
+registry that consumes a project directory permanently. Each `project` or
+`read-only` assignment retains its own record and generation even when earlier
+assignments used the same canonical project directory. Read-only assignments
+may overlap, subject to configured role and run limits, and may inspect a
+project with an assigned writer. They observe the live directory, not a frozen
+snapshot. No role name changes these rules.
+
+At most one background `project` assignment may hold writable ownership of a
+project directory. Admission remains blocked until the previous assignment is
+terminal and every session for its agent has an observed exit. Missing session
+association, unknown process state, a submitted result without process exit,
+and an active or draining assignment do not release that ownership. This guard
+does not make the foreground operator's project directory isolated. Retrying a
+spawn reuses its original assignment and workspace binding, including after
+recovery, without granting new ownership.
+
+An isolated `worktree` path remains reserved to its original assignment for the
+lifetime of its record, regardless of completion or cleanup. No other workspace
+binding may reuse that path. Assignment, project, run, generation, kind, path,
+and base commit remain fenced and immutable; shared project-directory use never
+relabels or deletes historical assignments or relaxes Git ownership checks.
+
 For a Git-backed `--input-from` dependency, Coterie materializes the closed
 task's accepted tree, without repository administrative data, at its recorded
 integration commit beneath the consumer's workspace. It reports the alias, path,
