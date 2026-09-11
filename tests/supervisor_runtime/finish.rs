@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "resubmit.rs"]
+mod resubmit;
+
 const OPERATION: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FB8";
 
 #[test]

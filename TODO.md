@@ -243,7 +243,7 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   and hidden-index guards. The [submission tests](tests/supervisor_runtime/finish.rs)
   cover rejected retries, successful replay, failing commit hooks, and clean
   non-code results. `NEXTEST_TEST_THREADS=1 task check` passes.
-- [ ] **Recover an incorrect submitted result.** The worker subsequently
+- [x] **Recover an incorrect submitted result.** The worker subsequently
   committed `320ea60`, but another `finish` failed because it had no active
   assignment. Integration then refused the mismatch between the worktree tip
   and the recorded result. Provide an authorized, explicit recovery path to
@@ -251,6 +251,12 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   record and commits. Test retries, crashes, concurrent integration, stale
   sessions, and refusal to replace an already integrated result. Error messages
   should name the supported next action.
+  Implemented as `task resubmit` with explicit expected and corrected commits,
+  preserved submission history, and integration-intent fencing. The
+  [recovery tests](tests/supervisor_runtime/resubmit.rs) and
+  [crash matrix](docs/crash-matrix.md) cover retries, authorization, stale
+  sessions, and concurrent integration. `NEXTEST_TEST_THREADS=1 task check`
+  passes (375 tests).
 - [ ] **Record validated work integrated outside Coterie.** The lead
   cherry-picked the reviewed implementation as `66117ed`, but task closure
   remained blocked because no Coterie integration record existed. Expose the

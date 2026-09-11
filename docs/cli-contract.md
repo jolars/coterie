@@ -357,6 +357,44 @@ and target commits remain in the closed result. If a precondition fails, correct
 it and use a new operation ID because the rejected attempt is itself durable.
 The operator or an agent with `task:close` may call this mutation.
 
+### `coterie task resubmit`
+
+```console
+coterie task resubmit --assignment <assignment-id>
+  --expected-result <old-commit> --result <new-commit>
+  --summary <validation-and-work-summary> --reason <explanation>
+  [--operation-id <co-ULID>]
+```
+
+Supersede an incorrect, unintegrated Git submission after validating and
+committing the correction. Requires the operator channel or `task:resubmit`;
+the built-in lead has this capability through `task:*`. Workers without it
+send the assignment ID and both commit IDs to an authorized coordinator.
+
+Both commit arguments require full lowercase commit IDs. `--expected-result`
+must match the current recorded result, and `--result` must be the clean owned
+worktree tip and a descendant of that result. The task remains `submitted`;
+integration, validation, and closure still release its dependencies. Ownership,
+claims, workspace paths, and Git references remain unchanged. The append-only
+`task.resubmitted` event retains the previous result and assignment summary,
+the replacement, the reason, and the original timestamps. Original submission
+operations and events remain available, and ancestry preserves their commits.
+
+An integrated result, a closed task, or any recorded integration intent blocks
+replacement with `conflict` (exit 5). For an uncertain integration, inspect
+`doctor` and retry `workspace integrate` with its original operation ID. Use a
+new task for already integrated work or rewritten history. Dirty worktrees,
+unexpected commit IDs, and stale ownership also fail without recording a
+resubmission. Correct a rejected preflight and retry. A successful operation ID
+replays the exact correction response even after later integration or another
+correction; changing its arguments or actor produces `conflict`. Stale sessions
+cannot replay it. No Git side effect or schema migration is needed.
+
+JSON data contains `assignment_id`, `previous_result`, and the corrected `task`.
+The typed [response schema](../schemas/cli-resubmit-v1.schema.json) and
+[example](../examples/resubmit.json) are checked by the test suite. Regenerate
+them with `cargo test regenerate_resubmit_contract -- --ignored`.
+
 ### `coterie spawn`
 
 ```console
@@ -427,6 +465,11 @@ new commit. Review and non-code assignments may therefore report successful
 validation without making a commit. Project and read-only assignments keep
 their existing submission behavior. `finish --status failed` preserves dirty
 work and remains available when an assignment cannot be completed.
+
+After successful completion there is no active assignment for a new `finish`
+operation. Use `task resubmit` through an authorized coordinator to correct an
+unintegrated submission. Replaying the original successful `finish` retains
+its original submission result after a correction.
 
 ### `coterie send`
 

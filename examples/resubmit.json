@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "operation_id": "co-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "data": {
+    "assignment_id": "ca-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "previous_result": {
+      "result_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "status": "completed",
+      "summary": "Original submission."
+    },
+    "task": {
+      "id": "ct-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "project_id": "cp-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "project": "primary",
+      "title": "Correct the submitted result",
+      "description": "Include the final validated commit.",
+      "status": "submitted",
+      "ready": false,
+      "unresolved_dependencies": [],
+      "result": {
+        "result_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "completed",
+        "summary": "Validated the correction."
+      }
+    }
+  }
+}

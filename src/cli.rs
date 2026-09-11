@@ -5,6 +5,9 @@ pub(crate) mod config;
 #[cfg(test)]
 mod progress_tests;
 
+#[cfg(test)]
+mod resubmit_tests;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
@@ -73,6 +76,8 @@ pub(crate) enum Command {
     /// resolve them and retry, optionally with the same operation ID. Clean
     /// worktrees may finish with no new commit, including review and non-code
     /// assignments. --status failed preserves dirty work and reopens the task.
+    /// To correct an already submitted Git result, ask an authorized coordinator
+    /// to run `coterie task resubmit` with the recorded and corrected commits.
     Finish(FinishArguments),
     /// Send a durable message to another agent.
     Send(SendArguments),
@@ -134,6 +139,12 @@ pub(crate) enum TaskCommand {
     Ready,
     /// Close a submitted task after validation.
     Close(TaskCloseArguments),
+    /// Supersede an unintegrated Git submission while preserving its history.
+    ///
+    /// Requires operator authority or task:resubmit. Validate and commit the
+    /// correction first. Both commits must be full lowercase commit IDs; the
+    /// clean worktree tip must descend from the expected recorded result.
+    Resubmit(TaskResubmitArguments),
 }
 
 /// Common options for idempotent mutations.
@@ -172,6 +183,28 @@ pub(crate) struct TaskCloseArguments {
     /// A concise account of the validation performed.
     #[arg(long)]
     pub(crate) summary: String,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
+}
+
+/// Inputs for `task resubmit`.
+#[derive(Debug, Args)]
+pub(crate) struct TaskResubmitArguments {
+    /// The completed assignment whose submitted result is incorrect.
+    #[arg(long)]
+    pub(crate) assignment: crate::id::AssignmentId,
+    /// The full commit ID currently recorded by the submission.
+    #[arg(long)]
+    pub(crate) expected_result: String,
+    /// The full commit ID of the validated, clean correction.
+    #[arg(long)]
+    pub(crate) result: String,
+    /// A concise account of the corrected work and validation.
+    #[arg(long)]
+    pub(crate) summary: String,
+    /// Why the original submission must be superseded.
+    #[arg(long)]
+    pub(crate) reason: String,
     #[command(flatten)]
     pub(crate) mutation: MutationArguments,
 }

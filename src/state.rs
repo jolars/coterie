@@ -3,6 +3,7 @@
 mod configuration;
 mod diagnostics;
 mod progress;
+pub(crate) mod resubmit;
 pub(crate) mod supervision;
 
 #[cfg(test)]
@@ -185,6 +186,13 @@ pub(crate) enum StoreError {
         assignment_id: AssignmentId,
         recorded: String,
         observed: String,
+    },
+
+    /// A submission cannot be replaced without violating recorded evidence.
+    #[error("cannot resubmit assignment `{assignment_id}`: {reason}")]
+    ResubmissionConflict {
+        assignment_id: AssignmentId,
+        reason: String,
     },
 
     /// Orderly shutdown did not find the expected active run.
@@ -701,6 +709,7 @@ pub(crate) enum EventKind {
     TaskCreated,
     TaskClaimed,
     TaskLifecycleChanged,
+    TaskResubmitted,
     AssignmentCreated,
     AssignmentSessionAssociated,
     AssignmentLifecycleChanged,
@@ -736,6 +745,7 @@ impl EventKind {
             Self::TaskCreated => "task.created",
             Self::TaskClaimed => "task.claimed",
             Self::TaskLifecycleChanged => "task.lifecycle_changed",
+            Self::TaskResubmitted => "task.resubmitted",
             Self::AssignmentCreated => "assignment.created",
             Self::AssignmentSessionAssociated => {
                 "assignment.session_associated"

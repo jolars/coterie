@@ -51,6 +51,19 @@ pub(crate) trait WorkspaceBackend {
         project: &ProjectRecord,
     ) -> Result<Option<String>, WorkspaceBackendError>;
 
+    fn validate_resubmission(
+        &self,
+        workspace: &WorkspaceRecord,
+        _project: &ProjectRecord,
+        _expected: &str,
+        _replacement: &str,
+    ) -> Result<(), WorkspaceBackendError> {
+        Err(WorkspaceBackendError::InvalidResubmission {
+            assignment_id: workspace.assignment_id,
+            reason: "this backend cannot verify descendant commits".to_owned(),
+        })
+    }
+
     fn prepare_integration(
         &self,
         workspace: &WorkspaceRecord,
@@ -248,6 +261,23 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
             })?;
         }
         Ok(result_commit)
+    }
+
+    /// Verifies the correction without changing Git or durable state.
+    pub(crate) fn validate_resubmission(
+        &self,
+        store: &mut Store,
+        scope: AssignmentScope,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<(), WorkspaceError> {
+        let (workspace, project) = workspace_records(store, scope)?;
+        Ok(self.backend.validate_resubmission(
+            &workspace,
+            &project,
+            expected,
+            replacement,
+        )?)
     }
 
     /// Captures a read-only, immutable plan for one guarded integration.
@@ -822,6 +852,54 @@ struct IntegrationInputs {
 }
 
 impl WorkspaceBackend for GitWorkspace {
+    fn validate_resubmission(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<(), WorkspaceBackendError> {
+        let reject =
+            |reason: String| WorkspaceBackendError::InvalidResubmission {
+                assignment_id: workspace.assignment_id,
+                reason,
+            };
+        let observed = self.result_commit(workspace, project).map_err(|error| {
+            let reason = match error {
+                WorkspaceBackendError::UncommittedChanges { path, paths, .. } => format!("worktree {path:?} has uncommitted or unreadable paths: {paths}; inspect the paths, validate and commit the correction, then retry `coterie task resubmit`"),
+                WorkspaceBackendError::UnfinishedGitOperation { path, .. } => format!("worktree {path:?} has an unfinished Git operation; resolve it, validate and commit the correction, then retry `coterie task resubmit`"),
+                error => format!("{error}; inspect the worktree with `coterie doctor`, then retry `coterie task resubmit`"),
+            };
+            reject(reason)
+        })?;
+        if observed.as_deref() != Some(replacement) {
+            return Err(reject("the clean worktree tip must equal --result; inspect and validate the worktree, then retry `coterie task resubmit`".to_owned()));
+        }
+        let repository = self.owned_worktree_repository(workspace, project)?;
+        let old = parse_workspace_commit(
+            workspace,
+            "expected result",
+            Some(expected),
+        )?;
+        let new = parse_workspace_commit(
+            workspace,
+            "replacement result",
+            Some(replacement),
+        )?;
+        let descendant =
+            repository.graph_descendant_of(new, old).map_err(|source| {
+                WorkspaceBackendError::Git {
+                    action: "verify preserved submission ancestry",
+                    path: workspace.path.clone(),
+                    source,
+                }
+            })?;
+        if !descendant {
+            return Err(reject("the replacement must descend from the original result; preserve its commits and create a new task for rewritten history".to_owned()));
+        }
+        Ok(())
+    }
+
     fn base_commit(
         &self,
         kind: &str,
@@ -2071,6 +2149,11 @@ pub(crate) mod fake {
 /// A workspace adapter could not perform an external operation safely.
 #[derive(Debug, Error)]
 pub(crate) enum WorkspaceBackendError {
+    #[error("cannot resubmit workspace `{assignment_id}`: {reason}")]
+    InvalidResubmission {
+        assignment_id: AssignmentId,
+        reason: String,
+    },
     #[error(
         "cannot prove a clean worktree at {path:?}: index entries use assume-unchanged or skip-worktree flags for {paths}; clear these flags, inspect the changes, and retry the operation"
     )]
@@ -2151,7 +2234,7 @@ pub(crate) enum WorkspaceBackendError {
         path: PathBuf,
     },
     #[error(
-        "workspace `{assignment_id}` tip is `{actual}`, expected recorded result `{expected}`"
+        "workspace `{assignment_id}` tip is `{actual}`, expected recorded result `{expected}`; ask an operator or agent with `task:resubmit` to validate the correction and run `coterie task resubmit --assignment {assignment_id} --expected-result {expected} --result {actual} --summary TEXT --reason TEXT` before integration"
     )]
     UnexpectedWorkspaceTip {
         assignment_id: AssignmentId,

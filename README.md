@@ -27,6 +27,11 @@ recoverable work. Run
 `coterie --help` for the generated command reference; see the [CLI
 contract](docs/cli-contract.md) for programmatic output and retry rules.
 
+An authorized coordinator can correct an unintegrated Git submission with
+`coterie task resubmit`, naming both the recorded and corrected commits. Coterie
+preserves the original submission history and refuses replacement once an
+integration intent exists. See the [recovery command](docs/cli-contract.md#coterie-task-resubmit).
+
 Configuration inspection supports `config check`,
 `config show --effective --provenance`, `config schema`, and explicit
 `config lock` creation. These commands resolve layered configuration and verify

@@ -16,7 +16,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 6;
+pub(crate) const PROTOCOL_VERSION: u16 = 7;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -119,6 +119,10 @@ pub(crate) enum RpcRequest {
         dependencies: Vec<TaskId>,
     },
     TaskReady,
+    TaskResubmit {
+        operation_id: OperationId,
+        submission: crate::state::resubmit::Resubmission,
+    },
     TaskClose {
         operation_id: OperationId,
         task_id: TaskId,
@@ -292,6 +296,11 @@ pub(crate) enum RpcResponse {
         assignment_id: AssignmentId,
         task: TaskSummary,
     },
+    TaskResubmitted {
+        operation_id: OperationId,
+        #[serde(flatten)]
+        submission: ResubmissionSummary,
+    },
     MessageSent {
         operation_id: OperationId,
         message_id: MessageId,
@@ -361,7 +370,9 @@ pub(crate) struct ProjectSummary {
 }
 
 /// A task's command-facing representation.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub(crate) struct TaskSummary {
     pub(crate) id: TaskId,
     pub(crate) project_id: ProjectId,
@@ -372,6 +383,16 @@ pub(crate) struct TaskSummary {
     pub(crate) ready: bool,
     pub(crate) unresolved_dependencies: Vec<TaskId>,
     pub(crate) result: Option<serde_json::Value>,
+}
+
+/// The immutable response recorded by a successful submission correction.
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub(crate) struct ResubmissionSummary {
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) previous_result: serde_json::Value,
+    pub(crate) task: TaskSummary,
 }
 
 /// Exact identities recorded by one explicit guarded integration.
@@ -561,7 +582,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 6,
+                    "protocol_version": 7,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -674,7 +695,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 6,
+                    "protocol_version": 7,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

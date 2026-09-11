@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI mutation success response v1",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/ResubmissionSummary"
+    },
+    "operation_id": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation_id",
+    "data"
+  ],
+  "$defs": {
+    "AssignmentId": {
+      "type": "string",
+      "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "ProjectId": {
+      "type": "string",
+      "pattern": "^cp-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "ResubmissionSummary": {
+      "description": "The immutable response recorded by a successful submission correction.",
+      "type": "object",
+      "properties": {
+        "assignment_id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "previous_result": true,
+        "task": {
+          "$ref": "#/$defs/TaskSummary"
+        }
+      },
+      "required": [
+        "assignment_id",
+        "previous_result",
+        "task"
+      ]
+    },
+    "TaskId": {
+      "type": "string",
+      "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskStatus": {
+      "description": "A task's durable lifecycle state.",
+      "type": "string",
+      "enum": [
+        "open",
+        "in_progress",
+        "submitted",
+        "closed",
+        "canceled"
+      ]
+    },
+    "TaskSummary": {
+      "description": "A task's command-facing representation.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "project": {
+          "type": "string"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "result": true,
+        "status": {
+          "$ref": "#/$defs/TaskStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unresolved_dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "project",
+        "title",
+        "description",
+        "status",
+        "ready",
+        "unresolved_dependencies",
+        "result"
+      ]
+    }
+  }
+}

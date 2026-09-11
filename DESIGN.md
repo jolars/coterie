@@ -705,6 +705,30 @@ and resulting target commit. The lead may close work performed directly in a
 target project, or non-code work, after explicit validation. An operator
 override is recorded as such rather than fabricated as integration evidence.
 
+An incorrect unintegrated Git submission can be superseded explicitly with
+`coterie task resubmit --assignment ID --expected-result OLD --result NEW
+--summary TEXT --reason TEXT`. The operator or an agent with `task:resubmit`
+may invoke it. Workers without that capability ask an authorized coordinator.
+The command compares the full recorded commit ID with `OLD` and requires `NEW`
+to be the clean, owned worktree tip and a descendant of `OLD`. Rewritten or
+unrelated histories require preserving the original work and creating a new
+task. No reference, worktree, claim, session, or assignment ownership changes.
+The task stays `submitted`, and dependencies still wait for validated closure.
+
+Resubmission atomically records the previous task result, assignment summary,
+commit identities, replacement result, reason, and actor in an append-only
+`task.resubmitted` event and an idempotent operation result, then replaces only
+the current task result, assignment summary, and workspace result commit.
+Original submission operations and events remain unchanged, and descendant
+ancestry keeps their commits reachable. Exact retries replay the recorded
+response, including after a crash or subsequent integration. New resubmissions
+refuse closed tasks, integrated workspaces, stale ownership, and any existing
+integration intent, including one with an unknown outcome. The supervisor
+serializes resubmission with integration admission; an intent already recorded
+must be reconciled with `doctor` and the original integration operation rather
+than superseded. Git validation is read-only and precedes the database-only
+mutation, whose preconditions are checked again transactionally.
+
 Dependencies wait for `closed`, not merely `submitted`. This gives cross-project
 sequences precise semantics: a bindings task remains blocked until the upstream
 library change has been integrated and validated in the library project. The

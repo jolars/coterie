@@ -6,6 +6,9 @@ use crate::workspace::GitWorkspace;
 use git2::{Repository, Signature};
 use std::os::unix::fs::DirBuilderExt;
 
+#[path = "resubmit_tests.rs"]
+mod resubmit_tests;
+
 const CHILD: &str = "supervisor::crash_tests::crash_child";
 const RUN: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -45,6 +48,11 @@ fn crash_matrix_spawn() {
 #[test]
 fn crash_matrix_finish() {
     matrix("finish");
+}
+
+#[test]
+fn crash_matrix_resubmit() {
+    matrix("resubmit");
 }
 
 #[test]
@@ -181,6 +189,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "task",
         "spawn",
         "finish",
+        "resubmit",
         "integrate",
         "merge",
         "transcript",
@@ -1166,7 +1175,10 @@ impl Fixture {
                 )
                 .unwrap();
         }
-        if matches!(case, "finish" | "integrate" | "merge" | "close") {
+        if matches!(
+            case,
+            "finish" | "integrate" | "merge" | "close" | "resubmit"
+        ) {
             let workspace = self.workspace();
             commit(
                 &workspace.path,
@@ -1179,8 +1191,17 @@ impl Fixture {
                 "another recoverable change\n",
             );
         }
-        if matches!(case, "integrate" | "merge" | "close") {
+        if matches!(case, "integrate" | "merge" | "close" | "resubmit") {
             self.finish();
+        }
+        if case == "resubmit" {
+            let workspace = self.workspace();
+            fs::write(
+                self.root.join("original-result"),
+                workspace.result_commit.unwrap(),
+            )
+            .unwrap();
+            commit(&workspace.path, "correction.txt", "validated correction\n");
         }
         if case == "close" {
             self.integrate();
@@ -1204,6 +1225,7 @@ impl Fixture {
                 self.spawn().unwrap();
             }
             "finish" => self.finish(),
+            "resubmit" => self.resubmit(),
             "integrate" | "merge" => self.integrate(),
             "message" => self.message(),
             "acknowledge" => self.acknowledge(),
@@ -1272,6 +1294,40 @@ impl Fixture {
             &AuthenticatedCaller::Operator,
             "co-01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap(),
             assignment,
+        )
+        .unwrap();
+    }
+
+    fn correction(&mut self) -> crate::state::resubmit::Resubmission {
+        let workspace = self.workspace();
+        crate::state::resubmit::Resubmission {
+            assignment_id: workspace.assignment_id,
+            expected_result: fs::read_to_string(
+                self.root.join("original-result"),
+            )
+            .unwrap(),
+            result_commit: Repository::open(&workspace.path)
+                .unwrap()
+                .head()
+                .unwrap()
+                .target()
+                .unwrap()
+                .to_string(),
+            summary: "Validated the corrected implementation.".to_owned(),
+            reason: "The original submission omitted a correction.".to_owned(),
+        }
+    }
+
+    fn resubmit(&mut self) {
+        let correction = self.correction();
+        resubmit::resubmit_task(
+            &mut self.store,
+            &self.workspaces,
+            RUN.parse().unwrap(),
+            &AuthenticatedCaller::Operator,
+            "co-01ARZ3NDEKTSV4RRFFQ69G5FB5".parse().unwrap(),
+            correction,
+            None,
         )
         .unwrap();
     }
@@ -1371,6 +1427,7 @@ impl Fixture {
             "acknowledge" => self.acknowledge(),
             "close" => self.close(),
             "initialize" | "finish" | "transcript" => {}
+            "resubmit" => self.resubmit(),
             _ => panic!("unknown recovery case: {case}"),
         }
     }
@@ -1492,6 +1549,7 @@ impl Fixture {
                     );
                 }
                 for (kind, expected) in [
+                    ("task.resubmitted", case == "resubmit"),
                     ("message.sent", matches!(case, "message" | "acknowledge")),
                     ("message.acknowledged", case == "acknowledge"),
                     ("run.stopped", case == "shutdown"),
@@ -1524,7 +1582,10 @@ impl Fixture {
                     .count(),
                 1
             );
-            if matches!(case, "finish" | "integrate" | "merge" | "close") {
+            if matches!(
+                case,
+                "finish" | "integrate" | "merge" | "close" | "resubmit"
+            ) {
                 assert_eq!(
                     fs::read_to_string(workspace.path.join("result.txt"))
                         .unwrap(),
@@ -1535,6 +1596,30 @@ impl Fixture {
                         .unwrap(),
                     "another recoverable change\n"
                 );
+            }
+            if case == "resubmit" {
+                let correction = self.correction();
+                assert_eq!(
+                    workspace.result_commit.as_deref(),
+                    Some(correction.result_commit.as_str())
+                );
+                assert_eq!(workspace.target_commit, None);
+                let repository = Repository::open(&workspace.path).unwrap();
+                assert!(
+                    repository
+                        .graph_descendant_of(
+                            correction.result_commit.parse().unwrap(),
+                            correction.expected_result.parse().unwrap()
+                        )
+                        .unwrap()
+                );
+                self.store.transaction(|r| {
+                    let event = r.events_after(run_id, 0, 1000)?.into_iter().find(|event| event.event_type == "task.resubmitted").unwrap();
+                    assert_eq!(event.payload["data"]["previous_result"]["result_commit"], correction.expected_result);
+                    assert_eq!(event.payload["data"]["result"]["result_commit"], correction.result_commit);
+                    assert_eq!(r.task(TASK.parse().unwrap())?.unwrap().status, TaskStatus::Submitted);
+                    Ok(())
+                }).unwrap();
             }
             if case == "transcript" {
                 let session_id = self.scope().session_id;

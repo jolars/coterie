@@ -3,6 +3,7 @@
 mod doctor;
 mod progress;
 mod projects;
+mod resubmit;
 mod session;
 
 #[cfg(test)]
@@ -889,6 +890,26 @@ fn public_request(
                 )
             }
             TaskCommand::Ready => (RpcRequest::TaskReady, None, false),
+            TaskCommand::Resubmit(arguments) => {
+                let operation_id = arguments
+                    .mutation
+                    .operation_id
+                    .unwrap_or_else(OperationId::generate);
+                (
+                    RpcRequest::TaskResubmit {
+                        operation_id,
+                        submission: crate::state::resubmit::Resubmission {
+                            assignment_id: arguments.assignment,
+                            expected_result: arguments.expected_result,
+                            result_commit: arguments.result,
+                            summary: arguments.summary,
+                            reason: arguments.reason,
+                        },
+                    },
+                    Some(operation_id),
+                    false,
+                )
+            }
             TaskCommand::Close(arguments) => {
                 let operation_id = arguments
                     .mutation
@@ -2651,6 +2672,10 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
     .collect::<String>();
     let mut request = request;
     match &mut request {
+        RpcRequest::TaskResubmit { submission, .. } => {
+            submission.summary = crate::redaction::text(&submission.summary);
+            submission.reason = crate::redaction::text(&submission.reason);
+        }
         RpcRequest::TaskCreate {
             title,
             description,
@@ -2762,6 +2787,18 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             Some(&request_fingerprint),
         ),
         RpcRequest::TaskReady => ready_tasks(store, run_id, caller),
+        RpcRequest::TaskResubmit {
+            operation_id,
+            submission,
+        } => resubmit::resubmit_task(
+            store,
+            workspaces,
+            run_id,
+            caller,
+            operation_id,
+            submission,
+            Some(&request_fingerprint),
+        ),
         RpcRequest::TaskClose {
             operation_id,
             task_id,
@@ -4366,7 +4403,7 @@ fn finish_assignment<B: WorkspaceBackend>(
         })
         .map_err(rpc_state_failure)?;
     let assignment = assignment
-        .ok_or_else(|| conflict("the caller has no active assignment"))?;
+        .ok_or_else(|| conflict("the caller has no active assignment; for an incorrect submitted result, ask an operator or agent with `task:resubmit` to run `coterie task resubmit --assignment ID --expected-result OLD --result NEW --summary TEXT --reason TEXT`"))?;
     let AuthenticatedCaller::Agent(scope) = caller else {
         return Err(conflict("the caller has no session"));
     };
@@ -4413,13 +4450,24 @@ fn finish_assignment<B: WorkspaceBackend>(
     {
         assignment_result["result_commit"] = json!(result_commit);
     }
+    if replaying
+        && let Some(recorded) = store
+            .transaction(|repositories| {
+                Ok(repositories.operation(operation_id)?.and_then(
+                    |operation| operation.request.get("result").cloned(),
+                ))
+            })
+            .map_err(rpc_state_failure)?
+    {
+        assignment_result = recorded;
+    }
     let task_transition = TaskTransitionMutation {
         operation_id,
         run_id,
         actor_agent_id: Some(agent_id),
         task_id: assignment.task_id,
         transition,
-        result: Some(assignment_result),
+        result: Some(assignment_result.clone()),
         summary: Some(summary),
         transitioned_at: rpc_timestamp()?,
     };
@@ -4432,10 +4480,16 @@ fn finish_assignment<B: WorkspaceBackend>(
             .map_err(rpc_state_failure)?,
     );
     require_transition(result, assignment.task_id, "finish")?;
+    let mut task = task_by_id(store, run_id, assignment.task_id)?;
+    if replaying && status == FinishStatus::Completed {
+        task.status = TaskStatus::Submitted;
+        task.ready = false;
+        task.result = Some(assignment_result);
+    }
     Ok(RpcResponse::AssignmentFinished {
         operation_id,
         assignment_id: assignment.id,
-        task: task_by_id(store, run_id, assignment.task_id)?,
+        task,
     })
 }
 
@@ -5350,6 +5404,7 @@ fn rpc_workspace_failure(error: WorkspaceError) -> RpcFailure {
     match error {
         WorkspaceError::Backend(
             WorkspaceBackendError::DirtyWorkspace { .. }
+            | WorkspaceBackendError::InvalidResubmission { .. }
             | WorkspaceBackendError::UncommittedChanges { .. }
             | WorkspaceBackendError::UnfinishedGitOperation { .. }
             | WorkspaceBackendError::UnverifiableIndex { .. }
@@ -5378,6 +5433,7 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         | StoreError::OperationIncomplete { .. }
         | StoreError::RunNotActive { .. }
         | StoreError::StaleAssignment { .. }
+        | StoreError::ResubmissionConflict { .. }
         | StoreError::WorkspaceResultConflict { .. }
         | StoreError::WorkspaceTargetConflict { .. } => {
             RpcFailureCode::Conflict
