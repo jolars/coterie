@@ -865,8 +865,12 @@ visibly awaiting integration, review, or lead action.
 Before recording a completed Git worktree result, the workspace backend must
 prove the index and working tree are clean. Staged changes, unstaged changes,
 and non-ignored untracked files reject submission with a conflict diagnostic
-identifying the affected paths. Unfinished Git operations and index flags that
-hide changes also prevent proof of cleanliness. Ignored untracked files do not
+identifying the affected paths. Unreadable paths, unfinished Git operations,
+and index flags that hide changes also prevent proof of cleanliness. Path
+diagnostics escape filenames, bound the displayed list and each path, and
+report omitted paths so large worktrees retain a usable conflict response.
+Hidden-index diagnostics identify the flagged paths and explain clearing the
+flags before inspection and retry. Ignored untracked files do not
 block submission. A rejected attempt records no result or finish operation and
 leaves the task, claim, and assignment active, so the agent can validate its
 work, commit the intended changes successfully, and retry `finish`, including

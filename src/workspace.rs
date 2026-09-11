@@ -1,6 +1,7 @@
 //! Assignment workspace side effects and durable reconciliation.
 
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
@@ -1352,6 +1353,7 @@ fn repository_status(
     options
         .include_untracked(true)
         .recurse_untracked_dirs(true)
+        .include_unreadable(true)
         .include_ignored(false);
     repository.statuses(Some(&mut options)).map_err(|source| {
         WorkspaceBackendError::Git {
@@ -1383,12 +1385,10 @@ fn require_complete_worktree(
                 }
             }
         }
-        paths.sort();
-        paths.dedup();
         return Err(WorkspaceBackendError::UncommittedChanges {
             assignment_id: workspace.assignment_id,
             path: workspace.path.clone(),
-            paths,
+            paths: path_diagnostic(paths),
         });
     }
     if repository.state() != RepositoryState::Clean {
@@ -1412,17 +1412,52 @@ fn require_visible_index(
                 source,
             })?;
     // Status honors these flags, so an empty status cannot prove a clean tree.
-    if index.iter().any(|entry| {
-        entry.flags & git2::IndexEntryFlag::VALID.bits() != 0
-            || entry.flags_extended
-                & git2::IndexEntryExtendedFlag::SKIP_WORKTREE.bits()
-                != 0
-    }) {
+    let paths: Vec<_> = index
+        .iter()
+        .filter(|entry| {
+            entry.flags & git2::IndexEntryFlag::VALID.bits() != 0
+                || entry.flags_extended
+                    & git2::IndexEntryExtendedFlag::SKIP_WORKTREE.bits()
+                    != 0
+        })
+        .map(|entry| PathBuf::from(std::ffi::OsStr::from_bytes(&entry.path)))
+        .collect();
+    if !paths.is_empty() {
         return Err(WorkspaceBackendError::UnverifiableIndex {
             path: repository.path().to_owned(),
+            paths: path_diagnostic(paths),
         });
     }
     Ok(())
+}
+
+fn path_diagnostic(mut paths: Vec<PathBuf>) -> String {
+    // Repository-controlled names must not overflow the bounded RPC response.
+    const MAXIMUM_PATHS: usize = 20;
+    const MAXIMUM_PATH_BYTES: usize = 256;
+    paths.sort();
+    paths.dedup();
+    let mut displayed = Vec::new();
+    for path in paths.iter().take(MAXIMUM_PATHS) {
+        let mut text = format!("{path:?}");
+        if text.len() > MAXIMUM_PATH_BYTES {
+            let mut end = MAXIMUM_PATH_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str("... [path truncated]\"");
+        }
+        displayed.push(text);
+    }
+    let mut diagnostic = displayed.join(", ");
+    if paths.len() > MAXIMUM_PATHS {
+        diagnostic.push_str(&format!(
+            "; {} additional paths omitted",
+            paths.len() - MAXIMUM_PATHS
+        ));
+    }
+    diagnostic
 }
 
 fn require_clean_repository(
@@ -2037,9 +2072,9 @@ pub(crate) mod fake {
 #[derive(Debug, Error)]
 pub(crate) enum WorkspaceBackendError {
     #[error(
-        "cannot prove a clean worktree at {path:?}: index entries use assume-unchanged or skip-worktree flags"
+        "cannot prove a clean worktree at {path:?}: index entries use assume-unchanged or skip-worktree flags for {paths}; clear these flags, inspect the changes, and retry the operation"
     )]
-    UnverifiableIndex { path: PathBuf },
+    UnverifiableIndex { path: PathBuf, paths: String },
     #[cfg(test)]
     #[error("the fake workspace creation failed at an injected boundary")]
     InjectedFailure,
@@ -2096,12 +2131,12 @@ pub(crate) enum WorkspaceBackendError {
         path: PathBuf,
     },
     #[error(
-        "workspace `{assignment_id}` has uncommitted changes at {path:?}: {paths:?}; validate the work, commit the intended changes successfully, then retry `coterie finish --status completed`; the assignment remains active"
+        "workspace `{assignment_id}` has uncommitted or unreadable paths at {path:?}: {paths}; make unreadable paths inspectable, validate the work, commit the intended changes successfully, then retry `coterie finish --status completed`; the assignment remains active"
     )]
     UncommittedChanges {
         assignment_id: AssignmentId,
         path: PathBuf,
-        paths: Vec<PathBuf>,
+        paths: String,
     },
     #[error(
         "workspace `{assignment_id}` has an unfinished Git operation at {path:?}; resolve it, validate and commit the intended changes, then retry `coterie finish --status completed`; the assignment remains active"
@@ -2192,6 +2227,8 @@ pub(crate) enum WorkspaceError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
     use git2::{Repository, Signature};
@@ -2471,6 +2508,68 @@ mod tests {
     }
 
     #[test]
+    fn git_backend_rejects_unreadable_result_directories() {
+        let fixture = GitFixture::new();
+        let (backend, workspace) = fixture.materialized_workspace();
+        let directory = workspace.path.join("pending");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("result.txt"), "unfinished\n").unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o444))
+            .unwrap();
+        let result = backend.result_commit(&workspace, &fixture.project);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let error = result
+            .expect_err("unreadable directories cannot prove cleanliness");
+        assert!(error.to_string().contains("pending"), "{error}");
+    }
+
+    #[test]
+    fn path_diagnostics_bound_and_escape_repository_controlled_names() {
+        let mut paths = vec![
+            PathBuf::from(std::ffi::OsString::from_vec(b"a\n\xff".to_vec())),
+            PathBuf::from(format!("b{}", "\u{20ac}".repeat(2000))),
+        ];
+        paths
+            .extend((0..50).map(|index| PathBuf::from(format!("x{index:02}"))));
+        let message = super::path_diagnostic(paths);
+        assert!(!message.contains('\n'));
+        assert!(message.contains("\\n\\xFF"), "{message}");
+        assert!(message.contains("[path truncated]"), "{message}");
+        assert!(message.contains("32 additional paths omitted"), "{message}");
+        assert!(serde_json::to_vec(&message).unwrap().len() < 16 * 1024);
+    }
+
+    #[test]
+    fn git_backend_bounds_uncommitted_path_diagnostics() {
+        let fixture = GitFixture::new();
+        let (backend, workspace) = fixture.materialized_workspace();
+        for index in 0..5000 {
+            fs::write(
+                workspace
+                    .path
+                    .join(format!("{index:04}-{}", "x".repeat(230))),
+                "unfinished\n",
+            )
+            .unwrap();
+        }
+        let error = backend
+            .result_commit(&workspace, &fixture.project)
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("0000-"),
+            "a diagnostic must still identify affected paths"
+        );
+        assert!(
+            message.len() < 16 * 1024,
+            "{}-byte diagnostic exceeds the response budget",
+            message.len()
+        );
+        assert!(message.contains("additional paths omitted"), "{message}");
+    }
+
+    #[test]
     fn git_backend_accepts_unchanged_results_and_ignored_untracked_files() {
         let fixture = GitFixture::new();
         let (backend, workspace) = fixture.materialized_workspace();
@@ -2511,10 +2610,17 @@ mod tests {
             index.write().unwrap();
             fs::write(workspace.path.join("README.md"), "hidden edits\n")
                 .unwrap();
+            let error = backend
+                .result_commit(&workspace, &fixture.project)
+                .unwrap_err();
             assert!(matches!(
-                backend.result_commit(&workspace, &fixture.project),
-                Err(WorkspaceBackendError::UnverifiableIndex { .. })
+                error,
+                WorkspaceBackendError::UnverifiableIndex { .. }
             ));
+            let message = error.to_string();
+            for expected in ["README.md", "clear", "retry"] {
+                assert!(message.contains(expected), "{message}");
+            }
         }
         let fixture = GitFixture::new();
         let (backend, workspace) = fixture.materialized_workspace();

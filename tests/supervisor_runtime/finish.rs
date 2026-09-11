@@ -125,6 +125,57 @@ fn dirty_finish_preserves_active_work_and_retries_after_commit() {
 }
 
 #[test]
+fn unreadable_finish_preserves_active_work() {
+    let fixture = FinishFixture::new("worker", "Preserve unreadable work");
+    let directory = fixture.workspace.join("pending");
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("result.txt"), "unfinished\n").unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o444)).unwrap();
+    let output = run(fixture.finish_command("completed"));
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "conflict");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("pending")
+    );
+    fixture.assert_active();
+    fixture.environment.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn large_dirty_finish_returns_bounded_conflict_and_preserves_active_work() {
+    let fixture =
+        FinishFixture::new("worker", "Report a large unfinished tree");
+    for index in 0..5000 {
+        fs::write(
+            fixture
+                .workspace
+                .join(format!("{index:04}-{}", "x".repeat(230))),
+            "unfinished\n",
+        )
+        .unwrap();
+    }
+    let output = run(fixture.finish_command("completed"));
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.len() < 16 * 1024);
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "conflict");
+    let message = error["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("0000-")
+            && message.contains("additional paths omitted"),
+        "{message}"
+    );
+    fixture.assert_active();
+    fixture.environment.run_json(&["stop", "--json"]);
+}
+
+#[test]
 fn clean_finish_accepts_unchanged_worktrees_reviews_and_non_code_work() {
     for (role, title) in [
         ("worker", "Verify an existing implementation"),

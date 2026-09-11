@@ -335,8 +335,11 @@ For a Git worktree assignment, validate the work, commit any intended changes
 successfully, and then run `finish --status completed`. A failed commit hook
 leaves the changes uncommitted. Staged, unstaged, and non-ignored untracked
 changes reject completion with `conflict` (exit 5) and a diagnostic listing the
-affected paths. An unfinished Git operation or index flags that hide changes
-also prevent submission. Rejection preserves the active task, claim, and
+affected paths. Unreadable paths, an unfinished Git operation, or index flags
+that hide changes also prevent submission. Path diagnostics escape filenames,
+show at most 20 paths, truncate long path displays, and count omitted paths.
+Hidden-index diagnostics name the flagged paths and explain clearing the flags
+before inspection and retry. Rejection preserves the active task, claim, and
 assignment without recording a result or finish operation. Resolve the reported
 changes and retry; the same operation ID remains usable. A successful operation
 retry replays its recorded outcome even if the worktree later changes.
