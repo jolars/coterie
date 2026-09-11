@@ -1757,7 +1757,9 @@ struct Directory(PathBuf);
 
 impl Directory {
     fn new() -> Self {
-        let root = std::env::temp_dir()
+        // Crash snapshots include the runtime socket, whose Linux path limit
+        // cannot accommodate an arbitrarily long TMPDIR such as CI's.
+        let root = Path::new("/tmp")
             .join(format!("coterie-crash-{}", RunId::generate()));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         Self(root)

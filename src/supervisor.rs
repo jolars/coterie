@@ -9080,7 +9080,9 @@ mod tests {
 
     impl TestDirectory {
         fn new() -> Self {
-            let path = std::env::temp_dir()
+            // These fixtures bind Unix sockets, so their paths must stay short
+            // even when the caller supplies a long TMPDIR.
+            let path = std::path::Path::new("/tmp")
                 .join(format!("coterie-supervisor-test-{}", RunId::generate()));
             fs::DirBuilder::new()
                 .mode(0o700)
