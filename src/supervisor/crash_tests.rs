@@ -375,8 +375,9 @@ fn child(root: &Path, case: &str, mode: &str, index: Option<usize>, code: i32) {
             child.kill().unwrap();
             child.wait().unwrap();
             panic!(
-                "{case} {mode} {index:?} timed out: {}",
-                fs::read_to_string(root.join("child.log")).unwrap()
+                "{case} {mode} {index:?} timed out: {}\nFault trace:\n{}",
+                fs::read_to_string(root.join("child.log")).unwrap(),
+                fs::read_to_string(root.join("trace")).unwrap_or_default()
             );
         }
         std::thread::sleep(Duration::from_millis(5));
@@ -956,7 +957,10 @@ fn runtime_child(root: &Path, mode: &str, attach: bool) {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    for _ in 0..200 {
+                    // The parent watchdog bounds startup. A shorter retry
+                    // window can expire under load and leave a live supervisor
+                    // waiting for a shutdown request that will never arrive.
+                    loop {
                         if operator_done
                             .load(std::sync::atomic::Ordering::Relaxed)
                         {
@@ -990,7 +994,6 @@ fn runtime_child(root: &Path, mode: &str, attach: bool) {
                         }
                         sleep(Duration::from_millis(5)).await;
                     }
-                    // A stopped run only needs retirement, so no listener is opened.
                 });
         });
         let result =

@@ -189,7 +189,7 @@ async fn inspect_run(
         report,
         "runtime_permissions",
         &database,
-        crate::private_fs::open(&database, false, false).map(|_| ()),
+        crate::private_fs::inspect(&database).map(|_| ()),
     );
     for suffix in ["-wal", "-shm", "-journal"] {
         let path = root.join(format!("{DATABASE_FILE}{suffix}"));
@@ -198,7 +198,7 @@ async fn inspect_run(
                 report,
                 "runtime_permissions",
                 &path,
-                crate::private_fs::open(&path, false, false).map(|_| ()),
+                crate::private_fs::inspect(&path).map(|_| ()),
             );
         }
     }

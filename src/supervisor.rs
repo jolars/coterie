@@ -1072,10 +1072,24 @@ async fn await_retirement(
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let index = ActiveRunIndex::new(directories);
     let socket_path = checked_socket_path(directories, stopped.run_id)?;
+    let attached = open_configuration_store(directories, stopped.run_id)?
+        .transaction(|repositories| repositories.projects(stopped.run_id))?;
     loop {
-        let indexed_run =
-            index.lookup(&project.identity)?.map(|entry| entry.run_id);
-        if indexed_run != Some(stopped.run_id) && !socket_path.exists() {
+        // Secondary indexes retire before the primary, so the caller's own
+        // index disappearing does not prove that the whole run has retired.
+        let mut indexed = false;
+        for identity in std::iter::once(&project.identity)
+            .chain(attached.iter().map(|project| &project.identity))
+        {
+            if index
+                .lookup(identity)?
+                .is_some_and(|entry| entry.run_id == stopped.run_id)
+            {
+                indexed = true;
+                break;
+            }
+        }
+        if !indexed && !socket_path.exists() {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -8512,6 +8526,102 @@ mod tests {
             SupervisorClient::connect_operator_at(&path, &active).await;
         server.abort();
         assert!(matches!(result, Err(SupervisorError::RpcTimeout { .. })));
+    }
+
+    #[tokio::test]
+    async fn stop_from_an_attached_project_waits_for_primary_retirement() {
+        use crate::project::{
+            ActiveRunIndex, CoterieDirectories, DiscoveredProject,
+            LeaseAttempt, ProjectLease,
+        };
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let fixture = TestDirectory::new();
+        let runtime = TestDirectory(
+            std::path::Path::new("/tmp")
+                .join(format!("ct-retire-{}", RunId::generate())),
+        );
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&runtime.0)
+            .unwrap();
+        let directories =
+            CoterieDirectories::from_base_directories(&runtime.0, &fixture.0)
+                .unwrap();
+        let run_id = RunId::generate();
+        let run = directories.prepare_run(run_id).unwrap();
+        let database = run.state.join("state.sqlite3");
+        drop(crate::private_fs::database(&database, true).unwrap());
+        let mut store = Store::open(&database).unwrap();
+        store
+            .transaction(|repositories| {
+                repositories.insert_test_run(&RunRecord {
+                    id: run_id,
+                    status: "stopped".into(),
+                    created_at: 1,
+                    stopped_at: Some(2),
+                })
+            })
+            .unwrap();
+        let index = ActiveRunIndex::new(&directories);
+        let mut projects = Vec::new();
+        for alias in ["primary", "library"] {
+            let path = fixture.join(alias);
+            fs::create_dir(&path).unwrap();
+            let project = DiscoveredProject::discover(&path).unwrap();
+            let entry = ActiveRunEntry::new(
+                run_id,
+                ProjectId::generate(),
+                project.identity.clone(),
+            );
+            let LeaseAttempt::Acquired(lease) = ProjectLease::try_acquire(
+                &directories,
+                &project.identity,
+                run_id,
+            )
+            .unwrap() else {
+                panic!("fixture lease should be available")
+            };
+            index.publish(&entry, &lease).unwrap();
+            store
+                .transaction(|repositories| {
+                    repositories.insert_project(&ProjectRecord {
+                        id: entry.project_id,
+                        run_id,
+                        alias: alias.into(),
+                        original_path: path,
+                        canonical_path: project.canonical_path.clone(),
+                        identity: project.identity.clone(),
+                        is_primary: alias == "primary",
+                        attached_at: 1,
+                    })
+                })
+                .unwrap();
+            projects.push((project, entry, lease));
+        }
+        drop(store);
+        let (primary, _, primary_lease) = &projects[0];
+        let (secondary, stopped, secondary_lease) = &projects[1];
+        index
+            .retire(&secondary.identity, run_id, secondary_lease)
+            .unwrap();
+
+        let mut retirement = std::pin::pin!(super::await_retirement(
+            &directories,
+            secondary,
+            stopped
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(retirement.as_mut().poll(&mut context), Poll::Pending),
+            "stop must wait while the primary index still belongs to the run"
+        );
+
+        index
+            .retire(&primary.identity, run_id, primary_lease)
+            .unwrap();
+        retirement.await.unwrap();
     }
 
     #[tokio::test]

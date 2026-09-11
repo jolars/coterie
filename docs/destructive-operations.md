@@ -23,6 +23,8 @@ Attached projects use these same guards. Secondary indexes retire before the
 primary index so interrupted shutdown retains its recovery entrypoint. Recovery
 of a stopped run preserves projects already leased and indexed by a newer run.
 The two-project runtime crash matrix covers publication and retirement.
+`stop_from_an_attached_project_waits_for_primary_retirement` verifies that
+stopping from a secondary project waits for the primary index to retire.
 
 Lease files are never unlinked. Removing a locked file would allow another
 supervisor to acquire a different inode at the same pathname. Coterie releases
@@ -103,6 +105,17 @@ or history-purge operation. SQLite manages its own journals under that ownership
 Transcripts append at the end and have no truncation path. Permission changes
 secure owned runtime resources without deleting content. The private-file,
 migration-upgrade, transcript-tail, and crash tests cover these boundaries.
+
+Validation uses Linux `O_PATH` handles for existing database and journal files.
+Closing an ordinary file descriptor can release SQLite's process-wide POSIX
+locks, even when its connection remains open; see SQLite's
+[locking guidance](https://www.sqlite.org/howtocorrupt.html#posix_advisory_locks_canceled_by_a_separate_thread_doing_close_).
+Database creation uses an exclusive create and closes that descriptor before
+opening SQLite. Startup, recovery, and doctor inspection preserve SQLite's
+locks while retaining ownership, permission, type, and link checks. The
+`database_creation_guard_preserves_live_sqlite_locks` and
+`database_validation_preserves_live_sqlite_locks` tests query actual kernel
+locks on SQLite connections, including WAL shared memory and rollback mode.
 
 ## Verification and scope
 

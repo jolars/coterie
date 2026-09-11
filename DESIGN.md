@@ -1143,6 +1143,9 @@ Attachment retirement removes secondary indexes before the primary index, then
 releases all leases. The primary index therefore remains a recovery entrypoint
 after an interrupted retirement. Recovery of a stopped run acquires only the
 projects still indexed to that run and preserves indexes belonging to newer runs.
+Stopping from any attached project waits for the run's socket and all of its
+attached-project index entries to retire. Entries belonging to newer runs do
+not delay completion.
 
 ## Events and observability
 
