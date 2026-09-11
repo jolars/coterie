@@ -43,7 +43,9 @@ if [ "${COTERIE_FAKE_MODE-}" = "contract" ]; then
     if [ "${COTERIE_TASK_ID+x}" = "x" ]; then
       printf 'env:COTERIE_TASK_ID=%s\0' "$COTERIE_TASK_ID"
     fi
-  } > "$COTERIE_FAKE_CAPTURE"
+  } > "$COTERIE_FAKE_CAPTURE.pending"
+  # Readers use the capture pathname as the readiness signal.
+  mv "$COTERIE_FAKE_CAPTURE.pending" "$COTERIE_FAKE_CAPTURE"
   IFS= read -r input
   printf 'stdout:%s\n' "$input"
   printf 'stderr:%s\n' "$input" >&2
