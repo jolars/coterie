@@ -224,6 +224,69 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   [configuration CLI tests](tests/config_cli.rs), alongside the loader and
   provenance golden tests. `task check` passes.
 
+## Follow-ups from the Diplodocus delegation run
+
+Observed on September 11, 2026, in run
+`cr-01M27JEZ698AG5Y4EX1AH230VM`, with two implementation workers and one
+reviewer. These are follow-ups to the M3-M5 workflow. Specify any new commands,
+capabilities, or recovery transitions in `DESIGN.md` before implementation.
+
+- [ ] **Reject incomplete worktree submissions.** A worker called
+  `finish --status completed` with uncommitted changes, so the recorded result
+  was the unchanged base commit `27ae246`. Reject staged, unstaged, and
+  non-ignored untracked changes before recording a completed Git result; keep
+  the assignment active and identify the paths that need attention. Explain
+  the validate, commit, finish sequence in bootstrap guidance and CLI help.
+  Test each dirty state, commit-hook failure, and legitimate clean submissions
+  with no new commit, including review and non-code assignments.
+- [ ] **Recover an incorrect submitted result.** The worker subsequently
+  committed `320ea60`, but another `finish` failed because it had no active
+  assignment. Integration then refused the mismatch between the worktree tip
+  and the recorded result. Provide an authorized, explicit recovery path to
+  reopen or supersede an unintegrated submission while preserving its original
+  record and commits. Test retries, crashes, concurrent integration, stale
+  sessions, and refusal to replace an already integrated result. Error messages
+  should name the supported next action.
+- [ ] **Record validated work integrated outside Coterie.** The lead
+  cherry-picked the reviewed implementation as `66117ed`, but task closure
+  remained blocked because no Coterie integration record existed. Expose the
+  documented operator closure override with the actual result and target
+  commits, validation evidence, and reason. Record it as an override rather
+  than fabricated integration evidence. Test externally cherry-picked work,
+  authorization, retries, and dependency release; preserve the worktree and
+  existing dirty-target and unexpected-tip guards.
+- [ ] **Make worker bootstrap tools available in the actual shell.** Both
+  workers initially failed to find `coterie` and `rg`; their login shells lost
+  the user/devenv tool paths. Investigate the required user-identity and
+  toolchain inputs, provide a reliable bootstrap CLI location, and test the
+  provider's actual login and non-login shell behavior on NixOS. Preserve the
+  explicit environment allowlist and credential redaction. Diagnose bootstrap
+  command or supervisor-socket access failures under the selected permission
+  profile without silently widening permissions.
+- [ ] **Make command guidance reflect capabilities and assignment state.**
+  `prime` omitted `spawn` for an agent allowed to spawn workers and reviewers,
+  yet advertised `finish` without an active assignment. Generate actionable
+  guidance from effective capabilities and current state, including available
+  roles and required identifiers. A denied operator-only `status` request
+  should point agents to an authorized inspection command. Test custom roles,
+  restricted capabilities, and active versus submitted assignments without
+  adding runtime semantics for built-in role names.
+- [ ] **Provide compact progress updates for authorized agents.** The lead
+  repeatedly polled `prime` and `inbox` to discover task submissions and worker
+  exits; `prime` repeated complete task descriptions and results. Full `status`
+  and `events` are operator-only. Add a scoped, bounded inspection or wait
+  interface with resumable cursors for visible tasks, assignments, and peers.
+  Distinguish task submission from provider exit, and report changed state
+  without replaying every task body. Test reconnects, timeouts, multiple
+  completions, and authorization without requiring provider live steering.
+- [ ] **Add concise transcript inspection.** Inspecting recent worker progress
+  required paging through large, JSON-escaped transcripts from byte zero and
+  extracting relevant records locally. Offer bounded tail or structured-event
+  views for an authorized agent/session while retaining the raw transcript
+  and byte-cursor interface. Preserve redaction and explicit incomplete-frame
+  handling. Test UTF-8 boundaries, oversized records, partial final JSONL
+  frames, session selection, and recovery after a reader disconnects.
+
 ## M6: Cross-project orchestration
 
 - [x] Attach canonical project roots under unique aliases, enforce global root
