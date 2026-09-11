@@ -24,7 +24,10 @@ streams, so Coterie prints no wrapper response while the TUI owns the terminal.
 Coterie injects its orchestration bootstrap through Codex's
 `developer_instructions` setting, while leaving normal project instruction
 discovery—including `AGENTS.md`—intact. Configured role instructions are included
-in that provider bootstrap.
+in that provider bootstrap. `COTERIE_BIN` contains the absolute path of the
+launching Coterie binary, and the bootstrap names it and the selected permission
+profile. Use `"$COTERIE_BIN" prime` and the same quoted executable for subsequent
+Coterie commands, even when `coterie` is absent from the shell's PATH.
 
 Startup and recovery use a durable snapshot of the resolved run configuration.
 An incompatible file or operator override produces `invalid_configuration`
@@ -709,8 +712,38 @@ and refuses to launch when a required control cannot be enforced.
 
 The foreground Codex process inherits the operator's terminal and ambient
 environment. Background Codex jobs start from an empty environment and receive
-only `PATH`, `HOME`, `CODEX_HOME`, and `OPENAI_API_KEY` when present, plus their
-`COTERIE_*` identity values. The raw Coterie token exists only in the session
+only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `CODEX_HOME`, `OPENAI_API_KEY`,
+`__ETC_PROFILE_DONE`, and `__NIXOS_SET_ENVIRONMENT_DONE`
+when present, plus their `COTERIE_*` identity values and generated `COTERIE_BIN`.
+Jobs set the documented Codex [`allow_login_shell=false`](https://learn.chatgpt.com/docs/config-file/config-reference)
+option so shell tools retain the inherited toolchain PATH. On NixOS, login
+initialization rebuilds PATH using `USER` to find the per-user profile and can
+discard devenv paths. The two inherited NixOS initialization markers prevent
+even non-login Bash and Fish from reloading that system environment. Missing
+markers are not fabricated. `USER`, `LOGNAME`, and `SHELL` support user-profile and
+shell discovery; they grant no authority. Other toolchain inputs, including
+arbitrary `NIX_*` or `CARGO_*` variables, remain excluded. Enter a development
+environment explicitly from the assigned workspace when its build requires it.
+
+If the bootstrap executable cannot run, report its absolute path and the error
+to the operator. Supervisor socket permission errors return `unavailable`
+(exit 7), identify the failed socket, and direct the operator to inspect the
+selected permission profile and run `coterie doctor` outside the agent sandbox.
+Coterie does not broaden the sandbox or retry with different permissions.
+Neither diagnostic requires printing the session token or full environment.
+
+The shell contract has an ordinary Bash regression and a host-specific NixOS
+check for Bash and Fish. Run the latter from a development shell on NixOS with
+both shells and ripgrep available:
+
+```console
+cargo test nixos_actual_login_and_non_login_shells -- --ignored
+```
+
+This launches local shells with temporary home directories; it does not invoke
+Codex or require model authentication.
+
+The raw Coterie token exists only in the session
 environment; the database stores a verifier. Coterie redacts the known token and passed `OPENAI_API_KEY` from controlled
 transcripts, request text stored in tasks and messages, and diagnostics. Streaming
 redaction retains possible credential prefixes across chunks and conceals an

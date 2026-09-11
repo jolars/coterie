@@ -818,7 +818,34 @@ COTERIE_ROLE
 COTERIE_TASK_ID
 COTERIE_SOCKET
 COTERIE_TOKEN
+COTERIE_BIN
 ```
+
+`COTERIE_BIN` is the absolute executable path of the launching Coterie
+process, supplied by Coterie rather than inherited from the environment.
+Bootstrap instructions include this path and use `"$COTERIE_BIN" prime` so
+orchestration does not depend on shell PATH lookup. They identify the selected
+filesystem, network, and approval policy. An unavailable executable or denied
+supervisor socket must be reported to the operator with that policy and the
+failed path; agents must not bypass the sandbox or change permissions.
+Socket permission errors retain the stable `unavailable` diagnostic and direct
+the operator to inspect the selected profile and run `coterie doctor` outside
+the agent sandbox. Coterie does not retry with broader access.
+
+Background Codex jobs use the documented `allow_login_shell=false` setting.
+Non-login shell tools preserve the inherited toolchain PATH. NixOS shells also
+need the inherited `__ETC_PROFILE_DONE` and `__NIXOS_SET_ENVIRONMENT_DONE`
+initialization markers: without them, even non-login Bash and Fish can reload
+the system environment and discard devenv paths. The adapter preserves these
+two markers when present and never invents them for an uninitialized parent.
+Login startup may still change the environment through user profiles. The worker
+environment includes the operator's `USER`, `LOGNAME`, and `SHELL` when present
+so NixOS can locate the per-user profile and the provider can select the user's
+shell. These values are runtime inputs, not authentication or path authority.
+Toolchains needing other environment inputs must be entered explicitly in the
+assigned workspace using the repository's documented development command.
+The adapter does not inherit arbitrary `NIX_*`, `CARGO_*`, or shell startup
+variables to recreate a development shell.
 
 For a job agent, `COTERIE_PROJECT_ROOT` and the process working directory
 identify the task's target project or isolated worktree. For the lead, they
@@ -1285,8 +1312,9 @@ separately.
 
 Secrets and ambient environment variables are denied by default and passed only
 through compiled defaults or trusted global configuration. The Codex MVP
-allowlist contains `PATH`, `HOME`, `CODEX_HOME`, and `OPENAI_API_KEY`, which
-preserves the project toolchain and Codex authentication without exposing the
+allowlist contains `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `CODEX_HOME`,
+`OPENAI_API_KEY`, `__ETC_PROFILE_DONE`, and `__NIXOS_SET_ENVIRONMENT_DONE`,
+preserving tool discovery and Codex authentication without exposing the
 complete supervisor environment. Coterie redacts exact known credential values
 from storage it controls, stores token verifiers rather than raw tokens, and
 keeps runtime files private to the current user. It does not promise to sanitize

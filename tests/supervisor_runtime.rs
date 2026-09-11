@@ -39,7 +39,7 @@ if [ "${COTERIE_FAKE_MODE-}" = "contract" ]; then
     for argument in "$@"; do
       printf 'arg=%s\0' "$argument"
     done
-    for variable in COTERIE_PROJECT_ROOT COTERIE_PROJECT_ID COTERIE_PRIMARY_PROJECT_ROOT COTERIE_RUN_ID COTERIE_AGENT_ID COTERIE_SESSION_ID COTERIE_ROLE COTERIE_SOCKET COTERIE_TOKEN; do
+    for variable in COTERIE_PROJECT_ROOT COTERIE_PROJECT_ID COTERIE_PRIMARY_PROJECT_ROOT COTERIE_RUN_ID COTERIE_AGENT_ID COTERIE_SESSION_ID COTERIE_ROLE COTERIE_SOCKET COTERIE_TOKEN COTERIE_BIN; do
       eval "value=\${$variable}"
       printf 'env:%s=%s\0' "$variable" "$value"
     done
@@ -97,7 +97,8 @@ if [ "$is_job" = true ]; then
       exit 0
     fi
   done
-  coterie="${0%/*}/coterie"
+  coterie="$COTERIE_BIN"
+  "$coterie" prime --json > /dev/null || exit 19
   "$coterie" inbox --json > /dev/null || exit 20
   "$coterie" inbox ack 1 --json > /dev/null || exit 21
   "$coterie" finish --status completed --summary "Implemented and tested." --json > /dev/null || exit 22
@@ -1415,7 +1416,7 @@ fn foreground_codex_inherits_streams_directory_identity_and_agents_discovery() {
     assert_eq!(arguments[7], fixture.project.to_string_lossy());
     assert_eq!(arguments[8], "--config");
     assert!(arguments[9].starts_with("developer_instructions=\""));
-    assert!(arguments[9].contains("Run `coterie prime`"));
+    assert!(arguments[9].contains("COTERIE_BIN"));
     assert!(arguments[9].contains("AGENTS.md"));
     assert!(arguments[9].contains("validate the work and commit"));
     assert!(arguments[9].contains("coterie finish --status completed"));
@@ -1430,6 +1431,7 @@ fn foreground_codex_inherits_streams_directory_identity_and_agents_discovery() {
         "COTERIE_ROLE",
         "COTERIE_SOCKET",
         "COTERIE_TOKEN",
+        "COTERIE_BIN",
     ] {
         assert!(
             records.iter().any(|record| {

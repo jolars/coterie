@@ -5426,7 +5426,7 @@ fn bootstrap_instruction(
         .and_then(|role| role.instructions.as_deref())
         .unwrap_or_default();
     format!(
-        "You are a {role} agent for Coterie run {run_id}. Run `coterie prime` now for current orchestration context. Follow the repository's AGENTS.md instructions. Before `coterie finish --status completed`, validate the work and commit any intended Git worktree changes successfully. Uncommitted changes keep the assignment active; resolve them and retry finish. A clean assignment may finish with no new commit.\n{instructions}"
+        "You are a {role} agent for Coterie run {run_id}. Run `\"$COTERIE_BIN\" prime` now for current orchestration context. Follow the repository's AGENTS.md instructions. Before `coterie finish --status completed`, validate the work and commit any intended Git worktree changes successfully. Uncommitted changes keep the assignment active; resolve them and retry finish. A clean assignment may finish with no new commit.\n{instructions}"
     )
 }
 
@@ -6468,7 +6468,7 @@ pub(crate) enum SupervisorError {
     Session(#[from] AgentSessionError),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
-    #[error("could not {action} supervisor socket at {path:?}: {source}")]
+    #[error("could not {action} supervisor socket at {path:?}: {source}{}", socket_access_hint(.source))]
     SocketIo {
         action: &'static str,
         path: PathBuf,
@@ -6570,6 +6570,14 @@ pub(crate) enum SupervisorError {
         length: usize,
         maximum: usize,
     },
+}
+
+fn socket_access_hint(source: &io::Error) -> &'static str {
+    if source.kind() == io::ErrorKind::PermissionDenied {
+        "; ask the operator to inspect the selected permission profile and socket access, then run `coterie doctor` outside the agent sandbox; do not bypass the sandbox or change permissions"
+    } else {
+        ""
+    }
 }
 
 impl SupervisorError {
@@ -6768,6 +6776,38 @@ mod tests {
     const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
     const AGENT_ID: &str = "cg-01ARZ3NDEKTSV4RRFFQ69G5FAX";
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+
+    #[test]
+    fn socket_access_errors_explain_operator_recovery_without_widening_policy()
+    {
+        for errno in [nix::libc::EACCES, nix::libc::EPERM] {
+            let error = SupervisorError::SocketIo {
+                action: "connect to",
+                path: PathBuf::from("/run/user/1000/coterie/test.sock"),
+                source: std::io::Error::from_raw_os_error(errno),
+            };
+            let diagnostic = error.diagnostic();
+            assert_eq!(
+                diagnostic,
+                crate::cli::Diagnostic::new(
+                    crate::cli::ErrorCode::Unavailable,
+                    error.to_string()
+                )
+            );
+            let message = error.to_string();
+            assert!(message.contains("selected permission profile"));
+            assert!(message.contains("operator"));
+            assert!(message.contains("coterie doctor"));
+            assert!(message.contains("test.sock"));
+            assert!(message.contains("do not bypass"));
+        }
+        let missing = SupervisorError::SocketIo {
+            action: "connect to",
+            path: PathBuf::from("/missing.sock"),
+            source: std::io::Error::from_raw_os_error(nix::libc::ENOENT),
+        };
+        assert!(!missing.to_string().contains("permission profile"));
+    }
     const TASK_ID: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAZ";
     const TOKEN: &str =
         "cot1_000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";

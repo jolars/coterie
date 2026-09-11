@@ -272,7 +272,7 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   dependency release, and preservation. The external closure crash matrix
   verifies atomic acceptance and replay. `NEXTEST_TEST_THREADS=1 task check`
   passes (376 tests).
-- [ ] **Make worker bootstrap tools available in the actual shell.** Both
+- [x] **Make worker bootstrap tools available in the actual shell.** Both
   workers initially failed to find `coterie` and `rg`; their login shells lost
   the user/devenv tool paths. Investigate the required user-identity and
   toolchain inputs, provide a reliable bootstrap CLI location, and test the
@@ -280,6 +280,13 @@ capabilities, or recovery transitions in `DESIGN.md` before implementation.
   explicit environment allowlist and credential redaction. Diagnose bootstrap
   command or supervisor-socket access failures under the selected permission
   profile without silently widening permissions.
+  Worker launches now preserve the explicit user-identity and NixOS
+  initialization inputs, use non-login shell tools, and inject `COTERIE_BIN`.
+  [Actual Bash and Fish tests](src/providers/shell_tests.rs) pass on NixOS;
+  fake-provider tests exercise bootstrap RPCs through the injected path.
+  Permission errors identify operator inspection without relaxing policy.
+  `NEXTEST_TEST_THREADS=1 task check` passes with live Coterie session variables
+  excluded from the test process environment (368 tests).
 - [ ] **Make command guidance reflect capabilities and assignment state.**
   `prime` omitted `spawn` for an agent allowed to spawn workers and reviewers,
   yet advertised `finish` without an active assignment. Generate actionable

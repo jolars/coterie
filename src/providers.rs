@@ -39,8 +39,21 @@ use crate::id::{ProjectId, TaskId};
 
 const MAXIMUM_CODEX_JSONL_FRAME_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_PENDING_CODEX_FRAMES: usize = 64;
-const CODEX_RUNTIME_ENVIRONMENT_VARIABLES: [&str; 4] =
-    ["PATH", "HOME", "CODEX_HOME", "OPENAI_API_KEY"];
+const CODEX_RUNTIME_ENVIRONMENT_VARIABLES: [&str; 9] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "CODEX_HOME",
+    "OPENAI_API_KEY",
+    "__ETC_PROFILE_DONE",
+    "__NIXOS_SET_ENVIRONMENT_DONE",
+];
+
+#[cfg(test)]
+#[path = "providers/shell_tests.rs"]
+mod shell_tests;
 
 /// A provider feature that Coterie must verify before depending on it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -618,6 +631,10 @@ pub(crate) enum ProviderError {
     #[error("the foreground Codex launch is missing its session environment")]
     MissingInteractiveEnvironment,
     #[error(
+        "could not locate the Coterie bootstrap executable: {0}; restore the Coterie installation before launching an agent"
+    )]
+    BootstrapExecutable(#[source] io::Error),
+    #[error(
         "could not start the foreground Codex process with `{executable}`: {source}"
     )]
     InteractiveLaunch {
@@ -688,6 +705,7 @@ impl ProviderError {
                 | Self::JobExecutableResolution { .. }
                 | Self::InteractiveLaunch { .. }
                 | Self::MissingInteractiveEnvironment
+                | Self::BootstrapExecutable(_)
                 | Self::SignalRegistration(_)
                 | Self::SignalThread(_)
         )
@@ -779,10 +797,9 @@ impl CodexProvider {
             .command
             .split_first()
             .ok_or(ProviderError::EmptyCodexCommand)?;
-        let bootstrap = serde_json::to_string(
-            &specification.bootstrap_instruction,
-        )
-        .expect("a Rust string is always representable as a TOML basic string");
+        let executable =
+            env::current_exe().map_err(ProviderError::BootstrapExecutable)?;
+        let bootstrap = codex_bootstrap(specification, &executable);
         let mut command = Command::new(program);
         command.args(configured_arguments);
         apply_codex_permission_profile(&mut command, specification);
@@ -795,6 +812,7 @@ impl CodexProvider {
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
+            .env("COTERIE_BIN", &executable)
             .env("COTERIE_PROJECT_ROOT", &specification.working_directory)
             .env("COTERIE_PROJECT_ID", environment.project_id.to_string())
             .env(
@@ -823,12 +841,12 @@ impl CodexProvider {
             .command
             .split_first()
             .ok_or(ProviderError::EmptyCodexCommand)?;
-        Ok(Self::job_command_with_program(
+        Self::job_command_with_program(
             program,
             configured_arguments,
             specification,
             environment,
-        ))
+        )
     }
 
     fn job_command_with_program(
@@ -836,11 +854,10 @@ impl CodexProvider {
         configured_arguments: &[OsString],
         specification: &LaunchSpecification,
         environment: &JobEnvironment,
-    ) -> Command {
-        let bootstrap = serde_json::to_string(
-            &specification.bootstrap_instruction,
-        )
-        .expect("a Rust string is always representable as a TOML basic string");
+    ) -> Result<Command, ProviderError> {
+        let executable =
+            env::current_exe().map_err(ProviderError::BootstrapExecutable)?;
+        let bootstrap = codex_bootstrap(specification, &executable);
         let mut command = Command::new(program);
         command.args(configured_arguments);
         apply_codex_permission_profile(&mut command, specification);
@@ -850,6 +867,8 @@ impl CodexProvider {
             .arg(&specification.working_directory)
             .arg("--config")
             .arg(format!("developer_instructions={bootstrap}"))
+            .arg("--config")
+            .arg("allow_login_shell=false")
             .arg("Begin your assigned task.")
             .current_dir(&specification.working_directory)
             .stdin(Stdio::null())
@@ -858,6 +877,7 @@ impl CodexProvider {
             .env_clear();
         apply_codex_runtime_environment(&mut command, env::vars_os());
         command
+            .env("COTERIE_BIN", &executable)
             .env("COTERIE_PROJECT_ROOT", &specification.working_directory)
             .env("COTERIE_PROJECT_ID", environment.project_id.to_string())
             .env(
@@ -874,7 +894,7 @@ impl CodexProvider {
             .env("COTERIE_TASK_ID", environment.task_id.to_string())
             .env("COTERIE_SOCKET", &environment.socket_path)
             .env("COTERIE_TOKEN", environment.token.expose_secret());
-        command
+        Ok(command)
     }
 
     fn resolved_job_program(&self) -> Result<OsString, ProviderError> {
@@ -925,7 +945,7 @@ impl CodexProvider {
             configured_arguments,
             specification,
             environment,
-        );
+        )?;
         let executable = command.get_program().to_string_lossy().into_owned();
         crate::fault::point("process.job.spawn.before");
         let mut child = command.spawn().map_err(|source| {
@@ -1129,6 +1149,20 @@ fn terminate_failed_job_launch(child: &mut Child) {
         let _kill = child.kill();
         let _reap = reap_with_deadline(child, Duration::from_millis(250));
     }
+}
+
+fn codex_bootstrap(
+    specification: &LaunchSpecification,
+    executable: &Path,
+) -> String {
+    let profile = serde_json::to_string(&specification.permission_profile)
+        .expect("permission profiles serialize as JSON");
+    let instruction = format!(
+        "Coterie CLI absolute path: {executable:?}. COTERIE_BIN contains this path; use `\"$COTERIE_BIN\"` for every Coterie command. Run `\"$COTERIE_BIN\" prime` now. Selected permission profile: {profile}. Use non-login shell tools to preserve the inherited toolchain PATH. If the executable is missing or inaccessible, report its path and the error to the operator. If the supervisor socket is denied, report its path and the selected permission profile to the operator; do not bypass the sandbox or change permissions. Never print tokens or the complete environment.\n{}",
+        specification.bootstrap_instruction
+    );
+    serde_json::to_string(&instruction)
+        .expect("a Rust string is always representable as a TOML basic string")
 }
 
 fn apply_codex_runtime_environment(
@@ -2522,7 +2556,9 @@ mod tests {
         );
         assert!(arguments[15].starts_with("developer_instructions=\""));
         assert!(arguments[15].contains("Run `coterie prime`"));
-        assert_eq!(arguments[16], "Begin your assigned task.");
+        assert_eq!(arguments[16], "--config");
+        assert_eq!(arguments[17], "allow_login_shell=false");
+        assert_eq!(arguments[18], "Begin your assigned task.");
 
         let variables = command
             .get_envs()
@@ -3112,6 +3148,51 @@ mod tests {
                 thread::sleep(Duration::from_millis(10));
             }
         }
+    }
+
+    #[test]
+    fn codex_worker_bootstrap_preserves_shell_identity_and_cli_location() {
+        let command = CodexProvider::new(["codex"])
+            .job_command(&specification(), &job_environment())
+            .unwrap();
+        let variables = command.get_envs().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            variables.get(OsStr::new("COTERIE_BIN")),
+            Some(&Some(std::env::current_exe().unwrap().as_os_str()))
+        );
+        let arguments = command.get_args().collect::<Vec<_>>();
+        assert!(arguments.contains(&OsStr::new("allow_login_shell=false")));
+        let bootstrap = arguments
+            .iter()
+            .find_map(|argument| {
+                argument.to_str()?.strip_prefix("developer_instructions=")
+            })
+            .unwrap();
+        let bootstrap: String = serde_json::from_str(bootstrap).unwrap();
+        assert!(bootstrap.contains("Selected permission profile: {\"filesystem\":\"workspace-write\",\"network\":\"deny\",\"approvals\":\"never\"}"));
+        assert!(bootstrap.contains("missing or inaccessible"));
+        assert!(bootstrap.contains("do not bypass the sandbox"));
+        assert!(bootstrap.contains("Never print tokens"));
+
+        let mut filtered = Command::new("unused");
+        filtered.env_clear();
+        super::apply_codex_runtime_environment(
+            &mut filtered,
+            [
+                "USER",
+                "LOGNAME",
+                "SHELL",
+                "BASH_ENV",
+                "NIX_SECRET",
+                "COTERIE_BIN",
+            ]
+            .map(|name| (name.into(), "sentinel".into())),
+        );
+        let names = filtered
+            .get_envs()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["LOGNAME", "SHELL", "USER"]);
     }
 
     struct TestDirectory(PathBuf);
