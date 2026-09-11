@@ -304,7 +304,7 @@ pub(crate) enum LeaseAttempt {
     Held,
 }
 
-/// An exclusive lease retained for as long as its backing file remains open.
+/// An exclusive project lease released when its guard is dropped.
 pub(crate) struct ProjectLease {
     file: File,
     path: PathBuf,
@@ -320,7 +320,7 @@ impl ProjectLease {
     ) -> Result<LeaseAttempt, ProjectError> {
         let key = ProjectKey::for_identity(identity);
         let path = directories.leases.join(format!("{key}.lock"));
-        let mut file =
+        let file =
             crate::private_fs::open(&path, true, true).map_err(|source| {
                 ProjectError::LeaseIo {
                     action: "open",
@@ -344,33 +344,36 @@ impl ProjectLease {
             }
         }
 
-        crate::fault::point("lease.acquire.after");
-        crate::private_fs::same_file(&file, &path).map_err(|source| {
-            ProjectError::LeaseIo {
-                action: "verify locked",
-                path: path.clone(),
-                source,
-            }
-        })?;
-        file.set_len(0)
-            .and_then(|()| file.rewind())
-            .and_then(|()| {
-                writeln!(file, "{run_id}")?;
-                file.sync_data()
-            })
-            .map_err(|source| ProjectError::LeaseIo {
-                action: "record owner in",
-                path: path.clone(),
-                source,
-            })?;
-
-        crate::fault::point("lease.persist.after");
-        Ok(LeaseAttempt::Acquired(Self {
+        let mut lease = Self {
             file,
             path,
             key,
             run_id,
-        }))
+        };
+        crate::fault::point("lease.acquire.after");
+        crate::private_fs::same_file(&lease.file, &lease.path).map_err(
+            |source| ProjectError::LeaseIo {
+                action: "verify locked",
+                path: lease.path.clone(),
+                source,
+            },
+        )?;
+        lease
+            .file
+            .set_len(0)
+            .and_then(|()| lease.file.rewind())
+            .and_then(|()| {
+                writeln!(lease.file, "{run_id}")?;
+                lease.file.sync_data()
+            })
+            .map_err(|source| ProjectError::LeaseIo {
+                action: "record owner in",
+                path: lease.path.clone(),
+                source,
+            })?;
+
+        crate::fault::point("lease.persist.after");
+        Ok(LeaseAttempt::Acquired(lease))
     }
 
     fn verify(
@@ -397,6 +400,14 @@ impl ProjectLease {
             path: self.path.clone(),
             source,
         })
+    }
+}
+
+impl Drop for ProjectLease {
+    fn drop(&mut self) {
+        // A forked child can retain a duplicate until exec, so closing our
+        // descriptor alone may leave the lease locked after this guard drops.
+        let _ = self.file.unlock();
     }
 }
 
@@ -461,15 +472,6 @@ impl ActiveRunIndex {
                 return Ok(None);
             }
             Err(source) => {
-                // Retirement can unlink an already opened inode before its link
-                // count is checked. Confirm absence instead of reporting bad permissions.
-                if source.kind() == io::ErrorKind::PermissionDenied
-                    && fs::symlink_metadata(&path).is_err_and(|error| {
-                        error.kind() == io::ErrorKind::NotFound
-                    })
-                {
-                    return Ok(None);
-                }
                 return Err(ProjectError::IndexIo {
                     action: "open",
                     path,
@@ -1284,7 +1286,26 @@ mod tests {
             LeaseAttempt::Acquired(_)
         ));
 
+        // A duplicate models the descriptor inherited by a concurrent fork
+        // before exec closes it, without relying on process-launch timing.
+        let inherited_file = first_lease
+            .file
+            .try_clone()
+            .expect("the lease descriptor should be duplicated");
         drop(first_lease);
+        let LeaseAttempt::Acquired(replacement) =
+            ProjectLease::try_acquire(&directories, &first, run_id)
+                .expect("a released lease should be acquirable")
+        else {
+            panic!("an inherited descriptor must not retain a released lease");
+        };
+        drop(inherited_file);
+        assert!(matches!(
+            ProjectLease::try_acquire(&directories, &first, RunId::generate())
+                .expect("the replacement lease should remain held"),
+            LeaseAttempt::Held
+        ));
+        drop(replacement);
         assert!(matches!(
             ProjectLease::try_acquire(&directories, &first, run_id)
                 .expect("a released lease should be acquirable"),

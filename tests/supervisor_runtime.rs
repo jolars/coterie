@@ -2676,7 +2676,8 @@ fn stale_index_and_socket_restart_the_same_durable_run() {
 #[test]
 fn indexed_recovery_does_not_recreate_a_missing_database() {
     let fixture = TestEnvironment::new();
-    assert!(run(fixture.connect_command()).status.success());
+    let connected = run(fixture.connect_command());
+    assert!(connected.status.success(), "{connected:?}");
     let index = fixture.only_index_entry();
     let encoded = fs::read(&index).unwrap();
     let entry: Value = serde_json::from_slice(&encoded).unwrap();
@@ -2696,7 +2697,8 @@ fn indexed_recovery_does_not_recreate_a_missing_database() {
     assert!(preserved.exists());
     assert_eq!(fixture.index_entry_count(), 1);
     fs::rename(preserved, database).unwrap();
-    assert!(run(fixture.connect_command()).status.success());
+    let recovered = run(fixture.connect_command());
+    assert!(recovered.status.success(), "{recovered:?}");
     fixture.run_json(&["stop", "--json"]);
 }
 

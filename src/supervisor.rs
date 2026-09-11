@@ -1303,7 +1303,10 @@ async fn connect_or_start_with_overrides(
     });
     let child =
         spawn_supervisor(&candidate, &project.canonical_path, overrides)?;
-    let client = await_startup(project, directories, child, overrides).await?;
+    let client = await_startup(project, directories, child, |candidate| {
+        spawn_supervisor(candidate, &project.canonical_path, overrides)
+    })
+    .await?;
     verify_configuration(directories, client.run_id(), &configuration)?;
     Ok(client)
 }
@@ -1351,12 +1354,13 @@ async fn await_startup(
     project: &DiscoveredProject,
     directories: &CoterieDirectories,
     mut supervisor: SpawnedSupervisor,
-    overrides: &crate::cli::config::Overrides,
+    mut spawn: impl FnMut(
+        &ActiveRunEntry,
+    ) -> Result<SpawnedSupervisor, SupervisorError>,
 ) -> Result<SupervisorClient, SupervisorError> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let index = ActiveRunIndex::new(directories);
     let mut child_status = None;
-    let mut continued_after_retirement = false;
     loop {
         if let Some(entry) = index.lookup(&project.identity)? {
             match SupervisorClient::connect_operator_at(
@@ -1382,23 +1386,6 @@ async fn await_startup(
                 .try_wait()
                 .map_err(SupervisorError::ChildStatus)?;
         }
-        if !continued_after_retirement
-            && child_status.is_some_and(|status| status.success())
-            && index.lookup(&project.identity)?.is_none()
-        {
-            let candidate = ActiveRunEntry::new(
-                RunId::generate(),
-                ProjectId::generate(),
-                project.identity.clone(),
-            );
-            supervisor = spawn_supervisor(
-                &candidate,
-                &project.canonical_path,
-                overrides,
-            )?;
-            child_status = None;
-            continued_after_retirement = true;
-        }
         if Instant::now() >= deadline {
             let child_error = supervisor.error_message();
             reap_child(supervisor.child);
@@ -1407,6 +1394,21 @@ async fn await_startup(
                 child_status,
                 child_error,
             });
+        }
+        if child_status.is_some_and(|status| status.success()) {
+            // Index retirement precedes lease release, so even a replacement
+            // child can lose the lease race and exit successfully. Retry within
+            // the original deadline, preserving any still-indexed run identity.
+            let candidate =
+                index.lookup(&project.identity)?.unwrap_or_else(|| {
+                    ActiveRunEntry::new(
+                        RunId::generate(),
+                        ProjectId::generate(),
+                        project.identity.clone(),
+                    )
+                });
+            supervisor = spawn(&candidate)?;
+            child_status = None;
         }
         sleep(STARTUP_RETRY_INTERVAL).await;
     }
@@ -8509,6 +8511,88 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+    }
+
+    fn exited_startup_child() -> super::SpawnedSupervisor {
+        let mut child =
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--list")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+        assert!(child.wait().unwrap().success());
+        super::SpawnedSupervisor {
+            child,
+            error_output: std::sync::Arc::new(
+                std::sync::Mutex::new(Vec::new()),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_retries_successful_lease_contenders() {
+        use crate::project::{
+            ActiveRunIndex, CoterieDirectories, DiscoveredProject,
+            LeaseAttempt, ProjectLease,
+        };
+
+        for indexed in [true, false] {
+            let fixture = TestDirectory(
+                std::path::Path::new("/tmp")
+                    .join(format!("ct-start-{}", RunId::generate())),
+            );
+            crate::private_fs::directory(&fixture.0).unwrap();
+            let project = DiscoveredProject::discover(&fixture.0).unwrap();
+            let directories = CoterieDirectories::from_base_directories(
+                &fixture.0,
+                fixture.join("state"),
+            )
+            .unwrap();
+            directories.prepare().unwrap();
+            let active = entry(&fixture.0);
+            let LeaseAttempt::Acquired(lease) = ProjectLease::try_acquire(
+                &directories,
+                &project.identity,
+                active.run_id,
+            )
+            .unwrap() else {
+                panic!("the fixture must own its lease");
+            };
+            if indexed {
+                ActiveRunIndex::new(&directories)
+                    .publish(&active, &lease)
+                    .unwrap();
+            }
+
+            // Successful child exits model lease contenders while the old
+            // supervisor still owns its lease, before or after index retirement.
+            let mut attempts = 0;
+            let result = super::await_startup(
+                &project,
+                &directories,
+                exited_startup_child(),
+                |candidate| {
+                    attempts += 1;
+                    assert_eq!(candidate.project_identity, project.identity);
+                    if indexed {
+                        assert_eq!(candidate, &active);
+                    }
+                    if attempts == 3 {
+                        return Err(SupervisorError::CurrentExecutable(
+                            std::io::Error::other("retry observed"),
+                        ));
+                    }
+                    Ok(exited_startup_child())
+                },
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(SupervisorError::CurrentExecutable(_))
+            ));
+            assert_eq!(attempts, 3);
+        }
     }
 
     #[tokio::test]

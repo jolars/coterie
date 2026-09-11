@@ -54,6 +54,8 @@
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
+          # The submission tests execute real Git hooks.
+          nativeCheckInputs = [ pkgs.gitMinimal ];
 
           meta = {
             description = "Project-native orchestration for coding agents";

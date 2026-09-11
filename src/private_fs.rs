@@ -15,6 +15,14 @@ fn validate(
     path: &Path,
     directory: bool,
 ) -> io::Result<()> {
+    // Retirement can unlink a file after open but before metadata inspection.
+    // Classify that pinned inode directly, without racing another path lookup.
+    if !directory && metadata.is_file() && metadata.nlink() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("private file {} has been unlinked", path.display()),
+        ));
+    }
     if metadata.uid() != geteuid().as_raw()
         || (if directory {
             !metadata.is_dir()
@@ -191,6 +199,23 @@ mod tests {
     use nix::fcntl::{FcntlArg, fcntl};
     use nix::libc;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn an_unlinked_private_file_is_missing_instead_of_insecure() {
+        let root = std::env::temp_dir()
+            .join(format!("coterie-unlinked-{}", crate::id::RunId::generate()));
+        directory(&root).unwrap();
+        let path = root.join("index.json");
+        let file = open(&path, true, true).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        // An index reader can pin its inode just before retirement unlinks it.
+        let error = validate(&file.metadata().unwrap(), &path, false)
+            .expect_err("an unlinked inode must not be accepted");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        drop(file);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn assert_sqlite_lock(file: &File) {
         // OFD queries also report POSIX locks owned by this process, so the
