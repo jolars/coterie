@@ -13,6 +13,8 @@ mod session;
 mod bootstrap_tests;
 #[cfg(test)]
 mod crash_tests;
+#[cfg(test)]
+mod test_clock;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -5895,6 +5897,10 @@ fn initialize_store_with_configuration(
 }
 
 fn unix_timestamp_ms() -> Result<i64, SupervisorError> {
+    #[cfg(test)]
+    if let Some(now) = test_clock::now_ms() {
+        return Ok(now);
+    }
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(SupervisorError::SystemClock)?;
@@ -5903,6 +5909,10 @@ fn unix_timestamp_ms() -> Result<i64, SupervisorError> {
 }
 
 fn unix_timestamp() -> Result<i64, SupervisorError> {
+    #[cfg(test)]
+    if let Some(now) = test_clock::now_ms() {
+        return Ok(now / 1000);
+    }
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(SupervisorError::SystemClock)?;

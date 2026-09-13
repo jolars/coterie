@@ -21,6 +21,7 @@ pub(crate) mod injection {
         trace: File,
         remaining: Option<usize>,
         ignore: Option<&'static str>,
+        delay: Option<(&'static str, std::time::Duration)>,
     }
 
     pub(crate) const CRASH_EXIT: i32 = 86;
@@ -39,6 +40,7 @@ pub(crate) mod injection {
                 trace,
                 remaining: boundary,
                 ignore: None,
+                delay: None,
             });
         });
     }
@@ -53,6 +55,15 @@ pub(crate) mod injection {
         });
     }
 
+    pub(crate) fn delay_once(
+        name: &'static str,
+        duration: std::time::Duration,
+    ) {
+        PLAN.with_borrow_mut(|plan| {
+            plan.as_mut().unwrap().delay = Some((name, duration));
+        });
+    }
+
     pub(super) fn point(name: &'static str) {
         PLAN.with_borrow_mut(|plan| {
             let Some(plan) = plan else { return };
@@ -61,6 +72,12 @@ pub(crate) mod injection {
             }
             writeln!(plan.trace, "{name}").unwrap();
             plan.trace.sync_data().unwrap();
+            if let Some((delayed, duration)) = plan.delay
+                && delayed == name
+            {
+                plan.delay = None;
+                std::thread::sleep(duration);
+            }
             if let Some(remaining) = &mut plan.remaining {
                 if *remaining == 0 {
                     // Exit without unwinding: SQLite, Git, process handles, and

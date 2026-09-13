@@ -62,12 +62,41 @@ cargo test --bin coterie crash_matrix -- --nocapture
 Run repeated cases concurrently, without retrying failures:
 
 ```console
-cargo nextest run --workspace --all-features -E 'test(crash_matrix)' --test-threads 4 --stress-count 3 --retries 0
+cargo nextest run --workspace --all-features -E 'test(supervisor::crash_tests)' --stress-count 3 --retries 0
 ```
 
 `task check` remains the complete handoff gate. Existing migration-upgrade,
 provider-conformance, restart, private-file, and cleanup-safety tests complement
 the injected crash cases.
+
+Crash subprocesses freeze the supervisor's wall clock at a fixed epoch. This
+keeps fsync latency and descheduling from advancing shutdown control phases
+between fault points. A regression forces a delay longer than the interrupt
+grace after intent commits and requires the same complete trace. The override
+is scoped to the test thread, and production deadlines remain unchanged.
+
+Runtime publication and retirement use a paused Tokio clock and a separate
+blocking operator task. The task prevents automatic clock advancement while
+real socket I/O is pending and keeps operator filesystem reads outside the
+supervisor's fault schedule. The typed handshake establishes readiness.
+Operator errors fail the child immediately, operator success still waits for
+retirement, and server completion cancels and joins pending operator work.
+Fixture RPCs use the existing 20-second subprocess watchdog instead of shorter
+nested RPC deadlines. Regressions cover these orderings and clock behavior;
+ordinary runtime tests continue to exercise production RPC deadlines.
+
+On September 13, 2026, acceptance on NixOS with 24 logical CPUs passed three
+default-parallel stress iterations of all 53 crash and clock tests, with no
+retries. Two consecutive default-parallel `task check` runs then passed every
+gate, each with 436 tests passed and nine opt-in or generation tests skipped.
+The full checks took 35.0 and 23.5 seconds. Each command ran alongside four
+Python processes continuously hashing a 256 KiB buffer with SHA-256, capped at
+900 seconds and terminated and joined when the command finished. The toolchain
+PATH was preserved, inherited `COTERIE_*` identity variables were cleared, and
+`NEXTEST_TEST_THREADS` was unset. Neither serialization nor retries contributed
+to acceptance. The runtime, attached-runtime, and runtime-recovery matrices
+retained 95, 120, and 54 boundary occurrences, respectively; retirement and
+continuation retained three and 39.
 
 The external closure matrix crashes every database boundary in the operator
 acceptance path. Repeated recovery preserves the original result and worktree,

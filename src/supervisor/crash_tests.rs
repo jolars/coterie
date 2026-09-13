@@ -17,6 +17,7 @@ const RUN: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
 const TASK: &str = "ct-01ARZ3NDEKTSV4RRFFQ69G5FAX";
 const OPERATION: &str = "co-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+const FIXTURE_TIME_MS: i64 = 1_700_000_000_000;
 
 #[test]
 fn crash_matrix_attached_run_publication_and_retirement() {
@@ -89,6 +90,36 @@ fn crash_matrix_shutdown() {
 }
 
 #[test]
+fn shutdown_trace_does_not_depend_on_wall_clock_delays() {
+    let _clock = test_clock::FrozenClock::new(FIXTURE_TIME_MS);
+    let traces = [false, true].map(|delayed| {
+        let directory = Directory::new();
+        prepare_project(&directory.0);
+        let mut fixture = Fixture::open(directory.0.clone());
+        fixture.prepare("shutdown");
+        let policy = fixture
+            .store
+            .configuration(RUN.parse().unwrap())
+            .unwrap()
+            .supervision;
+        let trace = directory.0.join("trace");
+        injection::arm(&trace, None);
+        if delayed {
+            // Force descheduling between durable intent and control delivery,
+            // beyond the real interrupt deadline, without relying on host load.
+            injection::delay_once(
+                "db.transaction.committed",
+                Duration::from_millis(policy.interrupt_grace_ms as u64 + 50),
+            );
+        }
+        fixture.shutdown();
+        injection::disarm();
+        fs::read_to_string(trace).unwrap()
+    });
+    assert_eq!(traces[0], traces[1]);
+}
+
+#[test]
 fn crash_matrix_idle_shutdown() {
     matrix("idle-shutdown");
 }
@@ -116,6 +147,17 @@ fn crash_matrix_external_closure() {
 #[test]
 fn crash_matrix_runtime_publication_and_retirement() {
     matrix("runtime");
+}
+
+#[test]
+fn runtime_operator_failure_does_not_strand_supervisor() {
+    let fixture = Directory::new();
+    child(&fixture.0, "runtime-operator-error", "exercise", None, 101);
+    assert!(
+        fs::read_to_string(fixture.0.join("child.log"))
+            .unwrap()
+            .contains("operator failed")
+    );
 }
 
 #[test]
@@ -430,6 +472,7 @@ fn crash_child() {
     let Some(root) = std::env::var_os("COTERIE_CRASH_TEST_ROOT") else {
         return;
     };
+    let _clock = test_clock::FrozenClock::new(FIXTURE_TIME_MS);
     let root = PathBuf::from(root);
     let case = std::env::var("COTERIE_CRASH_TEST_CASE").unwrap();
     let mode = std::env::var("COTERIE_CRASH_TEST_MODE").unwrap();
@@ -454,8 +497,8 @@ fn crash_child() {
         attachment_child(&root, &mode);
         return;
     }
-    if case == "runtime" || case == "runtime-attachment" {
-        runtime_child(&root, &mode, case == "runtime-attachment");
+    if case.starts_with("runtime") {
+        runtime_child(&root, &mode, &case);
         return;
     }
     if mode.starts_with("recover") {
@@ -952,10 +995,117 @@ fn attachment_child(root: &Path, mode: &str) {
         && project.identity == entry.project_identity));
 }
 
-fn runtime_child(root: &Path, mode: &str, attach: bool) {
+async fn coordinate_runtime(
+    server: impl std::future::Future<Output = Result<(), SupervisorError>>,
+    operator: impl std::future::Future<Output = Result<(), SupervisorError>>
+    + Send
+    + 'static,
+) -> Result<(), SupervisorError> {
+    let (cancel, canceled) = oneshot::channel();
+    // Blocking work inhibits Tokio's automatic clock advancement while the
+    // separate operator thread keeps its filesystem reads off the fault plan.
+    let mut operator = tokio::task::spawn_blocking(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = canceled => Ok(()),
+                    result = operator => result,
+                }
+            })
+    });
+    tokio::pin!(server);
+    let mut operator_finished = false;
+    let result = tokio::select! {
+        biased;
+        result = &mut server => result,
+        result = &mut operator => {
+            operator_finished = true;
+            result.expect("operator panicked").expect("operator failed");
+            server.await
+        }
+    };
+    // Recovery can retire an already stopped run before the operator connects.
+    // Cancel in-flight RPCs as well as startup retries, then join the thread.
+    let _disconnected = cancel.send(());
+    if !operator_finished {
+        operator
+            .await
+            .expect("operator panicked")
+            .expect("operator failed");
+    }
+    result
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_retirement_cancels_a_waiting_operator() {
+    let (started, ready) = oneshot::channel();
+    let result = coordinate_runtime(
+        async {
+            ready.await.unwrap();
+            Err(SupervisorError::InvalidProof)
+        },
+        async move {
+            started.send(()).unwrap();
+            std::future::pending().await
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(SupervisorError::InvalidProof)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_clock_waits_for_operator_io() {
+    let (sent, received) = oneshot::channel();
+    let (release, released) = oneshot::channel();
+    let start = Instant::now();
+    coordinate_runtime(
+        async {
+            tokio::time::timeout(Duration::from_millis(1), received)
+                .await
+                .expect("operator I/O must not advance the supervisor clock")
+                .unwrap();
+            assert_eq!(Instant::now(), start);
+            release.send(()).unwrap();
+            Ok(())
+        },
+        async move {
+            std::thread::sleep(Duration::from_millis(20));
+            sent.send(()).unwrap();
+            let _retired = released.await;
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn runtime_operator_completion_still_waits_for_retirement() {
+    let (sent, received) = oneshot::channel();
+    let result = coordinate_runtime(
+        async {
+            received.await.unwrap();
+            tokio::task::yield_now().await;
+            Err(SupervisorError::InvalidProof)
+        },
+        async move {
+            sent.send(()).unwrap();
+            Ok(())
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(SupervisorError::InvalidProof)));
+}
+
+fn runtime_child(root: &Path, mode: &str, case: &str) {
+    let attach = case != "runtime";
     if mode == "exercise" {
         prepare_project(root);
-        if attach {
+        if case == "runtime-attachment" {
             Repository::init(root.join("library")).unwrap();
         }
     }
@@ -976,67 +1126,50 @@ fn runtime_child(root: &Path, mode: &str, attach: bool) {
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
+        .start_paused(true)
         .build()
         .unwrap();
-    let result = runtime.block_on(async {
-        let socket = directories.socket_path(active.run_id);
-        let operator_entry = active.clone();
-        let library = root.join("library");
-        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let operator_done = Arc::clone(&done);
-        // The operator performs its RPC on another thread so its filesystem
-        // reads cannot consume the supervisor's fault schedule.
-        let operator = std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(async {
-                    // The parent watchdog bounds startup. A shorter retry
-                    // window can expire under load and leave a live supervisor
-                    // waiting for a shutdown request that will never arrive.
-                    loop {
-                        if operator_done
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                        {
-                            return;
-                        }
-                        if let Ok(mut client) =
-                            SupervisorClient::connect_operator_at(
-                                &socket,
-                                &operator_entry,
-                            )
-                            .await
-                        {
-                            if attach {
-                                client
-                                    .request(RpcRequest::ProjectAttach {
-                                        operation_id:
-                                            "co-01ARZ3NDEKTSV4RRFFQ69G5FAZ"
-                                                .parse()
-                                                .unwrap(),
-                                        path: library.clone(),
-                                        alias: Some("library".into()),
-                                    })
-                                    .await
-                                    .unwrap();
-                            }
-                            client
-                                .shutdown(OPERATION.parse().unwrap())
-                                .await
-                                .unwrap();
-                            return;
-                        }
-                        sleep(Duration::from_millis(5)).await;
-                    }
-                });
-        });
-        let result =
-            serve(active.clone(), project.clone(), directories.clone()).await;
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
-        operator.join().unwrap();
-        result
-    });
+    let socket = directories.socket_path(active.run_id);
+    let operator_entry = active.clone();
+    let library = root.join("library");
+    let operator = async move {
+        // The typed handshake establishes readiness. The parent watchdog bounds
+        // the whole scenario, including retries and RPCs, under host load.
+        let mut client = loop {
+            if let Ok(client) = SupervisorClient::connect_with_unbounded(
+                &socket,
+                &operator_entry,
+                ConnectionChannel::Operator,
+                RequestAuthentication::Operator,
+            )
+            .await
+            {
+                break client;
+            }
+            sleep(Duration::from_millis(5)).await;
+        };
+        if attach {
+            client
+                .request_unbounded(RpcRequest::ProjectAttach {
+                    operation_id: "co-01ARZ3NDEKTSV4RRFFQ69G5FAZ"
+                        .parse()
+                        .unwrap(),
+                    path: library,
+                    alias: Some("library".into()),
+                })
+                .await?;
+        }
+        client
+            .request_unbounded(RpcRequest::Shutdown {
+                operation_id: OPERATION.parse().unwrap(),
+            })
+            .await?;
+        Ok(())
+    };
+    let result = runtime.block_on(coordinate_runtime(
+        serve(active.clone(), project.clone(), directories.clone()),
+        operator,
+    ));
     injection::disarm();
     if let Err(SupervisorError::SocketIo {
         action: "validate stale",

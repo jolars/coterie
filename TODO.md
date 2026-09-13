@@ -360,7 +360,7 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
   preserve retired sources and continuation ownership before and after restart.
   Combined with workspace reuse, default parallel `task check` passes (430
   tests, nine opt-in or generation tests skipped).
-- [ ] **Make crash-matrix tests reliable under parallel execution.** Parallel
+- [x] **Make crash-matrix tests reliable under parallel execution.** Parallel
   validation produced a shutdown trace mismatch and timeouts in the runtime
   and attached-run publication/retirement matrices. Those cases passed
   serially, and the final gate required `NEXTEST_TEST_THREADS=1`. Investigate
@@ -369,6 +369,14 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
   explicit synchronization where needed. Retain every crash boundary and
   repeated-recovery assertion. Verify repeated default parallel `task check`
   runs under load; serial execution alone does not satisfy this follow-up.
+  Deterministic regressions reproduce an interrupt-grace trace race and an
+  operator failure that stranded the runtime harness. Scoped test clocks and
+  joined, cancelable operator work remove those scheduling dependencies while
+  retaining every boundary, exact trace prefix, and repeated-recovery snapshot.
+  Three default-parallel stress iterations passed all 53 focused tests. Two
+  consecutive default-parallel `task check` runs passed all gates (436 tests,
+  nine skipped), each under four bounded CPU-load workers. See the
+  [crash-matrix acceptance evidence](docs/crash-matrix.md).
 
 ## Follow-ups from the recovery and bootstrap run
 
