@@ -378,6 +378,25 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
   nine skipped), each under four bounded CPU-load workers. See the
   [crash-matrix acceptance evidence](docs/crash-matrix.md).
 
+## Follow-up from the replacement-submission handoff
+
+Observed on September 13, 2026, in run
+`cr-01M1YT3CZ41GB0HGYFXY9HXENB`.
+
+- [ ] **Clarify replacement-submission and closure guidance.** Integration
+  rejected the recovery submission's merge history. A validated linear
+  replacement was integrated through a new assignment, but the original task
+  remained `submitted`. Explain the linear-history requirement in diagnostics
+  and name the supported next action. Distinguish descendant corrections via
+  `task resubmit` from rewritten results requiring a new task, and guide an
+  authorized operator through `task close --override` after validating the
+  replacement. Account for command and capability availability in an older
+  running supervisor. Preserve original submissions, workspaces, and history;
+  do not infer acceptance from matching trees or fabricate integration evidence.
+  Test merged histories, validated replacements with different commit IDs,
+  restricted callers, unavailable commands, and dependency release only after
+  explicit accepted closure.
+
 ## Follow-ups from the recovery and bootstrap run
 
 Observed on September 11, 2026, in run
