@@ -8,6 +8,9 @@ mod progress_tests;
 #[cfg(test)]
 mod resubmit_tests;
 
+#[cfg(test)]
+mod recovery_tests;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
@@ -145,6 +148,25 @@ pub(crate) enum TaskCommand {
     /// correction first. Both commits must be full lowercase commit IDs; the
     /// clean worktree tip must descend from the expected recorded result.
     Resubmit(TaskResubmitArguments),
+    /// Retire an exited agent's unfinished Git assignment and reopen its task.
+    ///
+    /// Requires operator authority or task:recover and a verified process exit.
+    /// Preserves the source worktree, edits, commits, and history. Spawn a
+    /// worktree role for the reopened task, inspect its recovery context with
+    /// prime, and port useful changes into the fresh continuation worktree.
+    Recover(TaskRecoverArguments),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct TaskRecoverArguments {
+    /// The exact active assignment whose provider exited before submission.
+    #[arg(long)]
+    pub(crate) assignment: crate::id::AssignmentId,
+    /// Why this interrupted assignment needs a continuation.
+    #[arg(long)]
+    pub(crate) reason: String,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
 }
 
 /// Common options for idempotent mutations.

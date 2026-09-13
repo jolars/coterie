@@ -3,6 +3,7 @@
 mod configuration;
 mod diagnostics;
 mod progress;
+mod recovery;
 pub(crate) mod resubmit;
 pub(crate) mod supervision;
 
@@ -122,6 +123,12 @@ struct Migration {
 /// A failure to open, migrate, or access durable run state.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
+    #[error("cannot recover assignment `{assignment_id}`: {reason}")]
+    RecoveryConflict {
+        assignment_id: AssignmentId,
+        reason: String,
+    },
+
     #[error(
         "workspace path is reserved by assignment `{assignment_id}`; inspect it with `coterie progress` and `coterie doctor`; a project writer must finish and have an observed process exit before reuse, and an isolated worktree path cannot be reused"
     )]
@@ -741,6 +748,8 @@ pub(crate) enum EventKind {
     TaskClaimed,
     TaskLifecycleChanged,
     TaskResubmitted,
+    TaskRecovered,
+    AssignmentContinued,
     AssignmentCreated,
     AssignmentSessionAssociated,
     AssignmentLifecycleChanged,
@@ -777,6 +786,8 @@ impl EventKind {
             Self::TaskClaimed => "task.claimed",
             Self::TaskLifecycleChanged => "task.lifecycle_changed",
             Self::TaskResubmitted => "task.resubmitted",
+            Self::TaskRecovered => "task.recovered",
+            Self::AssignmentContinued => "assignment.continued",
             Self::AssignmentCreated => "assignment.created",
             Self::AssignmentSessionAssociated => {
                 "assignment.session_associated"
@@ -1732,7 +1743,9 @@ impl Repositories<'_, '_> {
              JOIN agents AS agent ON agent.id = session.agent_id AND agent.run_id = session.run_id \
              JOIN runs AS run ON run.id = session.run_id \
              WHERE session.id = ?1 AND session.run_id = ?2 AND session.agent_id = ?3 \
-               AND session.generation = ?4 AND agent.generation = ?4 AND run.status = 'active')",
+               AND session.generation = ?4 AND agent.generation = ?4 AND run.status = 'active' \
+               AND NOT EXISTS (SELECT 1 FROM events WHERE run_id = ?2 AND event_type = 'task.recovered' \
+                   AND json_extract(payload_json, '$.data.session_id') = ?1))",
             params![scope.session_id, scope.run_id, scope.agent_id, scope.generation],
             |row| row.get(0),
         )?)
@@ -2921,6 +2934,7 @@ impl Repositories<'_, '_> {
             summary: format!("Created assignment {assignment_id}."),
             created_at: claim.claimed_at,
         })?;
+        self.link_continuation(claim)?;
         Ok(())
     }
 
@@ -3514,7 +3528,9 @@ impl Repositories<'_, '_> {
                AND agent.generation = ?3 AND run.status = 'active' \
                AND (assignment.session_id IS NULL OR EXISTS (SELECT 1 FROM sessions \
                     WHERE sessions.id = assignment.session_id AND sessions.run_id = assignment.run_id \
-                      AND sessions.agent_id = assignment.agent_id AND sessions.generation = assignment.generation)))",
+                      AND sessions.agent_id = assignment.agent_id AND sessions.generation = assignment.generation)) \
+               AND NOT EXISTS (SELECT 1 FROM events WHERE run_id = ?2 AND event_type = 'task.recovered' \
+                    AND json_extract(payload_json, '$.data.assignment_id') = ?1))",
             params![scope.assignment_id, scope.run_id, scope.generation],
             |row| row.get(0),
         )?)

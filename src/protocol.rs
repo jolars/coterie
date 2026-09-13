@@ -16,7 +16,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 7;
+pub(crate) const PROTOCOL_VERSION: u16 = 8;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -119,6 +119,11 @@ pub(crate) enum RpcRequest {
         dependencies: Vec<TaskId>,
     },
     TaskReady,
+    TaskRecover {
+        operation_id: OperationId,
+        assignment_id: AssignmentId,
+        reason: String,
+    },
     TaskResubmit {
         operation_id: OperationId,
         submission: crate::state::resubmit::Resubmission,
@@ -268,6 +273,7 @@ pub(crate) enum RpcResponse {
         tasks: Vec<TaskSummary>,
         ready_tasks: Vec<TaskSummary>,
         active_task: Option<Box<TaskSummary>>,
+        recoveries: Vec<RecoverySummary>,
         commands: Vec<String>,
     },
     Progress {
@@ -312,6 +318,11 @@ pub(crate) enum RpcResponse {
         operation_id: OperationId,
         #[serde(flatten)]
         submission: ResubmissionSummary,
+    },
+    TaskRecovered {
+        operation_id: OperationId,
+        #[serde(flatten)]
+        recovery: RecoverySummary,
     },
     MessageSent {
         operation_id: OperationId,
@@ -405,6 +416,24 @@ pub(crate) struct ResubmissionSummary {
     pub(crate) assignment_id: AssignmentId,
     pub(crate) previous_result: serde_json::Value,
     pub(crate) task: TaskSummary,
+}
+
+/// Preserved source context and the explicit link to a later assignment.
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub(crate) struct RecoverySummary {
+    pub(crate) task_id: TaskId,
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) session_id: SessionId,
+    pub(crate) project_id: ProjectId,
+    pub(crate) generation: i64,
+    pub(crate) workspace_path: String,
+    /// Exact native path bytes, including paths that are not UTF-8.
+    pub(crate) workspace_path_bytes: Vec<u8>,
+    pub(crate) base_commit: Option<String>,
+    pub(crate) reason: String,
+    pub(crate) continuation_assignment_id: Option<AssignmentId>,
 }
 
 /// Exact identities recorded by one explicit guarded integration.
@@ -594,7 +623,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 7,
+                    "protocol_version": 8,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -707,7 +736,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 7,
+                    "protocol_version": 8,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

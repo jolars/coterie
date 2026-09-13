@@ -340,7 +340,7 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
   intent alongside the first review's history. Every prior schema upgrades
   with all three workspace kinds. Default parallel `task check` passes (415 tests, eight
   opt-in or generation tests skipped).
-- [ ] **Recover work from exited agents before submission.** The progress
+- [x] **Recover work from exited agents before submission.** The progress
   worker exited with uncommitted implementation and review fixes, leaving its
   task `in_progress`. A continuation copied the preserved candidate into a new
   worktree and completed, while the original assignment remained active in
@@ -351,6 +351,15 @@ ownership, or recovery transitions in `DESIGN.md` before implementation.
   commit or finish, stale sessions and late output, retries, crashes during
   recovery, continuation integration, and dependency release only after
   accepted closure. Diagnostics should name the supported next action.
+  Implemented as `task recover` for unfinished Git worktree assignments, with
+  normalized exit evidence, fresh provider verification, and preserved source
+  files, index, commits, and history. Fresh worktree continuations have durable
+  links; ownership is never transferred. The [recovery tests](src/supervisor/recovery_tests.rs),
+  [runtime workflow and races](tests/supervisor_runtime/recovery.rs), and
+  [crash matrix](docs/crash-matrix.md) cover the gate. Original spawn retries
+  preserve retired sources and continuation ownership before and after restart.
+  Combined with workspace reuse, default parallel `task check` passes (430
+  tests, nine opt-in or generation tests skipped).
 - [ ] **Make crash-matrix tests reliable under parallel execution.** Parallel
   validation produced a shutdown trace mismatch and timeouts in the runtime
   and attached-run publication/retirement matrices. Those cases passed

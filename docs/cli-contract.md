@@ -244,6 +244,10 @@ Reconstruct the caller's identity, project, peers, tasks, ready work, active
 assignment, and authorized command list. Agents use this durable context after
 a fresh session or context compaction.
 
+`recoveries` lists preserved interrupted assignments and their continuation
+links. Each entry uses the fields described by `task recover` below. A
+continuation inspects its source and ports useful changes into its own worktree.
+
 ### `coterie progress`
 
 ```console
@@ -432,6 +436,56 @@ JSON data contains `assignment_id`, `previous_result`, and the corrected `task`.
 The typed [response schema](../schemas/cli-resubmit-v1.schema.json) and
 [example](../examples/resubmit.json) are checked by the test suite. Regenerate
 them with `cargo test regenerate_resubmit_contract -- --ignored`.
+
+### `coterie task recover`
+
+```console
+coterie task recover --assignment <assignment-id> --reason <explanation>
+  [--operation-id <co-ULID>]
+```
+
+Retire an interrupted Git worktree assignment before submission. Requires the
+operator channel or `task:recover`. The assignment must still own the task's
+active claim, its current provider session must have an observed exit and
+revoked credentials, and its workspace must have verified ownership. Unresolved
+launch, process-control, or integration intent blocks recovery. An unknown,
+lost, or merely quarantined session is insufficient. Inspect `doctor` and wait
+for verified inactivity before retrying; recovery never stops a provider.
+Admission requires a normalized provider exit event and a fresh adapter check
+of the recorded identity. An exact exited observation or confirmed absence
+after that recorded exit qualifies; absence alone does not establish an exit.
+
+One transaction releases the old assignment and claim, reopens the same task,
+and records `task.recovered` with the reason, actor, and preserved source.
+Original summaries, session history, transcripts, staged and unstaged files,
+untracked files, commits, and references remain intact. Late observations and
+output from the retired session are fenced. Recovery does not authorize
+cleanup or further writes to the source worktree.
+
+Use ordinary `spawn` with a worktree role for the reopened task. The new
+assignment receives a fresh worktree and an immutable `assignment.continued`
+link to the retired source. Inspect `prime`, port useful changes from the
+preserved path, validate, commit, and finish normally. Files are not copied
+automatically. Dependencies remain blocked until the continued task is
+integrated, validated, and closed. Repeated recovery retains the entire chain.
+Other workspace kinds and already submitted assignments are outside this
+command; submitted corrections use `task resubmit`.
+
+An empty reason returns `invalid_argument` (exit 2). Recovery precondition
+failures return `conflict` (exit 5) without consuming the operation ID. Correct
+the problem and retry. Successful retries return the original response even
+after continuation, integration, or closure. Changed requests conflict, and
+stale callers cannot replay a successful mutation. A stopped or draining run
+refuses new recovery mutations.
+
+JSON data contains `task_id`, `assignment_id`, `session_id`, `project_id`,
+`generation`, `workspace_path`, `workspace_path_bytes`, `base_commit`, `reason`,
+and `continuation_assignment_id`. The last field is null at retirement;
+`prime` reports the subsequent assignment once spawned. The display path may
+replace invalid UTF-8; the byte array retains the exact native path. The typed
+[schema](../schemas/cli-recover-v1.schema.json) and
+[example](../examples/recover.json) are checked by tests. Regenerate them with
+`cargo test regenerate_recovery_contract -- --ignored`.
 
 ### `coterie spawn`
 

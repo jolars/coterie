@@ -18,6 +18,9 @@ mod finish;
 #[path = "supervisor_runtime/closure_override.rs"]
 mod closure_override;
 
+#[path = "supervisor_runtime/recovery.rs"]
+mod recovery;
+
 #[path = "supervisor_runtime/workspace_reuse.rs"]
 mod workspace_reuse;
 

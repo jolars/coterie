@@ -32,6 +32,11 @@ An authorized coordinator can correct an unintegrated Git submission with
 preserves the original submission history and refuses replacement once an
 integration intent exists. See the [recovery command](docs/cli-contract.md#coterie-task-resubmit).
 
+For a worker that exited before submission, `coterie task recover` retires its
+assignment after verifying inactivity and reopens the same task. A continuation
+gets a fresh worktree and a link to the preserved files and history. See the
+[unfinished-work recovery command](docs/cli-contract.md#coterie-task-recover).
+
 Configuration inspection supports `config check`,
 `config show --effective --provenance`, `config schema`, and explicit
 `config lock` creation. These commands resolve layered configuration and verify

@@ -729,6 +729,41 @@ and resulting target commit. The lead may close work performed directly in a
 target project, or non-code work, after explicit validation. An operator
 override is recorded as such rather than fabricated as integration evidence.
 
+An interrupted, unsubmitted Git worktree assignment can be retired with
+`coterie task recover --assignment ID --reason TEXT`, by the operator or an
+agent with `task:recover`. The named assignment must still own the task's active
+claim. Its current session generation must have an observed process exit, a
+recorded end time, revoked credentials, and no pending launch, process control,
+workspace creation, or integration. A terminal label alone is insufficient.
+Recovery also requires the normalized provider exit event and a fresh adapter
+check of the recorded process identity. That check must prove an exact exited
+session with exit details, or process absence following the recorded exit.
+Absence alone never supplies the missing exit evidence. Provider uncertainty
+refuses recovery without changing the original observation.
+Unknown or lost process ownership requires inspection with `coterie doctor`
+and never authorizes recovery. A stopped or draining run cannot recover tasks.
+
+Recovery is one database transaction: release the old claim and assignment,
+reopen the same task, and record the reason, actor, session, and preserved
+workspace identity in an append-only `task.recovered` event and the operation
+result. Original summaries, session history, transcripts, worktree files,
+index, commits, and references remain intact. Retrying the same operation
+replays its original result even after continuation or accepted closure.
+Changed requests conflict, and stale callers remain fenced before replay.
+
+The next ordinary `spawn` for that task must use a worktree role. It records an
+explicit `assignment.continued` link to the retired assignment in its claim
+transaction and creates a fresh isolated worktree under the existing durable
+spawn protocol. `prime` reports the recovery source and continuation identities,
+preserved path, base commit, and reason. The continuation inspects the preserved
+source and ports the useful changes into its own workspace, then validates,
+commits, and submits normally. Recovery does not automatically copy files or
+grant writable access to the preserved workspace. This initial recovery path
+does not transfer writable ownership or resume an old provider generation.
+Repeated interruptions retain each recovery and continuation link. Dependencies
+remain blocked until the same task's continued result is integrated, validated,
+and explicitly closed. Submitted work uses `task resubmit` instead.
+
 An incorrect unintegrated Git submission can be superseded explicitly with
 `coterie task resubmit --assignment ID --expected-result OLD --result NEW
 --summary TEXT --reason TEXT`. The operator or an agent with `task:resubmit`

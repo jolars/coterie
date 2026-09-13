@@ -102,12 +102,18 @@ pub(crate) fn inspect_store(
         }
     }
     let backend = GitWorkspace::new(root);
+    let recoveries = store
+        .transaction(|repositories| repositories.task_recoveries(run_id))?;
     for workspace in workspaces {
         let subject = Some(workspace.assignment_id.to_string());
         let current = store.transaction(|repositories| {
             repositories.assignment_scope_is_current(workspace.scope())
         })?;
-        if !current {
+        if !current
+            && !recoveries
+                .iter()
+                .any(|source| source.assignment_id == workspace.assignment_id)
+        {
             report.add("workspace", CheckStatus::Warning, subject, "Workspace belongs to a retired or inconsistent generation; preserve its path and reference.");
             continue;
         }

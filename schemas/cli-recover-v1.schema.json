@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI mutation success response v1",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/RecoverySummary"
+    },
+    "operation_id": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation_id",
+    "data"
+  ],
+  "$defs": {
+    "AssignmentId": {
+      "type": "string",
+      "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "ProjectId": {
+      "type": "string",
+      "pattern": "^cp-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "RecoverySummary": {
+      "description": "Preserved source context and the explicit link to a later assignment.",
+      "type": "object",
+      "properties": {
+        "assignment_id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "base_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "continuation_assignment_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssignmentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "workspace_path": {
+          "type": "string"
+        },
+        "workspace_path_bytes": {
+          "description": "Exact native path bytes, including paths that are not UTF-8.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "assignment_id",
+        "session_id",
+        "project_id",
+        "generation",
+        "workspace_path",
+        "workspace_path_bytes",
+        "base_commit",
+        "reason",
+        "continuation_assignment_id"
+      ]
+    },
+    "SessionId": {
+      "type": "string",
+      "pattern": "^cs-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskId": {
+      "type": "string",
+      "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  }
+}

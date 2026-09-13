@@ -99,7 +99,7 @@ impl Store {
             (
                 "assignments",
                 "SELECT a.id FROM assignments a JOIN agents g ON g.id = a.agent_id LEFT JOIN sessions s ON s.id = a.session_id WHERE a.run_id = ?1 AND a.completed_at IS NULL AND (a.generation <> g.generation OR s.id IS NULL OR s.generation <> a.generation OR s.state IN ('exited', 'lost', 'unknown', 'quarantined')) ORDER BY a.id",
-                "Unfinished assignment has no verified current live session; preserve its claim and workspace.",
+                "Unfinished assignment has no verified current live session; preserve its claim and workspace. After an observed process exit, an operator or agent with task:recover can run `coterie task recover --assignment ID --reason TEXT`; unknown ownership must first be resolved through operator inspection.",
             ),
             (
                 "sessions",

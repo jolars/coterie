@@ -1,0 +1,303 @@
+use super::*;
+
+const JOB: &str = r#"
+if [ -z "${COTERIE_TASK_ID-}" ]; then exit 0; fi
+capture="$COTERIE_SOCKET.$COTERIE_AGENT_ID"
+{
+  for variable in COTERIE_PROJECT_ROOT COTERIE_PROJECT_ID COTERIE_PRIMARY_PROJECT_ROOT COTERIE_RUN_ID COTERIE_AGENT_ID COTERIE_SESSION_ID COTERIE_ROLE COTERIE_SOCKET COTERIE_TOKEN COTERIE_TASK_ID COTERIE_BIN; do
+    eval "value=\${$variable}"
+    printf 'env:%s=%s\0' "$variable" "$value"
+  done
+} > "$capture.pending"
+mv "$capture.pending" "$capture"
+printf '{"type":"thread.started","thread_id":"recovery-job"}\n'
+while [ ! -e "$capture.exit" ]; do
+  if [ ! -e "/proc/$PPID" ]; then exit 0; fi
+  sleep 0.02
+done
+exit 23
+"#;
+
+fn captured_job(
+    fixture: &TestEnvironment,
+    spawn: &Value,
+) -> (PathBuf, Vec<(String, String)>, PathBuf) {
+    let prime = fixture.run_json(&["prime", "--json"]);
+    let capture = fixture.runtime.join("coterie").join(format!(
+        "{}.sock.{}",
+        prime["data"]["identity"]["run_id"].as_str().unwrap(),
+        spawn["data"]["agent"]["id"].as_str().unwrap()
+    ));
+    wait_until("recovery job bootstrap", || capture.exists());
+    let environment = captured_environment(&capture);
+    let workspace =
+        PathBuf::from(environment_value(&environment, "COTERIE_PROJECT_ROOT"));
+    (capture, environment, workspace)
+}
+
+#[test]
+fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure()
+ {
+    let fixture = TestEnvironment::new();
+    write_global(
+        &fixture,
+        &include_str!("../../examples/config/global.toml")
+            .replace("coordinator", "planner"),
+    );
+    fs::write(
+        fixture.root.join("bin/codex"),
+        format!(
+            "{}{}",
+            FAKE_CODEX.split_once("is_job=false").unwrap().0,
+            JOB
+        ),
+    )
+    .unwrap();
+    fixture.launch(&[]);
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Recover unfinished work",
+        "--json",
+    ]);
+    let task_id = task["data"]["task"]["id"].as_str().unwrap();
+    let dependent = fixture.run_json(&[
+        "task",
+        "create",
+        "Wait for accepted work",
+        "--after",
+        task_id,
+        "--json",
+    ]);
+    let spawn =
+        fixture.run_json(&["spawn", "builder", "--task", task_id, "--json"]);
+    let assignment = spawn["data"]["assignment_id"].as_str().unwrap();
+    let (capture, old_environment, source) = captured_job(&fixture, &spawn);
+    let source_head = commit_file(
+        &source,
+        Path::new("committed.txt"),
+        "preserve the commit\n",
+        "interrupted implementation",
+    );
+    fs::write(source.join("untracked.txt"), "preserve dirty work\n").unwrap();
+    let recovery_args = [
+        "task",
+        "recover",
+        "--assignment",
+        assignment,
+        "--reason",
+        "Provider exited before submission.",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FB9",
+        "--json",
+    ];
+    rejected(&fixture, &recovery_args, "inactivity");
+    fs::write(format!("{}.exit", capture.display()), "exit").unwrap();
+    wait_until("observed worker exit", || {
+        let status = fixture.run_json(&["status", "--json"]);
+        status["data"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| {
+                agent["id"] == spawn["data"]["agent"]["id"]
+                    && agent["state"] == "exited"
+            })
+    });
+    let doctor = fixture.run_json(&["doctor", "--json"]);
+    assert!(doctor.to_string().contains("task recover"));
+    let recovered = fixture.run_json(&recovery_args);
+    assert_eq!(recovered["data"]["assignment_id"], assignment);
+    assert_eq!(
+        recovered["data"]["workspace_path"],
+        source.to_str().unwrap()
+    );
+    assert!(recovered["data"]["continuation_assignment_id"].is_null());
+    assert_eq!(
+        fixture.run_json(&["task", "ready", "--json"])["data"]["tasks"][0]["id"],
+        task_id
+    );
+    let mut late_finish = fixture.agent_command(&old_environment);
+    late_finish.args([
+        "finish",
+        "--status",
+        "completed",
+        "--summary",
+        "Late submission.",
+        "--json",
+    ]);
+    let late = run(late_finish);
+    assert_eq!(late.status.code(), Some(6), "{late:?}");
+    let next =
+        fixture.run_json(&["spawn", "builder", "--task", task_id, "--json"]);
+    let (_next_capture, next_environment, continuation) =
+        captured_job(&fixture, &next);
+    assert_ne!(source, continuation);
+    let prime = fixture.run_agent_json(&["prime", "--json"], &next_environment);
+    assert_eq!(
+        prime["data"]["recoveries"][0]["continuation_assignment_id"],
+        next["data"]["assignment_id"]
+    );
+    assert_eq!(prime["data"]["active_task"]["id"], task_id);
+    for name in ["committed.txt", "untracked.txt"] {
+        commit_file(
+            &continuation,
+            Path::new(name),
+            &fs::read_to_string(source.join(name)).unwrap(),
+            "continue preserved work",
+        );
+    }
+    fixture.run_agent_json(
+        &[
+            "finish",
+            "--status",
+            "completed",
+            "--summary",
+            "Ported and validated recovered work.",
+            "--json",
+        ],
+        &next_environment,
+    );
+    assert_eq!(
+        fixture.run_json(&["task", "ready", "--json"])["data"]["tasks"],
+        serde_json::json!([])
+    );
+    rejected(
+        &fixture,
+        &[
+            "task",
+            "close",
+            task_id,
+            "--summary",
+            "Premature closure",
+            "--json",
+        ],
+        "not been integrated",
+    );
+    fixture.run_json(&[
+        "workspace",
+        "integrate",
+        "--assignment",
+        next["data"]["assignment_id"].as_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(
+        fixture.run_json(&["task", "ready", "--json"])["data"]["tasks"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("committed.txt")).unwrap(),
+        "preserve the commit\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("untracked.txt")).unwrap(),
+        "preserve dirty work\n"
+    );
+    fixture.run_json(&[
+        "task",
+        "close",
+        task_id,
+        "--summary",
+        "Validated both recovered files after integration.",
+        "--json",
+    ]);
+    assert_eq!(
+        fixture.run_json(&["task", "ready", "--json"])["data"]["tasks"][0]["id"],
+        dependent["data"]["task"]["id"]
+    );
+    assert_eq!(fixture.run_json(&recovery_args), recovered);
+    assert_eq!(
+        Repository::open(&source)
+            .unwrap()
+            .head()
+            .unwrap()
+            .target()
+            .unwrap()
+            .to_string(),
+        source_head
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("untracked.txt")).unwrap(),
+        "preserve dirty work\n"
+    );
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
+fn concurrent_finish_and_recovery_never_accept_both_mutations() {
+    for exited in [false, true] {
+        let fixture = TestEnvironment::new();
+        fs::write(
+            fixture.root.join("bin/codex"),
+            format!(
+                "{}{}",
+                FAKE_CODEX.split_once("is_job=false").unwrap().0,
+                JOB
+            ),
+        )
+        .unwrap();
+        fixture.launch(&[]);
+        let task = fixture.run_json(&[
+            "task",
+            "create",
+            "Race submission with recovery",
+            "--json",
+        ]);
+        let task_id = task["data"]["task"]["id"].as_str().unwrap();
+        let spawn =
+            fixture.run_json(&["spawn", "worker", "--task", task_id, "--json"]);
+        let (capture, environment, _) = captured_job(&fixture, &spawn);
+        if exited {
+            fs::write(format!("{}.exit", capture.display()), "exit").unwrap();
+            wait_until("exited assignment before racing requests", || {
+                fixture.run_json(&["status", "--json"])["data"]["agents"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|agent| {
+                        agent["id"] == spawn["data"]["agent"]["id"]
+                            && agent["state"] == "exited"
+                    })
+            });
+        }
+        let finish = fixture
+            .agent_command(&environment)
+            .args([
+                "finish",
+                "--status",
+                "completed",
+                "--summary",
+                "Validated clean assignment.",
+                "--json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let recover = fixture
+            .command()
+            .args([
+                "task",
+                "recover",
+                "--assignment",
+                spawn["data"]["assignment_id"].as_str().unwrap(),
+                "--reason",
+                "Continue after exit.",
+                "--json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let finished = finish.wait_with_output().unwrap();
+        let recovered = recover.wait_with_output().unwrap();
+        assert_eq!(finished.status.success(), !exited, "{finished:?}");
+        assert_eq!(recovered.status.success(), exited, "{recovered:?}");
+        let prime = fixture.run_json(&["prime", "--json"]);
+        assert_eq!(
+            prime["data"]["tasks"][0]["status"],
+            if exited { "open" } else { "submitted" }
+        );
+        fixture.run_json(&["stop", "--json"]);
+    }
+}

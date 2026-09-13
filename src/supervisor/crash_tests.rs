@@ -9,6 +9,9 @@ use std::os::unix::fs::DirBuilderExt;
 #[path = "resubmit_tests.rs"]
 mod resubmit_tests;
 
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
+
 const CHILD: &str = "supervisor::crash_tests::crash_child";
 const RUN: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
@@ -53,6 +56,16 @@ fn crash_matrix_finish() {
 #[test]
 fn crash_matrix_resubmit() {
     matrix("resubmit");
+}
+
+#[test]
+fn crash_matrix_recover_assignment() {
+    matrix("recover-assignment");
+}
+
+#[test]
+fn crash_matrix_continue_assignment() {
+    matrix("continue-assignment");
 }
 
 #[test]
@@ -1188,6 +1201,10 @@ impl Fixture {
                 )
                 .unwrap();
         }
+        if matches!(case, "recover-assignment" | "continue-assignment") {
+            recovery_tests::prepare(self, case);
+            return;
+        }
         if matches!(
             case,
             "finish"
@@ -1259,6 +1276,9 @@ impl Fixture {
             }
             "finish" => self.finish(),
             "resubmit" => self.resubmit(),
+            "recover-assignment" | "continue-assignment" => {
+                recovery_tests::exercise(self, case)
+            }
             "integrate" | "merge" => self.integrate(),
             "message" => self.message(),
             "acknowledge" => self.acknowledge(),
@@ -1456,6 +1476,10 @@ impl Fixture {
     fn recover(&mut self, case: &str) {
         let run_id = RUN.parse().unwrap();
         let now = unix_timestamp().unwrap();
+        if matches!(case, "recover-assignment" | "continue-assignment") {
+            recovery_tests::recover(self, case);
+            return;
+        }
         if case == "idle-shutdown" {
             self.idle_shutdown();
             return;
@@ -1518,6 +1542,10 @@ impl Fixture {
     }
 
     fn verify(&mut self, case: &str) {
+        if matches!(case, "recover-assignment" | "continue-assignment") {
+            recovery_tests::verify(self, case);
+            return;
+        }
         let run_id = RUN.parse().unwrap();
         assert_eq!(
             fs::read_to_string(self.root.join("project/AGENTS.md")).unwrap(),

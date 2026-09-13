@@ -302,6 +302,16 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         )?)
     }
 
+    /// Verifies a preserved source without requiring its index or files to be clean.
+    pub(crate) fn observe_source(
+        &self,
+        store: &mut Store,
+        scope: AssignmentScope,
+    ) -> Result<ExternalResourceState, WorkspaceError> {
+        let (workspace, project) = workspace_records(store, scope)?;
+        Ok(self.backend.observe(&workspace, &project)?)
+    }
+
     /// Captures a read-only, immutable plan for one guarded integration.
     pub(crate) fn prepare_integration(
         &self,

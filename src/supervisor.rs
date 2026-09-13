@@ -5,6 +5,7 @@ mod doctor;
 mod idle;
 mod progress;
 mod projects;
+mod recovery;
 mod resubmit;
 mod session;
 
@@ -894,6 +895,21 @@ fn public_request(
                 )
             }
             TaskCommand::Ready => (RpcRequest::TaskReady, None, false),
+            TaskCommand::Recover(arguments) => {
+                let operation_id = arguments
+                    .mutation
+                    .operation_id
+                    .unwrap_or_else(OperationId::generate);
+                (
+                    RpcRequest::TaskRecover {
+                        operation_id,
+                        assignment_id: arguments.assignment,
+                        reason: arguments.reason,
+                    },
+                    Some(operation_id),
+                    false,
+                )
+            }
             TaskCommand::Resubmit(arguments) => {
                 let operation_id = arguments
                     .mutation
@@ -2700,6 +2716,9 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
     .collect::<String>();
     let mut request = request;
     match &mut request {
+        RpcRequest::TaskRecover { reason, .. } => {
+            *reason = crate::redaction::text(reason);
+        }
         RpcRequest::TaskResubmit { submission, .. } => {
             submission.summary = crate::redaction::text(&submission.summary);
             submission.reason = crate::redaction::text(&submission.reason);
@@ -2824,6 +2843,21 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             Some(&request_fingerprint),
         ),
         RpcRequest::TaskReady => ready_tasks(store, run_id, caller),
+        RpcRequest::TaskRecover {
+            operation_id,
+            assignment_id,
+            reason,
+        } => recovery::recover_task(
+            store,
+            sessions,
+            workspaces,
+            run_id,
+            caller,
+            operation_id,
+            assignment_id,
+            reason,
+            Some(&request_fingerprint),
+        ),
         RpcRequest::TaskResubmit {
             operation_id,
             submission,
@@ -3694,6 +3728,9 @@ fn prime(
         tasks,
         ready_tasks,
         active_task: active_task.map(Box::new),
+        recoveries: store
+            .transaction(|r| r.task_recoveries(run_id))
+            .map_err(rpc_state_failure)?,
         commands: available_commands(store, run_id, caller)?,
     })
 }
@@ -4025,6 +4062,17 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         .map_err(rpc_state_failure)?
         .is_some();
     let workspace_kind = workspace_policy_name(role_definition.workspace);
+    if !replaying
+        && workspace_kind != "worktree"
+        && store
+            .transaction(|r| r.pending_recovery(run_id, task_id))
+            .map_err(rpc_state_failure)?
+            .is_some()
+    {
+        return Err(conflict(
+            "recovered work requires a fresh worktree; use `coterie spawn` with a worktree role and inspect the preserved source with `coterie prime`",
+        ));
+    }
     let mut base_commit = None;
     if !replaying {
         let (agents, task, project, readiness) = store
@@ -5302,6 +5350,7 @@ fn available_commands(
             "task close",
             "spawn",
             "workspace integrate",
+            "task recover",
             "send",
             "logs",
             "events",
@@ -5320,6 +5369,7 @@ fn available_commands(
             ("project", "attach", "project attach"),
             ("task", "create", "task create"),
             ("task", "close", "task close"),
+            ("task", "recover", "task recover"),
             ("logs", "*", "logs"),
             ("workspace", "integrate", "workspace integrate"),
         ] {
@@ -5567,6 +5617,7 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         | StoreError::StaleAssignment { .. }
         | StoreError::WorkspacePathReserved { .. }
         | StoreError::ResubmissionConflict { .. }
+        | StoreError::RecoveryConflict { .. }
         | StoreError::WorkspaceResultConflict { .. }
         | StoreError::WorkspaceTargetConflict { .. } => {
             RpcFailureCode::Conflict

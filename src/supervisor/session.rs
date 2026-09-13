@@ -552,6 +552,46 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         Ok(())
     }
 
+    /// Rechecks process ownership after recovery admission verified a durable exit.
+    pub(crate) fn verify_recovery_exit(
+        &mut self,
+        store: &mut Store,
+        scope: SessionScope,
+    ) -> Result<bool, AgentSessionError> {
+        let (session, agent) = store.transaction(|r| {
+            Ok((r.session(scope.session_id)?, r.agent(scope.agent_id)?))
+        })?;
+        let (Some(session), Some(agent)) = (session, agent) else {
+            return Ok(false);
+        };
+        let Some(provider_id) = session.provider_session_id else {
+            return Ok(false);
+        };
+        self.configure_provider(store, scope.run_id, &agent.role)?;
+        if !self
+            .provider
+            .probe()
+            .is_ok_and(|probe| probe.name == session.provider)
+        {
+            return Ok(false);
+        }
+        Ok(match self.provider.recover(&provider_id, scope) {
+            Ok(ProviderRecovery::Observed {
+                handle,
+                observation,
+            }) => {
+                handle.scope == scope
+                    && handle.provider_id() == provider_id
+                    && observation.lifecycle == LifecycleState::Exited
+                    && observation.exit.is_some()
+            }
+            // Absence supplements the durable reaped-exit evidence. It cannot
+            // establish a successful exit for a lost or unknown session alone.
+            Ok(ProviderRecovery::Lost) => true,
+            Ok(ProviderRecovery::Unknown) | Err(_) => false,
+        })
+    }
+
     /// Conservatively classifies sessions that outlived a supervisor process.
     pub(crate) fn reconcile_after_restart(
         &mut self,
