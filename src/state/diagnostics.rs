@@ -54,21 +54,29 @@ impl Store {
             None,
             format!("{foreign_keys} foreign-key violations."),
         );
-        let applied = transaction.prepare("SELECT version, name, source FROM schema_migrations ORDER BY version")?
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-            .collect::<Result<Vec<_>, _>>()?;
-        let migrations_match = applied.len() == MIGRATIONS.len()
-            && applied.iter().zip(MIGRATIONS).all(
-                |((version, name, source), migration)| {
-                    *version == migration.version
-                        && name == migration.name
-                        && source == migration.sql
-                },
-            );
-        report.add("database_migrations", if migrations_match { CheckStatus::Ok } else { CheckStatus::Error }, None,
-            if migrations_match { "All applied migrations match the compiled schema." } else { "Schema is pending, newer, modified, or noncontiguous; preserve the database and use a compatible Coterie binary." });
-        if !migrations_match {
-            return Ok(report);
+        match pending_migrations(&transaction) {
+            Ok([]) => report.add(
+                "database_migrations",
+                CheckStatus::Ok,
+                None,
+                "All applied migrations match the compiled schema.",
+            ),
+            Ok(pending) => {
+                report.add(
+                    "database_migrations",
+                    CheckStatus::Warning,
+                    None,
+                    StoreError::PendingMigrations {
+                        count: pending.len(),
+                    }
+                    .to_string(),
+                );
+                return Ok(report);
+            }
+            Err(error) => {
+                report.add("database_migrations", CheckStatus::Error, None, format!("{error}; preserve the database and use a compatible Coterie binary."));
+                return Ok(report);
+            }
         }
         let status: Option<String> = transaction
             .query_row(

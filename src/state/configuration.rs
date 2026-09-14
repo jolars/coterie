@@ -13,6 +13,7 @@ impl Store {
 }
 
 impl Repositories<'_, '_> {
+    #[cfg(test)]
     pub(crate) fn has_run_configuration(
         &self,
         run_id: RunId,

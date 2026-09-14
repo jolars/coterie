@@ -1255,7 +1255,9 @@ fn read_configuration(
     directories: &CoterieDirectories,
     run_id: RunId,
 ) -> Result<RunConfiguration, SupervisorError> {
-    Ok(open_configuration_store(directories, run_id)?
+    let mut store = open_configuration_store(directories, run_id)?;
+    store.require_current_schema()?;
+    Ok(store
         .transaction(|repositories| repositories.run_configuration(run_id))?)
 }
 
@@ -1280,13 +1282,14 @@ fn verify_configuration(
     run_id: RunId,
     current: &EffectiveConfig,
 ) -> Result<(), SupervisorError> {
-    let (run, snapshot) = open_configuration_store(directories, run_id)?
-        .transaction(|repositories| {
-            Ok((
-                repositories.run(run_id)?,
-                repositories.run_configuration(run_id)?,
-            ))
-        })?;
+    let mut store = open_configuration_store(directories, run_id)?;
+    store.require_current_schema()?;
+    let (run, snapshot) = store.transaction(|repositories| {
+        Ok((
+            repositories.run(run_id)?,
+            repositories.run_configuration(run_id)?,
+        ))
+    })?;
     if run.is_some_and(|run| run.status == "stopped") {
         return Ok(());
     }
@@ -1352,10 +1355,9 @@ async fn connect_or_start_with_overrides(
                 source,
             })?;
         let mut store = Store::open_read_only(&path)?;
-        let snapshot_exists = store.transaction(|repositories| {
-            repositories.has_run_configuration(entry.run_id)
-        })?;
-        if snapshot_exists {
+        // Historical snapshots become readable only after the lease-owning
+        // supervisor migrates them and checks compatibility before reconciliation.
+        if !store.has_pending_migrations()? {
             verify_configuration(directories, entry.run_id, &configuration)?;
         }
         if !store.transaction(|repositories| {
@@ -5686,6 +5688,8 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         | StoreError::Database(_)
         | StoreError::EncodeJson(_)
         | StoreError::ModifiedMigration { .. }
+        | StoreError::NoncontiguousMigrations { .. }
+        | StoreError::PendingMigrations { .. }
         | StoreError::UnsupportedSchema { .. }
         | StoreError::MissingOperationResult { .. }
         | StoreError::CorruptAgentState { .. }

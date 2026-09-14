@@ -581,6 +581,13 @@ the historical compiled policy for older runs without a snapshot; it never
 adopts current files as those runs' original policy. Missing or invalid snapshots
 in the current schema fail closed.
 
+Before decoding an indexed run's snapshot, startup verifies that its migration
+history is an unchanged, contiguous prefix of the supported schema. When
+migrations are pending, the lease-owning supervisor applies them and validates
+the upgraded snapshot before launching or reconciling external resources.
+Read-only preflight must not reject a historical snapshot merely because a
+pending migration adds a required field.
+
 Compatibility compares all effective values, including command bindings, while
 ignoring provenance changes. Moving a source file or explicitly reassigning an
 equal value is compatible. Changing a binding is incompatible even if its
@@ -1372,6 +1379,11 @@ policy with the active snapshot. Recovery remains the existing
 lease-protected startup and desired-state reconciliation path. An indexed run
 must have a matching durable database; a responsive socket or ambiguous file
 ownership is never discarded as stale.
+
+Doctor reports supported pending migrations separately from modified,
+noncontiguous, or newer schemas. Snapshot validation remains unavailable until
+the supervisor performs that upgrade; doctor names startup as the next step
+without decoding the historical document as the current schema or modifying it.
 
 Foreground terminal diagnostics use startup evidence from the wrapper that owns
 the provider child. It records the child's PID, Linux boot identity, start time,

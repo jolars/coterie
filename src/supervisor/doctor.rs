@@ -77,7 +77,14 @@ pub(super) async fn run(
                         }
                         saved = Some(snapshot.effective);
                     }
-                    Err(error) => report.add("configuration_snapshot", CheckStatus::Error, None, error.to_string()),
+                    Err(error) => {
+                        let status = if matches!(error, SupervisorError::State(StoreError::PendingMigrations { .. })) {
+                            CheckStatus::Unavailable
+                        } else {
+                            CheckStatus::Error
+                        };
+                        report.add("configuration_snapshot", status, None, error.to_string());
+                    }
                 }
                 inspect_run(&mut report, &directories, &entry, &project).await;
             }

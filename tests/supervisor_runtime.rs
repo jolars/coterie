@@ -133,6 +133,9 @@ mod terminal;
 #[path = "supervisor_runtime/foreground.rs"]
 mod foreground;
 
+#[path = "supervisor_runtime/upgrade.rs"]
+mod upgrade;
+
 fn write_global(fixture: &TestEnvironment, text: &str) {
     let directory = fixture.root.join("config/coterie");
     fs::create_dir_all(&directory).unwrap();

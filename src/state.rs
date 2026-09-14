@@ -128,6 +128,42 @@ struct Migration {
     sql: &'static str,
 }
 
+/// Readers and the supervisor must agree on which historical schemas can upgrade.
+fn pending_migrations(
+    connection: &Connection,
+) -> Result<&'static [Migration], StoreError> {
+    let applied = connection
+        .prepare("SELECT version, name, source FROM schema_migrations ORDER BY version")?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let supported = MIGRATIONS.last().map_or(0, |migration| migration.version);
+    if let Some((found, _, _)) = applied.last()
+        && *found > supported
+    {
+        return Err(StoreError::UnsupportedSchema {
+            found: *found,
+            supported,
+        });
+    }
+    for ((version, name, source), migration) in applied.iter().zip(MIGRATIONS) {
+        if *version != migration.version {
+            return Err(StoreError::NoncontiguousMigrations {
+                expected: migration.version,
+                found: *version,
+            });
+        }
+        if name != migration.name || source != migration.sql {
+            return Err(StoreError::ModifiedMigration {
+                version: *version,
+                name: name.clone(),
+            });
+        }
+    }
+    Ok(&MIGRATIONS[applied.len()..])
+}
+
 /// A failure to open, migrate, or access durable run state.
 #[derive(Debug, Error)]
 pub(crate) enum StoreError {
@@ -166,6 +202,16 @@ pub(crate) enum StoreError {
         "database schema version {found} is newer than supported version {supported}"
     )]
     UnsupportedSchema { found: i64, supported: i64 },
+
+    #[error(
+        "migration history is noncontiguous: expected version {expected}, found {found}"
+    )]
+    NoncontiguousMigrations { expected: i64, found: i64 },
+
+    #[error(
+        "run database has {count} pending migrations; launch `coterie` to apply them under the project lease before validating its configuration snapshot"
+    )]
+    PendingMigrations { count: usize },
 
     /// An operation ID was previously bound to a different mutation.
     #[error("operation `{id}` is already bound to a different request")]
@@ -892,50 +938,7 @@ impl Store {
              END;",
         )?;
 
-        let applied = {
-            let mut statement = self.connection.prepare(
-                "SELECT version, name, source FROM schema_migrations ORDER BY version",
-            )?;
-            let rows = statement.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-
-        let supported =
-            MIGRATIONS.last().map_or(0, |migration| migration.version);
-        if let Some((found, _, _)) = applied.last()
-            && *found > supported
-        {
-            return Err(StoreError::UnsupportedSchema {
-                found: *found,
-                supported,
-            });
-        }
-
-        for (version, name, source) in &applied {
-            let Some(migration) = MIGRATIONS
-                .iter()
-                .find(|migration| migration.version == *version)
-            else {
-                return Err(StoreError::UnsupportedSchema {
-                    found: *version,
-                    supported,
-                });
-            };
-            if migration.name != name || migration.sql != source {
-                return Err(StoreError::ModifiedMigration {
-                    version: *version,
-                    name: name.clone(),
-                });
-            }
-        }
-
-        for migration in &MIGRATIONS[applied.len()..] {
+        for migration in pending_migrations(&self.connection)? {
             let transaction = self.connection.transaction()?;
             crate::fault::point("db.migration.before");
             transaction.execute_batch(migration.sql)?;
@@ -948,6 +951,18 @@ impl Store {
             crate::fault::point("db.migration.committed");
         }
 
+        Ok(())
+    }
+
+    pub(crate) fn has_pending_migrations(&self) -> Result<bool, StoreError> {
+        Ok(!pending_migrations(&self.connection)?.is_empty())
+    }
+
+    pub(crate) fn require_current_schema(&self) -> Result<(), StoreError> {
+        let count = pending_migrations(&self.connection)?.len();
+        if count != 0 {
+            return Err(StoreError::PendingMigrations { count });
+        }
         Ok(())
     }
 
