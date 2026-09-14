@@ -30,3 +30,7 @@ github-attestations-phase = "host"
 github-release = "host"
 # Whether to install an updater program
 install-updater = false
+
+# Keep generation aligned with the repository's updated checkout action.
+[dist.github-action-commits]
+"actions/checkout" = "v7"
