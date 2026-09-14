@@ -1403,6 +1403,27 @@ The ordinary provider sandbox remains mandatory policy, not an optimization.
 Workspace isolation prevents concurrent Git changes from colliding; it does not
 by itself restrict filesystem or network access.
 
+### Proposed supervisor transport clarification
+
+The supervisor access follow-up must verify this proposal against the installed
+provider before adopting it. A session needs access to the exact run supervisor
+Unix socket as part of its orchestration capabilities. This local RPC access is
+separate from the permission profile's task network access: `network=deny` must
+still prohibit external and other local network destinations. The socket grant
+must not grant writes to its containing runtime directory or the run database,
+and every request must retain the existing token and generation checks.
+
+An adapter may use a provider-supported, exact-path socket allowance only when
+it can enforce these restrictions together with the selected filesystem and
+approval policies. A global Unix socket allowance or a successful connection
+from the operator does not prove access from a sandboxed command. The adapter
+must check the effective policy, including configuration precedence, rather
+than infer connectivity from a version or CLI option alone. Unsupported or
+denied access must fail before starting agent work, with a policy-preserving
+diagnostic. It must never retry by disabling the sandbox, enabling unrestricted
+network access, granting a runtime-directory write root, or allowing arbitrary
+Unix sockets. Real-provider regression tests remain explicit opt-ins.
+
 An agent with `project:attach` may attach only a canonical path beneath a
 trusted global `allowed_project_roots` entry. The array defaults to empty and
 accepts only absolute existing directories. Loading configuration resolves its

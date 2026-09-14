@@ -55,6 +55,10 @@ const CODEX_RUNTIME_ENVIRONMENT_VARIABLES: [&str; 9] = [
 #[path = "providers/shell_tests.rs"]
 mod shell_tests;
 
+#[cfg(test)]
+#[path = "providers/sandbox_tests.rs"]
+mod sandbox_tests;
+
 /// A provider feature that Coterie must verify before depending on it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ProviderCapability {
@@ -1589,10 +1593,18 @@ impl ProcessProbeRunner {
                     "empty provider command",
                 )
             })?;
+        let mut command = Command::new(program);
+        command.args(configured_arguments).args(arguments);
+        self.run_command_bounded(command, timeout)
+    }
+
+    fn run_command_bounded(
+        &self,
+        mut command: Command,
+        timeout: Duration,
+    ) -> Result<ProbeOutput, io::Error> {
         crate::fault::point("process.probe.before");
-        let mut child = Command::new(program)
-            .args(configured_arguments)
-            .args(arguments)
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -470,6 +470,15 @@ Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
   widening. Propose any necessary trust-boundary change in `DESIGN.md` first.
   Add regression coverage for allowed and denied supervisor access, including
   an opt-in real-Codex sandbox test rather than relying only on fake providers.
+  Investigation is in progress on `fix/sandbox-supervisor-rpc`: `DESIGN.md`
+  contains a proposed local RPC clarification, and the opt-in reproduction in
+  [sandbox tests](src/providers/sandbox_tests.rs) checks the legacy policy with
+  Unix sockets already allowed. A second opt-in contract checks the proposed
+  exact-socket grant under writable and read-only profiles with network denied.
+  Both real-Codex tests await the explicit opt-in required by `AGENTS.md`.
+  Ordinary `task check` passes with 437 tests and 12 opt-in or generation tests
+  skipped. The transport fix and its real-provider acceptance gate remain
+  outstanding.
 
 - [ ] **Distinguish operator health from agent connectivity in `doctor`.**
   The operator's report marked every check healthy during the failure above.

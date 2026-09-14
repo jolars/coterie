@@ -830,6 +830,30 @@ selected permission profile and run `coterie doctor` outside the agent sandbox.
 Coterie does not broaden the sandbox or retry with different permissions.
 Neither diagnostic requires printing the session token or full environment.
 
+The supervisor transport follow-up has an opt-in reproduction for Codex
+0.153.4 on Linux. It creates a temporary Codex configuration with Unix sockets
+already allowed, applies the legacy workspace sandbox policy, and checks
+socket access and filesystem restrictions using a local test executable. It
+does not call a model, use authentication, or change the operator's Codex
+configuration. An absolute `XDG_RUNTIME_DIR` outside system temp directories
+and an installed Codex CLI are required. With explicit operator opt-in, run:
+
+```console
+cargo test providers::sandbox_tests::installed_codex_reproduces_legacy_socket_denial -- --ignored --exact
+```
+
+The reproduction expects the reported `EPERM` denial; its result and a
+replacement transport remain unverified. Ordinary tests and CI skip it.
+
+An additional opt-in contract tests whether a named Codex profile can allow
+only the supervisor socket while preserving network denial and both writable
+and read-only filesystem profiles. This candidate is not used by launches
+until the contract is verified:
+
+```console
+cargo test providers::sandbox_tests::installed_codex_scoped_socket_contract_preserves_restrictions -- --ignored --exact
+```
+
 The shell contract has an ordinary Bash regression and a host-specific NixOS
 check for Bash and Fish. Run the latter from a development shell on NixOS with
 both shells and ripgrep available:
