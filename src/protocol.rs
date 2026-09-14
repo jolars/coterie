@@ -16,7 +16,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 8;
+pub(crate) const PROTOCOL_VERSION: u16 = 9;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -79,6 +79,7 @@ pub(crate) enum RpcRequest {
     ForegroundStarted {
         scope: crate::auth::SessionScope,
         process_id: u32,
+        identity: Option<crate::providers::terminal::ForegroundIdentity>,
     },
     WaitForegroundControl {
         scope: crate::auth::SessionScope,
@@ -632,7 +633,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 8,
+                    "protocol_version": 9,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -745,7 +746,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 8,
+                    "protocol_version": 9,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

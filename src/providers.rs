@@ -61,6 +61,8 @@ mod shell_tests;
 #[path = "providers/sandbox_tests.rs"]
 mod sandbox_tests;
 
+pub(crate) mod terminal;
+
 /// A provider feature that Coterie must verify before depending on it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ProviderCapability {
@@ -154,6 +156,7 @@ pub(crate) struct JobEnvironment {
 pub(crate) struct CodexInteractiveProcess {
     child: tokio::process::Child,
     inherited_terminal: bool,
+    inherited_input: terminal::InheritedInput,
     signals: SignalMonitor,
     supervision: crate::config::SupervisionPolicy,
 }
@@ -1030,6 +1033,7 @@ impl CodexProvider {
         environment: &InteractiveEnvironment,
     ) -> Result<CodexInteractiveProcess, ProviderError> {
         let inherited_terminal = io::stdin().is_terminal();
+        let inherited_input = terminal::InheritedInput::from_stdin();
         let signals = SignalMonitor::install()?;
         let command = self.interactive_command(specification, environment)?;
         let executable = command.get_program().to_string_lossy().into_owned();
@@ -1042,6 +1046,7 @@ impl CodexProvider {
             supervision: self.supervision,
             child,
             inherited_terminal,
+            inherited_input,
             signals,
         })
     }
@@ -1052,6 +1057,17 @@ impl CodexProvider {
     ) -> Result<u32, ProviderError> {
         self.interactive_session(session)
             .map(CodexInteractiveProcess::process_id)
+    }
+
+    pub(crate) fn foreground_process_identity(
+        &self,
+        session: &ProviderSessionHandle,
+    ) -> Option<terminal::ForegroundIdentity> {
+        let process = self.interactive_session(session).ok()?;
+        terminal::ForegroundIdentity::capture_child(
+            process.process_id(),
+            process.inherited_input.clone(),
+        )
     }
 
     pub(crate) async fn wait_foreground_until_termination<F>(

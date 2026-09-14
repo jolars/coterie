@@ -439,7 +439,7 @@ Observed on September 11, 2026, in run
 Observed on September 11, 2026, in run
 `cr-01M28BJCEK8FB1B908HVK3DQ0H`.
 
-- [ ] **Detect stranded foreground terminals in `doctor`.** Coterie and its
+- [x] **Detect stranded foreground terminals in `doctor`.** Coterie and its
   foreground provider remained alive after Sidekick deleted their terminal,
   blocking another foreground launch while `doctor` reported healthy sessions.
   Diagnose terminal loss using verified process ownership and terminal state,
@@ -448,6 +448,20 @@ Observed on September 11, 2026, in run
   proved, and name a supported recovery action. Test closed PTYs, live terminals
   hidden by the editor, missing or ambiguous processes, PID reuse, and both
   human and JSON diagnostics.
+
+  Foreground startup now records immutable process and input identity in schema
+  migration 15. Doctor verifies that evidence through pinned procfs handles and
+  reports a stranded session when its surviving process retains a closed Linux
+  PTY. Hidden, open PTYs remain healthy; missing or ambiguous ownership and
+  legacy sessions without evidence never establish terminal health. Inspection
+  does not consume input, change terminal settings or durable state, or signal
+  processes. Diagnostics name `coterie stop` for bounded recovery. Real PTY and
+  process tests cover terminal loss, hidden terminals, PID identity mismatches,
+  missing processes, and read-only inspection. Human and JSON tests verify the
+  warning and successful shutdown. Persistence tests cover immutable replay,
+  generation fencing, rollback, and upgrades from every prior schema. The full
+  `task check` gate passes with 465 tests passed and 17 opt-in or helper tests
+  skipped; real Codex tests were not run.
 
 ## Follow-ups from the supervisor access failure
 

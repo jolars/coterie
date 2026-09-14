@@ -221,6 +221,23 @@ this status means **not verified**, even if a separate agent call has succeeded.
 It does not mean the bridge failed. Without a valid configuration or snapshot,
 one check with a null subject explains that prerequisite.
 
+Each foreground session without an observed exit also has a `foreground_terminal`
+check, with its session ID in `subject`. Doctor compares startup evidence (PID,
+Linux boot identity, process start time, user ID, and inherited PTY identity) with
+the process and input pinned through procfs. A verified, linked Linux PTY reports
+`ok`, even if its editor view is hidden. A verified surviving process whose PTY
+has closed reports `warning` and identifies a stranded foreground session.
+Missing or exited processes also report `warning`. Missing startup evidence,
+changed ownership or input, possible PID reuse, inaccessible procfs, and
+unsupported terminals report `unavailable`; durable `running` state is not proof
+of health. Schema migration 15 leaves existing sessions without startup evidence
+unverified. These checks never read terminal input or change terminal settings.
+
+For a stranded foreground session, run `coterie stop` to request bounded shutdown
+before relaunching. If shutdown cannot verify process exit, preserve the run and
+its work for operator inspection. Doctor does not signal a process or repair the
+session automatically.
+
 To check access in a running session, call `prime` through that agent's Coterie
 MCP tools. If operator access succeeds but the MCP call fails, inspect the
 provider's required Coterie MCP bridge startup diagnostics and the reported

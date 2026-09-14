@@ -143,3 +143,145 @@ fn configured_foreground_launch_failure_allows_supervisor_cleanup() {
         String::from_utf8_lossy(&output.stderr).contains("Permission denied")
     );
 }
+
+struct Foreground<'a> {
+    child: Child,
+    fixture: &'a TestEnvironment,
+}
+
+impl Drop for Foreground<'_> {
+    fn drop(&mut self) {
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.fixture.command().args(["stop", "--json"]).output();
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[test]
+fn doctor_distinguishes_hidden_and_closed_foreground_terminals_read_only() {
+    use nix::pty::{grantpt, posix_openpt, ptsname_r, unlockpt};
+    let fixture = TestEnvironment::new();
+    configure(&fixture);
+    let mut supervisor = Supervisor::start(&fixture);
+    let master =
+        posix_openpt(nix::fcntl::OFlag::O_RDWR | nix::fcntl::OFlag::O_CLOEXEC)
+            .unwrap();
+    grantpt(&master).unwrap();
+    unlockpt(&master).unwrap();
+    let slave = fs::File::options()
+        .read(true)
+        .write(true)
+        .open(ptsname_r(&master).unwrap())
+        .unwrap();
+    let attributes = nix::sys::termios::tcgetattr(&slave).unwrap();
+    let ready = fixture.root.join("ready");
+    let capture = fixture.root.join("signals");
+    // No controlling terminal sends HUP here, reproducing a deleted editor
+    // terminal whose wrapper and provider survive. No viewer reads the master.
+    let child = fixture
+        .command()
+        .env("COTERIE_FAKE_MODE", "stop")
+        .env("COTERIE_FAKE_READY", &ready)
+        .env("COTERIE_FAKE_CAPTURE", &capture)
+        .stdin(slave.try_clone().unwrap())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut foreground = Foreground {
+        child,
+        fixture: &fixture,
+    };
+    wait_until("foreground startup observation", || {
+        ready.exists()
+            && fixture.run_json(&["status", "--json"])["data"]["agents"][0]["state"]
+                == "running"
+    });
+    let database = fixture
+        .state
+        .join("coterie/runs")
+        .join(RUN_ID)
+        .join("state.sqlite3");
+    let connection = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let snapshot = || {
+        (
+            query_rows(
+                &connection,
+                "SELECT id, state, provider_session_id, ended_at FROM sessions ORDER BY id",
+                4,
+            ),
+            query_rows(
+                &connection,
+                "SELECT session_id, identity_json FROM foreground_process_identity ORDER BY session_id",
+                2,
+            ),
+            query_rows(
+                &connection,
+                "SELECT sequence, payload_json FROM events ORDER BY sequence",
+                2,
+            ),
+        )
+    };
+    let before = snapshot();
+    let inspect = |status: &str, message: &str| {
+        let report = fixture.run_json(&["doctor", "--json"]);
+        let checks = report["data"]["report"]["checks"].as_array().unwrap();
+        let terminals: Vec<_> = checks
+            .iter()
+            .filter(|check| check["check"] == "foreground_terminal")
+            .collect();
+        assert_eq!(terminals.len(), 1, "{report}");
+        let terminal = terminals[0];
+        assert_eq!(terminal["status"], status, "{terminal}");
+        assert!(terminal["subject"].as_str().unwrap().starts_with("cs-"));
+        assert!(
+            terminal["message"].as_str().unwrap().contains(message),
+            "{terminal}"
+        );
+        let output = fixture.command().arg("doctor").output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty());
+        let human = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            human.contains("foreground_terminal") && human.contains(message),
+            "{human}"
+        );
+        if status == "warning" {
+            assert!(
+                terminal["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("coterie stop")
+            );
+            assert!(human.contains("coterie stop"));
+        }
+        assert_eq!(
+            snapshot(),
+            before,
+            "inspection must not change durable state"
+        );
+    };
+    inspect("ok", "PTY remains linked");
+    assert_eq!(nix::sys::termios::tcgetattr(&slave).unwrap(), attributes);
+    assert!(foreground.child.try_wait().unwrap().is_none());
+    drop(master);
+    wait_until("PTY master close", || {
+        slave.metadata().unwrap().nlink() == 0
+    });
+    inspect("warning", "stranded");
+    inspect("warning", "stranded");
+    assert!(foreground.child.try_wait().unwrap().is_none());
+    assert!(!capture.exists(), "doctor must not signal the provider");
+    supervisor.stop(&fixture);
+    wait_until("stranded foreground cleanup", || {
+        foreground.child.try_wait().unwrap().is_some()
+    });
+    assert!(foreground.child.wait().unwrap().success());
+    assert_eq!(fs::read_to_string(capture).unwrap(), "int\nterm\n");
+}

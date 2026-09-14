@@ -2,6 +2,7 @@
 
 mod configuration;
 mod diagnostics;
+mod foreground;
 mod progress;
 mod recovery;
 pub(crate) mod resubmit;
@@ -110,6 +111,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 14,
         name: "workspace_bindings",
         sql: include_str!("state/migrations/0014_workspace_bindings.sql"),
+    },
+    Migration {
+        version: 15,
+        name: "foreground_process_identity",
+        sql: include_str!(
+            "state/migrations/0015_foreground_process_identity.sql"
+        ),
     },
 ];
 
@@ -3956,6 +3964,7 @@ fn decode_session_process_owner(
 
 #[cfg(test)]
 mod tests {
+    mod foreground;
     mod workspace_reuse;
     use std::cell::Cell;
     use std::collections::BTreeSet;
@@ -4016,6 +4025,7 @@ mod tests {
             "comments",
             "configuration_snapshots",
             "events",
+            "foreground_process_identity",
             "messages",
             "operations",
             "projects",
@@ -5479,6 +5489,17 @@ mod tests {
             let store =
                 Store::open(&database.0).expect("the database should upgrade");
             let mut store = store;
+            assert!(
+                store
+                    .transaction(|repositories| repositories
+                        .foreground_identity(
+                            RUN_ID.parse().unwrap(),
+                            SESSION_ID.parse().unwrap()
+                        ))
+                    .unwrap()
+                    .is_none(),
+                "migration must not infer identity from a legacy PID"
+            );
             let configuration = store
                 .configuration(RUN_ID.parse().unwrap())
                 .expect("upgrades pin the historical compiled runtime policy");

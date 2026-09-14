@@ -55,7 +55,9 @@ pub(crate) enum Command {
     Config(config::ConfigArguments),
     /// Inspect the active run, agents, and tasks.
     Status,
-    /// Diagnose operator health and durable state; agent connectivity remains unverified.
+    /// Diagnose operator health, foreground terminals, and durable state.
+    ///
+    /// Agent connectivity remains unverified.
     Doctor,
     /// Report the authenticated caller's identity.
     Whoami,

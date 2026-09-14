@@ -1373,6 +1373,25 @@ lease-protected startup and desired-state reconciliation path. An indexed run
 must have a matching durable database; a responsive socket or ambiguous file
 ownership is never discarded as stale.
 
+Foreground terminal diagnostics use startup evidence from the wrapper that owns
+the provider child. It records the child's PID, Linux boot identity, start time,
+user ID, and inherited input identity with the startup observation. This evidence
+is immutable for that session generation; older sessions without it remain
+unverified. Reading a stored PID or a durable `running` label cannot establish
+process ownership.
+
+Doctor opens the process's procfs directory, verifies the recorded identity,
+and inspects its input through that pinned directory without reading terminal
+input, writing output, changing terminal settings, or sending signals. A matching
+Linux PTY slave whose inode has been unlinked identifies a closed terminal.
+A linked PTY indicates no observed terminal loss, regardless of whether an editor
+currently displays it. Missing processes, changed input, inaccessible procfs,
+unsupported terminals, and mismatched process identities produce explicit
+uncertainty rather than a healthy-session claim. Inspection rechecks identity
+after observing the terminal and never changes durable session state. Recovery
+uses `coterie stop` for bounded shutdown before relaunching; a failure to verify
+shutdown preserves the run and its work for operator inspection.
+
 Doctor distinguishes the operator-channel supervisor handshake and static
 provider version, CLI, and MCP configuration checks from authenticated agent
 connectivity. It reports `agent_connectivity` as `unavailable` for each enabled

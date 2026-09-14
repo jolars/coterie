@@ -602,6 +602,7 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
                 &AuthenticatedCaller::Operator,
                 scope,
                 provider.foreground_process_id(&handle).unwrap(),
+                provider.foreground_process_identity(&handle).as_ref(),
             )
             .unwrap();
             if case == "foreground-exit" {

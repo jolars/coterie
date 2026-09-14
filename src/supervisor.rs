@@ -581,7 +581,11 @@ async fn launch_foreground_codex(
         .foreground_process_id(&session)
         .map_err(AgentSessionError::from)?;
     let startup = client
-        .request(RpcRequest::ForegroundStarted { scope, process_id })
+        .request(RpcRequest::ForegroundStarted {
+            scope,
+            process_id,
+            identity: provider.foreground_process_identity(&session),
+        })
         .await;
     let termination = async {
         if startup.is_ok() {
@@ -2775,9 +2779,18 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             operation_id,
             token,
         } => launch_foreground(store, run_id, caller, operation_id, &token),
-        RpcRequest::ForegroundStarted { scope, process_id } => {
-            observe_foreground_started(store, run_id, caller, scope, process_id)
-        }
+        RpcRequest::ForegroundStarted {
+            scope,
+            process_id,
+            identity,
+        } => observe_foreground_started(
+            store,
+            run_id,
+            caller,
+            scope,
+            process_id,
+            identity.as_ref(),
+        ),
         RpcRequest::WaitForegroundControl { .. } => Err(RpcFailure::new(
             RpcFailureCode::Internal,
             "foreground process control was routed through the wrong command path",
@@ -3359,12 +3372,18 @@ fn observe_foreground_started(
     caller: &AuthenticatedCaller,
     scope: SessionScope,
     process_id: u32,
+    identity: Option<&crate::providers::terminal::ForegroundIdentity>,
 ) -> Result<RpcResponse, RpcFailure> {
     require_operator(
         caller,
         "only the foreground operator can report provider startup",
     )?;
     require_foreground_scope(store, run_id, scope)?;
+    if identity.is_some_and(|identity| identity.process_id != process_id) {
+        return Err(conflict(
+            "foreground process identity does not match the observed child",
+        ));
+    }
     let observed_at = rpc_timestamp()?;
     let provider_session_id = format!("process:{process_id}");
     store
@@ -3382,6 +3401,9 @@ fn observe_foreground_started(
                     &provider_session_id,
                     observed_at,
                 )?;
+            if let Some(identity) = identity {
+                repositories.record_foreground_identity(scope, identity)?;
+            }
             if reconciliation == SessionTransitionOutcome::Applied {
                 repositories.append_event(&NewEvent {
                     run_id,
@@ -7613,7 +7635,8 @@ mod tests {
                             scope.run_id,
                             &caller,
                             scope,
-                            42
+                            42,
+                            None,
                         )
                         .is_err()
                     );
@@ -7732,11 +7755,17 @@ while :; do :; done
                         RpcRequest::ForegroundStarted {
                             scope,
                             process_id: pid,
+                            identity,
                         } => {
                             process_id = Some(pid);
                             if observed {
                                 super::observe_foreground_started(
-                                    &mut store, run_id, &caller, scope, pid,
+                                    &mut store,
+                                    run_id,
+                                    &caller,
+                                    scope,
+                                    pid,
+                                    identity.as_ref(),
                                 )
                                 .unwrap();
                             }
