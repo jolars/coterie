@@ -841,6 +841,13 @@ shell discovery; they grant no authority. Other toolchain inputs, including
 arbitrary `NIX_*` or `CARGO_*` variables, remain excluded. Enter a development
 environment explicitly from the assigned workspace when its build requires it.
 
+Provider bindings may use any valid configured name. Foreground startup, control,
+and exit observations validate that name against the saved interactive role,
+along with foreground process ownership and the current session generation.
+If startup acknowledgment fails after process creation, the wrapper terminates
+and reaps its child, reports the observed exit, and returns the startup error.
+Once that exit is recorded, ordinary `coterie stop` can complete shutdown.
+
 If the bootstrap executable cannot run, report its absolute path and the error
 to the operator. Supervisor socket permission errors return `unavailable`
 (exit 7), identify the failed socket, and direct the operator to inspect the

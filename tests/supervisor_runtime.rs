@@ -130,6 +130,9 @@ mod idle;
 #[path = "supervisor_runtime/terminal.rs"]
 mod terminal;
 
+#[path = "supervisor_runtime/foreground.rs"]
+mod foreground;
+
 fn write_global(fixture: &TestEnvironment, text: &str) {
     let directory = fixture.root.join("config/coterie");
     fs::create_dir_all(&directory).unwrap();

@@ -505,7 +505,7 @@ Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
   and 17 opt-in or generation tests skipped. This uses the explicit unverified
   fallback; doctor does not launch a live agent probe.
 
-- [ ] **Honor configured provider names in foreground observations.**
+- [x] **Honor configured provider names in foreground observations.**
   The real foreground MCP test exposed an existing hard-coded provider check:
   naming the Codex adapter `real_codex` makes `require_foreground_scope` reject
   startup because it compares `session.provider` with `codex`. The default
@@ -514,6 +514,16 @@ Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
   regression for foreground startup and shutdown with an arbitrary provider
   name. The failed launch also left a supervisor alive after the fixture's
   normal stop attempt; cover cleanup of that failure.
+  Observations now validate the saved role's provider binding, interactive mode,
+  foreground process ownership, and current session generation. The wrapper
+  records a reaped child's exit even when startup acknowledgment fails, then
+  returns the original error. Tests cover arbitrary names across startup,
+  reconnect, and shutdown, invalid observation scopes, launch failure, and
+  rejected startup acknowledgments before and after the startup record commits.
+  They verify child reaping, credential revocation, and completed shutdown.
+  The opt-in foreground MCP test also uses `real_codex`; it was not rerun for
+  this change. `task check` passes with 454 ordinary tests and 17 opt-in or
+  generation tests skipped.
 
 ## M6: Cross-project orchestration
 

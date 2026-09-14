@@ -167,6 +167,13 @@ child at the same deadline used by foreground run shutdown. Repeated signals
 and concurrent stop requests do not extend these deadlines. The wrapper reaps
 its child and records the exit before returning; the run and workers survive.
 
+If the supervisor rejects or cannot acknowledge foreground startup after the
+provider process is created, the wrapper terminates and reaps that child under
+the same bounded policy. It reports the observed exit before returning the
+original startup error, even if startup was never recorded. Failed process
+observation remains unknown. Every report retains its session ownership and
+generation checks.
+
 ## Native dependencies and external boundaries
 
 Coterie should be a single compiled Rust binary apart from the agent harnesses
@@ -220,6 +227,12 @@ The M5 loader, resolver, and inspection commands retain provenance for every
 effective value and verify portable configuration locks. Launches and recovery
 use an immutable snapshot of that resolved configuration. Provider bindings
 currently select commands implementing the Codex adapter contract.
+
+Provider binding names are configuration keys, not adapter identifiers.
+Foreground observations match the saved role's provider binding and interactive
+mode, foreground process ownership, and the current run, agent, session, and
+generation. A command implementing the Codex contract may use any valid
+configured provider name.
 
 Only absolute `XDG_CONFIG_HOME` and `HOME` values participate in discovery.
 An absent or relative `XDG_CONFIG_HOME` falls back to an absolute `HOME`; if

@@ -698,6 +698,8 @@ fn installed_codex_foreground_uses_mcp_under_both_profiles() {
         )).unwrap();
         let prompt = "Test Coterie's foreground MCP transport. Discover and call the Coterie prime tool. Then call new_operation_id and task_create with title=Foreground MCP verified, description=Authenticated foreground transport verified., project=primary, group=null, dependencies=[]. Do not spawn workers or run shell commands. After the tool succeeds, reply Done and wait.";
         let global = include_str!("../../examples/config/global.toml")
+            .replace("providers.codex", "providers.real_codex")
+            .replace("provider = \"codex\"", "provider = \"real_codex\"")
             .replace(
                 "command = [\"codex\"]",
                 &format!(

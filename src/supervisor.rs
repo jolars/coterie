@@ -580,22 +580,21 @@ async fn launch_foreground_codex(
     let process_id = provider
         .foreground_process_id(&session)
         .map_err(AgentSessionError::from)?;
-    if let Err(error) = client
+    let startup = client
         .request(RpcRequest::ForegroundStarted { scope, process_id })
-        .await
-    {
-        let _child_may_already_be_gone = provider
-            .wait_foreground_until_termination(&session, std::future::ready(()))
+        .await;
+    let termination = async {
+        if startup.is_ok() {
+            wait_for_foreground_termination(
+                project.clone(),
+                directories.clone(),
+                run_id,
+                scope,
+                overrides.clone(),
+            )
             .await;
-        return Err(error);
-    }
-    let termination = wait_for_foreground_termination(
-        project.clone(),
-        directories.clone(),
-        run_id,
-        scope,
-        overrides.clone(),
-    );
+        }
+    };
     let (status, termination_requested) = match provider
         .wait_foreground_until_termination(&session, termination)
         .await
@@ -605,10 +604,13 @@ async fn launch_foreground_codex(
             let _observation_may_fail = client
                 .request(RpcRequest::ForegroundObservationLost { scope })
                 .await;
+            startup?;
             return Err(AgentSessionError::Provider(error).into());
         }
     };
-    record_foreground_exit(
+    // A rejected startup acknowledgment still leaves an owned child whose
+    // observed exit must reach the supervisor before returning the startup error.
+    let exit_observation = record_foreground_exit(
         project,
         directories,
         client,
@@ -621,7 +623,9 @@ async fn launch_foreground_codex(
         termination_requested,
         overrides,
     )
-    .await?;
+    .await;
+    startup?;
+    exit_observation?;
     Ok(if status.success() {
         crate::cli::ExitCategory::Success
     } else {
@@ -3557,10 +3561,28 @@ fn require_foreground_scope(
                 repositories.session_scope_is_current(scope)
             })
             .map_err(rpc_state_failure)?
-        || session.provider != "codex"
+        || session.process_owner != SessionProcessOwner::Foreground
     {
         return Err(conflict(
-            "the foreground observation does not match its session generation",
+            "the foreground observation does not match its session ownership and generation",
+        ));
+    }
+    let configured = store
+        .transaction(|repositories| {
+            let config = repositories.configuration(run_id)?;
+            Ok(repositories
+                .agent(scope.agent_id)?
+                .and_then(|agent| config.archetype.role(&agent.role))
+                .is_some_and(|role| {
+                    role.mode == RoleMode::Interactive
+                        && role.provider == session.provider
+                        && config.providers.contains_key(&role.provider)
+                }))
+        })
+        .map_err(rpc_state_failure)?;
+    if !configured {
+        return Err(conflict(
+            "the foreground observation does not match its configured provider and interactive role",
         ));
     }
     Ok(())
@@ -7448,6 +7470,364 @@ mod tests {
     }
 
     #[test]
+    fn foreground_observations_validate_saved_provider_mode_and_ownership() {
+        let global = include_str!("../examples/config/global.toml")
+            .replace("providers.codex", "providers.real_codex")
+            .replace("provider = \"codex\"", "provider = \"real_codex\"");
+        let config = crate::config::resolve(
+            &toml::from_str(&global).unwrap(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        for (role, provider, owner, accepted) in [
+            (
+                "coordinator",
+                "real_codex",
+                SessionProcessOwner::Foreground,
+                true,
+            ),
+            (
+                "coordinator",
+                "codex",
+                SessionProcessOwner::Foreground,
+                false,
+            ),
+            (
+                "builder",
+                "real_codex",
+                SessionProcessOwner::Foreground,
+                false,
+            ),
+            (
+                "coordinator",
+                "real_codex",
+                SessionProcessOwner::Supervisor,
+                false,
+            ),
+            (
+                "missing",
+                "real_codex",
+                SessionProcessOwner::Foreground,
+                false,
+            ),
+        ] {
+            let fixture = TestDirectory::new();
+            let mut store =
+                Store::open(&fixture.join("state.sqlite3")).unwrap();
+            let scope = SessionScope {
+                run_id: RUN_ID.parse().unwrap(),
+                agent_id: AGENT_ID.parse().unwrap(),
+                session_id: SESSION_ID.parse().unwrap(),
+                generation: 1,
+            };
+            store
+                .transaction(|r| {
+                    r.insert_run(&RunRecord {
+                        id: scope.run_id,
+                        status: "active".into(),
+                        created_at: 1,
+                        stopped_at: None,
+                    })?;
+                    r.snapshot_configuration(scope.run_id, &config, 1)?;
+                    r.insert_agent(&AgentRecord {
+                        id: scope.agent_id,
+                        run_id: scope.run_id,
+                        role: role.into(),
+                        generation: 1,
+                        state: LifecycleState::Starting,
+                        created_at: 1,
+                    })?;
+                    r.insert_session(&SessionRecord {
+                        id: scope.session_id,
+                        run_id: scope.run_id,
+                        agent_id: scope.agent_id,
+                        generation: 1,
+                        provider: provider.into(),
+                        provider_session_id: None,
+                        reconciliation_state: ExternalResourceState::Unknown,
+                        state: LifecycleState::Starting,
+                        transcript_path: super::TranscriptStore::relative_path(
+                            scope.session_id,
+                        ),
+                        created_at: 1,
+                        ended_at: None,
+                        reconciled_at: None,
+                        process_owner: owner,
+                    })
+                })
+                .unwrap();
+            assert_eq!(
+                super::require_foreground_scope(
+                    &mut store,
+                    scope.run_id,
+                    scope
+                )
+                .is_ok(),
+                accepted,
+                "{role}, {provider}, {owner:?}"
+            );
+            for altered in [
+                SessionScope {
+                    run_id: RunId::generate(),
+                    ..scope
+                },
+                SessionScope {
+                    agent_id: AgentId::generate(),
+                    ..scope
+                },
+                SessionScope {
+                    session_id: SessionId::generate(),
+                    ..scope
+                },
+                SessionScope {
+                    generation: 2,
+                    ..scope
+                },
+            ] {
+                assert!(
+                    super::require_foreground_scope(
+                        &mut store,
+                        scope.run_id,
+                        altered
+                    )
+                    .is_err()
+                );
+            }
+            assert!(
+                super::require_foreground_scope(
+                    &mut store,
+                    RunId::generate(),
+                    scope
+                )
+                .is_err()
+            );
+            if !accepted {
+                for caller in [
+                    AuthenticatedCaller::Operator,
+                    AuthenticatedCaller::Agent(scope),
+                ] {
+                    assert!(
+                        super::observe_foreground_started(
+                            &mut store,
+                            scope.run_id,
+                            &caller,
+                            scope,
+                            42
+                        )
+                        .is_err()
+                    );
+                    assert!(
+                        super::observe_foreground_ended(
+                            &mut store,
+                            scope.run_id,
+                            &caller,
+                            scope,
+                            super::ForegroundEnd::LaunchFailed
+                        )
+                        .is_err()
+                    );
+                }
+                store
+                    .transaction(|r| {
+                        assert_eq!(
+                            r.session(scope.session_id)?.unwrap().state,
+                            LifecycleState::Starting
+                        );
+                        assert!(
+                            r.events_after(scope.run_id, 0, 100)?.is_empty()
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_foreground_startup_records_reaped_exit() {
+        use crate::project::{CoterieDirectories, DiscoveredProject};
+
+        for observed in [false, true] {
+            let fixture = TestDirectory::new();
+            let project_path = fixture.join("project");
+            fs::create_dir(&project_path).unwrap();
+            let project = DiscoveredProject::discover(&project_path).unwrap();
+            let active = entry(&project_path);
+            let directories = CoterieDirectories::from_base_directories(
+                &fixture.0,
+                fixture.join("state"),
+            )
+            .unwrap();
+            let run = directories.prepare_run(active.run_id).unwrap();
+            let executable = fixture.join("provider");
+            fs::write(&executable, r#"#!/bin/sh
+if [ "$1" = --version ]; then printf 'codex-cli 0.153.4\n'; exit 0; fi
+if [ "$1" = --help ] || [ "${2-}" = --help ]; then
+  printf '%s\n' 'Usage: codex [OPTIONS] [PROMPT]' 'Usage: codex exec [OPTIONS] [PROMPT]' '--config --cd --sandbox --ask-for-approval --json'
+  exit 0
+fi
+if [ "${3-}" = mcp ]; then
+  printf '%s\n' '{"enabled":true,"transport":{"type":"stdio","command":"coterie","args":["__mcp"],"env_vars":["COTERIE_TOKEN"]}}'
+  exit 0
+fi
+while :; do :; done
+"#).unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+                .unwrap();
+            let global = include_str!("../examples/config/global.toml")
+                .replace("providers.codex", "providers.real_codex")
+                .replace("provider = \"codex\"", "provider = \"real_codex\"")
+                .replace(
+                    "command = [\"codex\"]",
+                    &format!(
+                        "command = [{}]",
+                        serde_json::to_string(&executable).unwrap()
+                    ),
+                );
+            let config = crate::config::resolve(
+                &toml::from_str(&global).unwrap(),
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+            let mut store = super::initialize_store_with_configuration(
+                &run.state, &active, &project, &config,
+            )
+            .unwrap();
+            let socket = directories.socket_path(active.run_id);
+            let listener = UnixListener::bind(&socket).unwrap();
+            fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))
+                .unwrap();
+            let (commands, mut requests) = mpsc::channel(1);
+            let (shutdown, _shutdown_rx) = mpsc::channel(1);
+            let served = active.clone();
+            let connection = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                serve_connection(stream, served, commands, shutdown).await
+            });
+            let run_id = active.run_id;
+            let supervisor = tokio::spawn(async move {
+                let mut process_id = None;
+                while let Some(command) = requests.recv().await {
+                    let SupervisorCommand::Dispatch {
+                        caller,
+                        request,
+                        response,
+                    } = command
+                    else {
+                        panic!("foreground observation expected")
+                    };
+                    let result = match request {
+                        RpcRequest::LaunchForeground {
+                            operation_id,
+                            token,
+                        } => launch_foreground(
+                            &mut store,
+                            run_id,
+                            &caller,
+                            operation_id,
+                            &token,
+                        ),
+                        RpcRequest::ForegroundStarted {
+                            scope,
+                            process_id: pid,
+                        } => {
+                            process_id = Some(pid);
+                            if observed {
+                                super::observe_foreground_started(
+                                    &mut store, run_id, &caller, scope, pid,
+                                )
+                                .unwrap();
+                            }
+                            Err(super::conflict("injected startup rejection"))
+                        }
+                        RpcRequest::ForegroundExited {
+                            scope,
+                            code,
+                            signal,
+                        } => super::observe_foreground_ended(
+                            &mut store,
+                            run_id,
+                            &caller,
+                            scope,
+                            super::ForegroundEnd::Exited { code, signal },
+                        ),
+                        _ => panic!("unexpected foreground request"),
+                    };
+                    response.send(result).unwrap();
+                }
+                (store, process_id.unwrap())
+            });
+            let mut client =
+                SupervisorClient::connect_operator_at(&socket, &active)
+                    .await
+                    .unwrap();
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                super::launch_foreground_codex(
+                    &project,
+                    &directories,
+                    &mut client,
+                    OperationId::generate(),
+                    &Default::default(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("injected startup rejection"),
+                "{error}"
+            );
+            drop(client);
+            let _closed_connection = connection.await.unwrap();
+            let (mut store, process_id) = supervisor.await.unwrap();
+            assert_eq!(
+                nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(process_id.try_into().unwrap()),
+                    None
+                ),
+                Err(nix::errno::Errno::ESRCH)
+            );
+            store
+                .transaction(|r| {
+                    let session = r.sessions(run_id)?.pop().unwrap();
+                    assert_eq!(
+                        session.state,
+                        LifecycleState::Exited,
+                        "startup recorded: {observed}"
+                    );
+                    assert!(session.ended_at.is_some());
+                    assert!(
+                        r.active_session_credential(
+                            run_id,
+                            session.agent_id,
+                            session.id
+                        )?
+                        .is_none()
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let (response, mut stopped) = oneshot::channel();
+            begin_shutdown(
+                &mut store,
+                &mut runtime_sessions(&run.state),
+                &mut runtime_workspaces(&run.state),
+                run_id,
+                OperationId::generate(),
+                response,
+                &mut ForegroundCoordination::default(),
+            );
+            assert!(matches!(
+                stopped.try_recv().unwrap().unwrap(),
+                RpcResponse::ShuttingDown { .. }
+            ));
+        }
+    }
+
+    #[test]
     fn replaced_callers_cannot_finish_old_assignments_or_execute_queued_requests()
      {
         let fixture = TestDirectory::new();
@@ -7655,7 +8035,7 @@ mod tests {
                 repositories.insert_agent(&AgentRecord {
                     id: agent_id,
                     run_id: active.run_id,
-                    role: "worker".to_owned(),
+                    role: "lead".to_owned(),
                     generation: scope.generation,
                     state: LifecycleState::Running,
                     created_at: 11,
