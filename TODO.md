@@ -131,14 +131,15 @@ later milestones build on.
   record the resulting commit without invoking the Git CLI.
 - [x] Implement explicit guarded integration. Refuse dirty targets, unexpected
   tips, ambiguous histories, and conflicts; never remove dirty,
-  unintegrated, running, or ambiguously owned work.
-  Integration defaults to rebase, preserving contribution commits in linear
-  history, with explicit `--strategy merge` support in the CLI and agent MCP
-  tool. Migration 16 preserves historical merge plans. Real-repository tests
-  cover authors, messages, empty commits, intermediate conflicts, and preserved
+  unintegrated, running, or ambiguously owned work. Integration defaults to
+  rebase, preserving contribution commits in linear history, with explicit
+  `--strategy merge` support in the CLI and agent MCP tool. Migration 16
+  preserves historical merge plans. Real-repository tests cover authors,
+  messages, empty commits, intermediate conflicts, and preserved
   submissions; crash matrices cover both strategies and repeated recovery.
-  The multi-worker workflow verifies linear integration through accepted task
-  closure. `task check` passes with 478 tests and 17 opt-in or helper tests skipped.
+  The multi-worker workflow verifies linear integration through accepted
+  task closure. `task check` passes with 478 tests and 17 opt-in or helper
+  tests skipped.
 - [x] Complete the operator loop for task creation, worker spawn, logs and
   messages, assignment submission, integration, validation, task closure,
   and safe stop.
@@ -185,16 +186,17 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   following, transcript-tail handling, credential redaction, and private
   runtime permission checks.
 - [x] Inject failures at every database/process/filesystem boundary and verify
-  convergence to a recoverable state without duplicated side effects. See the
-  [crash matrix](docs/crash-matrix.md) for boundaries and recovery evidence.
+  convergence to a recoverable state without duplicated side effects. See
+  the [crash matrix](docs/crash-matrix.md) for boundaries and recovery
+  evidence.
 
 ### M4 gate
 
 - [x] The crash matrix, restart tests, cleanup safety tests, and fake-provider
   conformance suite pass repeatedly under concurrency.
 - [x] No destructive path runs without positive proof of ownership, inactivity,
-  and recoverability. See the [safety audit](docs/destructive-operations.md) for
-  the operation inventory, guards, and regression evidence.
+  and recoverability. See the [safety audit](docs/destructive-operations.md)
+  for the operation inventory, guards, and regression evidence.
 
 ## M5: Full declarative configuration
 
@@ -215,345 +217,31 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 - [x] Wire resolved configuration into launches and recovery, snapshot the
   effective run configuration, and reject incompatible changes rather than
   hot-applying them. The [runtime tests](tests/supervisor_runtime.rs) cover
-  configured launches, authority, limits, overrides, and recovery. Migration 11
-  pins historical policy for existing runs; upgrade and crash tests verify
-  durable snapshots. `task check` passes.
+  configured launches, authority, limits, overrides, and recovery. Migration
+  11 pins historical policy for existing runs; upgrade and crash tests
+  verify durable snapshots. `task check` passes.
 
 ### M5 gate
 
 - [x] Lattice and property tests prove that an untrusted project override can
-  never increase authority or a resource ceiling. See the
-  [policy tests](src/config/policy_tests.rs) for intersection laws, combined
+  never increase authority or a resource ceiling. See the [policy
+  tests](src/config/policy_tests.rs) for intersection laws, combined
   restrictions, trusted selection, operator bounds, and injection rejection.
 - [x] Golden tests cover schemas, provenance, configuration fingerprints, lock
-  portability, includes, and actionable mismatch diagnostics. See the
-  [lock tests](src/config/lock/tests.rs) and
-  [configuration CLI tests](tests/config_cli.rs), alongside the loader and
-  provenance golden tests. `task check` passes.
-
-## Follow-ups from the Diplodocus delegation run
-
-Observed on September 11, 2026, in run
-`cr-01M27JEZ698AG5Y4EX1AH230VM`, with two implementation workers and one
-reviewer. These are follow-ups to the M3-M5 workflow. Specify any new commands,
-capabilities, or recovery transitions in `DESIGN.md` before implementation.
-
-- [x] **Reject incomplete worktree submissions.** A worker called
-  `finish --status completed` with uncommitted changes, so the recorded result
-  was the unchanged base commit `27ae246`. Reject staged, unstaged, and
-  non-ignored untracked changes before recording a completed Git result; keep
-  the assignment active and identify the paths that need attention. Explain
-  the validate, commit, finish sequence in bootstrap guidance and CLI help.
-  Test each dirty state, commit-hook failure, and legitimate clean submissions
-  with no new commit, including review and non-code assignments.
-  Implemented with bounded, escaped path diagnostics, unreadable-path checks,
-  and hidden-index guards. The [submission tests](tests/supervisor_runtime/finish.rs)
-  cover rejected retries, successful replay, failing commit hooks, and clean
-  non-code results. `NEXTEST_TEST_THREADS=1 task check` passes.
-- [x] **Recover an incorrect submitted result.** The worker subsequently
-  committed `320ea60`, but another `finish` failed because it had no active
-  assignment. Integration then refused the mismatch between the worktree tip
-  and the recorded result. Provide an authorized, explicit recovery path to
-  reopen or supersede an unintegrated submission while preserving its original
-  record and commits. Test retries, crashes, concurrent integration, stale
-  sessions, and refusal to replace an already integrated result. Error messages
-  should name the supported next action.
-  Implemented as `task resubmit` with explicit expected and corrected commits,
-  preserved submission history, and integration-intent fencing. The
-  [recovery tests](tests/supervisor_runtime/resubmit.rs) and
-  [crash matrix](docs/crash-matrix.md) cover retries, authorization, stale
-  sessions, and concurrent integration. `NEXTEST_TEST_THREADS=1 task check`
-  passes (375 tests).
-- [x] **Record validated work integrated outside Coterie.** The lead
-  cherry-picked the reviewed implementation as `66117ed`, but task closure
-  remained blocked because no Coterie integration record existed. Expose the
-  documented operator closure override with the actual result and target
-  commits, validation evidence, and reason. Record it as an override rather
-  than fabricated integration evidence. Test externally cherry-picked work,
-  authorization, retries, and dependency release; preserve the worktree and
-  existing dirty-target and unexpected-tip guards.
-  Implemented as operator-only `task close --override`, with exact assignment,
-  result, and target identities, a reason, and validation evidence. The
-  [closure tests](tests/supervisor_runtime/closure_override.rs) cover real
-  external cherry-picks, authorization, retries, concurrent integration,
-  dependency release, and preservation. The external closure crash matrix
-  verifies atomic acceptance and replay. `NEXTEST_TEST_THREADS=1 task check`
-  passes (376 tests).
-- [x] **Make worker bootstrap tools available in the actual shell.** Both
-  workers initially failed to find `coterie` and `rg`; their login shells lost
-  the user/devenv tool paths. Investigate the required user-identity and
-  toolchain inputs, provide a reliable bootstrap CLI location, and test the
-  provider's actual login and non-login shell behavior on NixOS. Preserve the
-  explicit environment allowlist and credential redaction. Diagnose bootstrap
-  command or supervisor-socket access failures under the selected permission
-  profile without silently widening permissions.
-  Worker launches now preserve the explicit user-identity and NixOS
-  initialization inputs, use non-login shell tools, and inject `COTERIE_BIN`.
-  [Actual Bash and Fish tests](src/providers/shell_tests.rs) pass on NixOS;
-  fake-provider tests exercise bootstrap RPCs through the injected path.
-  Permission errors identify operator inspection without relaxing policy.
-  `NEXTEST_TEST_THREADS=1 task check` passes with live Coterie session variables
-  excluded from the test process environment (368 tests).
-- [ ] **Make command guidance reflect capabilities and assignment state.**
-  `prime` omitted `spawn` for an agent allowed to spawn workers and reviewers,
-  yet advertised `finish` without an active assignment. Generate actionable
-  guidance from effective capabilities and current state, including available
-  roles and required identifiers. A denied operator-only `status` request
-  should point agents to an authorized inspection command. Test custom roles,
-  restricted capabilities, and active versus submitted assignments without
-  adding runtime semantics for built-in role names.
-- [x] **Provide compact progress updates for authorized agents.** The lead
-  repeatedly polled `prime` and `inbox` to discover task submissions and worker
-  exits; `prime` repeated complete task descriptions and results. Full `status`
-  and `events` are operator-only. Add a scoped, bounded inspection or wait
-  interface with resumable cursors for visible tasks, assignments, and peers.
-  Distinguish task submission from provider exit, and report changed state
-  without replaying every task body. Test reconnects, timeouts, multiple
-  completions, and authorization without requiring provider live steering.
-  Implemented as `coterie progress` with caller-scoped cursors, bounded lifecycle
-  pages, and optional waits. The [progress tests](tests/supervisor_runtime/progress.rs)
-  cover authorization, reconnects, supervisor restart, and concurrent mutations
-  during waits; unit tests cover paging, session renewal, and legacy payloads.
-  `NEXTEST_TEST_THREADS=1 task check` passes.
-- [ ] **Add concise transcript inspection.** Inspecting recent worker progress
-  required paging through large, JSON-escaped transcripts from byte zero and
-  extracting relevant records locally. Offer bounded tail or structured-event
-  views for an authorized agent/session while retaining the raw transcript
-  and byte-cursor interface. Preserve redaction and explicit incomplete-frame
-  handling. Test UTF-8 boundaries, oversized records, partial final JSONL
-  frames, session selection, and recovery after a reader disconnects.
-
-## Follow-ups from the submission and progress run
-
-Observed on September 11, 2026, in run
-`cr-01M27MHPXV53BPGWT9CC6GSV3P`. Specify changes to commands, workspace
-ownership, or recovery transitions in `DESIGN.md` before implementation.
-
-- [x] **Allow repeated read-only review assignments.** After the first review
-  finished, another `spawn reviewer` failed with
-  `UNIQUE constraint failed: workspaces.run_id, workspaces.path` because both
-  assignments used the primary project path. Model repeated use of project
-  and read-only workspaces without deleting historical assignment records or
-  weakening isolated-worktree ownership. Test sequential reviews in one run,
-  configured custom roles, retries, recovery, and concurrent assignments where
-  policy permits them; retain exclusive writable workspace guards.
-  Migration 14 preserves per-assignment bindings while allowing shared project
-  directories. Project writers retain ownership until assignment termination
-  and observed process exit; isolated worktree paths remain exclusive. The
-  [binding tests](src/state/tests/workspace_reuse.rs) and
-  [runtime tests](tests/supervisor_runtime/workspace_reuse.rs) cover history,
-  custom roles, concurrent readers, writer exclusion, retries, and recovery in
-  Git and plain directories, including a second review's interrupted spawn
-  intent alongside the first review's history. Every prior schema upgrades
-  with all three workspace kinds. Default parallel `task check` passes (415 tests, eight
-  opt-in or generation tests skipped).
-- [x] **Recover work from exited agents before submission.** The progress
-  worker exited with uncommitted implementation and review fixes, leaving its
-  task `in_progress`. A continuation copied the preserved candidate into a new
-  worktree and completed, while the original assignment remained active in
-  durable state. Provide an authorized, explicit path to retire or supersede
-  the interrupted assignment and link its continuation, preserving its
-  workspace, edits, commits, and history. Require verified process inactivity
-  before transferring writable ownership. Test exits and timeouts before
-  commit or finish, stale sessions and late output, retries, crashes during
-  recovery, continuation integration, and dependency release only after
-  accepted closure. Diagnostics should name the supported next action.
-  Implemented as `task recover` for unfinished Git worktree assignments, with
-  normalized exit evidence, fresh provider verification, and preserved source
-  files, index, commits, and history. Fresh worktree continuations have durable
-  links; ownership is never transferred. The [recovery tests](src/supervisor/recovery_tests.rs),
-  [runtime workflow and races](tests/supervisor_runtime/recovery.rs), and
-  [crash matrix](docs/crash-matrix.md) cover the gate. Original spawn retries
-  preserve retired sources and continuation ownership before and after restart.
-  Combined with workspace reuse, default parallel `task check` passes (430
-  tests, nine opt-in or generation tests skipped).
-- [x] **Make crash-matrix tests reliable under parallel execution.** Parallel
-  validation produced a shutdown trace mismatch and timeouts in the runtime
-  and attached-run publication/retirement matrices. Those cases passed
-  serially, and the final gate required `NEXTEST_TEST_THREADS=1`. Investigate
-  wall-clock and scheduling dependencies in the
-  [crash tests](src/supervisor/crash_tests.rs), using controlled time and
-  explicit synchronization where needed. Retain every crash boundary and
-  repeated-recovery assertion. Verify repeated default parallel `task check`
-  runs under load; serial execution alone does not satisfy this follow-up.
-  Deterministic regressions reproduce an interrupt-grace trace race and an
-  operator failure that stranded the runtime harness. Scoped test clocks and
-  joined, cancelable operator work remove those scheduling dependencies while
-  retaining every boundary, exact trace prefix, and repeated-recovery snapshot.
-  Three default-parallel stress iterations passed all 53 focused tests. Two
-  consecutive default-parallel `task check` runs passed all gates (436 tests,
-  nine skipped), each under four bounded CPU-load workers. See the
-  [crash-matrix acceptance evidence](docs/crash-matrix.md).
-
-## Follow-up from the replacement-submission handoff
-
-Observed on September 13, 2026, in run
-`cr-01M1YT3CZ41GB0HGYFXY9HXENB`.
-
-- [ ] **Clarify replacement-submission and closure guidance.** Integration
-  rejected the recovery submission's merge history. A validated linear
-  replacement was integrated through a new assignment, but the original task
-  remained `submitted`. Explain the linear-history requirement in diagnostics
-  and name the supported next action. Distinguish descendant corrections via
-  `task resubmit` from rewritten results requiring a new task, and guide an
-  authorized operator through `task close --override` after validating the
-  replacement. Account for command and capability availability in an older
-  running supervisor. Preserve original submissions, workspaces, and history;
-  do not infer acceptance from matching trees or fabricate integration evidence.
-  Test merged histories, validated replacements with different commit IDs,
-  restricted callers, unavailable commands, and dependency release only after
-  explicit accepted closure.
-
-## Follow-ups from the recovery and bootstrap run
-
-Observed on September 11, 2026, in run
-`cr-01M281JZ2J4XRPCJNXPR0DM0J8`.
-
-- [x] **Stop idle supervisors automatically.** An old supervisor remained
-  alive after all agents exited and rejected the upgraded CLI's protocol.
-  Implement the configurable idle shutdown specified in `DESIGN.md`, using
-  durable session and operation state rather than process counts or resource
-  usage. Test timer reset, read-only polling, live and uncertain sessions,
-  pending operations, disabled policy, configuration migration, attached-project
-  retirement, process exit, recovery, and preservation of unfinished work.
-  New runs default to 60 seconds; trusted global policy can change or disable
-  the timeout. Migration 13 preserves disabled shutdown for historical runs.
-  The [idle runtime tests](tests/supervisor_runtime/idle.rs), state and timer
-  tests, configuration upgrade tests, and [crash matrix](docs/crash-matrix.md)
-  cover the gate. Default parallel `task check` passes (401 tests).
-
-- [x] **Keep coordinating while delegated work remains.** The lead ended its
-  turn after spawning workers and did not read their durable progress and
-  completion messages until the user asked. Add explicit bootstrap guidance
-  for configured coordinating roles: unless the user pauses the work, continue
-  polling `progress --after <cursor> --wait 5`, read `inbox` with its separate
-  cursor, acknowledge handled messages, and carry submitted results through
-  review, integration, validation, and task closure within granted authority.
-  Report blockers that require user action. Document that durable messages and
-  progress waits do not resume an idle foreground provider. Automatic wake-up
-  requires separate, capability-probed provider support. Test injected guidance
-  for custom roles and restricted capabilities, and a fake-provider workflow
-  with multiple completions through validated closure. Keep coordination
-  judgment in agents rather than assigning runtime semantics to role names.
-  The [bootstrap tests](src/supervisor/bootstrap_tests.rs) cover custom names
-  and restricted capabilities; the [runtime workflow](tests/supervisor_runtime/coordination.rs)
-  covers separate cursors, message acknowledgement, two submissions, review,
-  integration, validation, closure, and dependency release. Default parallel
-  `task check` passed with 393 tests and eight opt-in or generation tests skipped.
-
-## Follow-up from the Sidekick terminal run
-
-Observed on September 11, 2026, in run
-`cr-01M28BJCEK8FB1B908HVK3DQ0H`.
-
-- [x] **Detect stranded foreground terminals in `doctor`.** Coterie and its
-  foreground provider remained alive after Sidekick deleted their terminal,
-  blocking another foreground launch while `doctor` reported healthy sessions.
-  Diagnose terminal loss using verified process ownership and terminal state,
-  rather than trusting the durable `running` state or a stored PID alone.
-  Keep inspection read-only, preserve uncertainty when ownership cannot be
-  proved, and name a supported recovery action. Test closed PTYs, live terminals
-  hidden by the editor, missing or ambiguous processes, PID reuse, and both
-  human and JSON diagnostics.
-
-  Foreground startup now records immutable process and input identity in schema
-  migration 15. Doctor verifies that evidence through pinned procfs handles and
-  reports a stranded session when its surviving process retains a closed Linux
-  PTY. Hidden, open PTYs remain healthy; missing or ambiguous ownership and
-  legacy sessions without evidence never establish terminal health. Inspection
-  does not consume input, change terminal settings or durable state, or signal
-  processes. Diagnostics name `coterie stop` for bounded recovery. Real PTY and
-  process tests cover terminal loss, hidden terminals, PID identity mismatches,
-  missing processes, and read-only inspection. Human and JSON tests verify the
-  warning and successful shutdown. Persistence tests cover immutable replay,
-  generation fencing, rollback, and upgrades from every prior schema. The full
-  `task check` gate passes with 465 tests passed and 17 opt-in or helper tests
-  skipped; real Codex tests were not run.
-
-## Follow-ups from the supervisor access failure
-
-Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
-`cr-01M2FCB65ZMA1S8J9DHBDCAMXC`.
-
-- [x] **Make supervisor RPCs work under the effective provider sandbox.**
-  The foreground agent's `prime`, `progress --json`, and `inbox --after 0 --json`
-  all failed with `Operation not permitted (os error 1)` connecting to
-  `$XDG_RUNTIME_DIR/coterie/<run-id>.sock`. The selected Coterie profile was
-  `filesystem=project-write`, `network=provider-default`, and
-  `approvals=interactive`. The operator could reach the same supervisor.
-  At the time, the Codex adapter forced `--sandbox workspace-write` and exported
-  `COTERIE_SOCKET`, but configured no working agent transport. The operator's
-  Codex configuration already allowed Unix sockets; reproduce the effective
-  policy interaction before attributing the failure to a missing allowance.
-  Establish a supported, capability-checked transport under the selected policy
-  for interactive and job providers. Preserve filesystem restrictions, network
-  restrictions, and the prohibition on automatic sandbox bypasses or permission
-  widening. Propose any necessary trust-boundary change in `DESIGN.md` first.
-  Add regression coverage for allowed and denied supervisor access, including
-  an opt-in real-Codex sandbox test rather than relying only on fake providers.
-  The opted-in [sandbox tests](src/providers/sandbox_tests.rs) reproduce the
-  Linux denial, including the rejected exact-socket grant. The approved
-  `DESIGN.md` boundary is implemented as a required stdio MCP bridge. Its typed
-  tools retain agent authentication, capability checks, generation fencing,
-  operation IDs, and redaction. The adapter probes support, requires Codex
-  0.153.4 or later, and configures both launch modes without broadening command
-  permissions. Real tests now cover authenticated calls, capability denial,
-  stale sessions, failed required initialization, foreground TUI task creation,
-  and worker completion under writable and read-only policies. The worker test
-  also proves socket, TCP, and filesystem restrictions despite a conflicting
-  provider network default. `task check` passes with 445 ordinary tests and 17
-  opt-in or generation tests skipped. The explicitly opted-in real-Codex MCP,
-  foreground, worker, startup-failure, capability-probe, and sandbox checks pass
-  on NixOS with Codex 0.153.4.
-
-- [x] **Distinguish operator health from agent connectivity in `doctor`.**
-  The operator's report marked every check healthy during the failure above.
-  Its supervisor handshake runs in the operator's process, while the provider
-  probe checks the Codex version, CLI help, and now MCP configuration support.
-  These static checks do not prove authenticated access from an agent bridge.
-  Report this distinction explicitly and provide a bounded, policy-preserving
-  connectivity check or report that sandbox access has not been verified.
-  Name an actionable next step when operator access succeeds but agent access
-  fails. Test that exact split, successful agent access, unavailable probes,
-  and human and JSON diagnostics without exposing tokens or widening access.
-  Doctor now labels its operator handshake and static provider probes explicitly
-  and reports per-role `agent_connectivity` as unavailable, with access not
-  verified. It identifies saved policy and directs the operator to check `prime`
-  through the agent's MCP tools and inspect required bridge startup diagnostics.
-  Runtime tests cover rejected and successful authenticated bridges, unavailable
-  probes, configuration drift and failure, read-only inspection, and credential
-  redaction in both output formats. `task check` passes with 450 ordinary tests
-  and 17 opt-in or generation tests skipped. This uses the explicit unverified
-  fallback; doctor does not launch a live agent probe.
-
-- [x] **Honor configured provider names in foreground observations.**
-  The real foreground MCP test exposed an existing hard-coded provider check:
-  naming the Codex adapter `real_codex` makes `require_foreground_scope` reject
-  startup because it compares `session.provider` with `codex`. The default
-  `codex` provider passes the foreground tests. Validate the configured adapter
-  and session mode while retaining identity and generation checks, and add a
-  regression for foreground startup and shutdown with an arbitrary provider
-  name. The failed launch also left a supervisor alive after the fixture's
-  normal stop attempt; cover cleanup of that failure.
-  Observations now validate the saved role's provider binding, interactive mode,
-  foreground process ownership, and current session generation. The wrapper
-  records a reaped child's exit even when startup acknowledgment fails, then
-  returns the original error. Tests cover arbitrary names across startup,
-  reconnect, and shutdown, invalid observation scopes, launch failure, and
-  rejected startup acknowledgments before and after the startup record commits.
-  They verify child reaping, credential revocation, and completed shutdown.
-  The opt-in foreground MCP test also uses `real_codex`; it was not rerun for
-  this change. `task check` passes with 454 ordinary tests and 17 opt-in or
-  generation tests skipped.
+  portability, includes, and actionable mismatch diagnostics. See the [lock
+  tests](src/config/lock/tests.rs) and [configuration CLI
+  tests](tests/config_cli.rs), alongside the loader and provenance golden
+  tests. `task check` passes.
 
 ## M6: Cross-project orchestration
 
 - [x] Attach canonical project roots under unique aliases, enforce global root
   policy and per-project leases, and discover the same active run from every
   attached project. The [runtime tests](tests/supervisor_runtime.rs) cover
-  authorization, aliases, symlinks, linked worktrees, discovery, and lease races.
-  The [crash tests](src/supervisor/crash_tests.rs) cover attachment and retirement;
-  migration 12 pins historical root policy. `task check` passes.
+  authorization, aliases, symlinks, linked worktrees, discovery, and lease
+  races. The [crash tests](src/supervisor/crash_tests.rs) cover attachment
+  and retirement; migration 12 pins historical root policy. `task check`
+  passes.
 - [ ] Apply and snapshot each attached project's restrictions and lock without
   allowing its archetype selector to replace the run archetype.
 - [ ] Give every task exactly one writable target and explicit read-only input
@@ -602,14 +290,14 @@ Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
 
 ## Future work to scope
 
-- [ ] Design exclusive resource reservations for performance measurements:
-  allow parallel implementation while serializing benchmark windows across
-  Coterie runs on the same machine. Agents request and release reservations;
-  Rust enforces admission after competing workers acknowledge safe stopping
+- [ ] Design exclusive resource reservations for performance measurements: allow
+  parallel implementation while serializing benchmark windows across Coterie
+  runs on the same machine. Agents request and release reservations; Rust
+  enforces admission after competing workers acknowledge safe stopping
   points and their builds, tests, and other competing subprocesses have
   finished. Prevent competing work from starting until release, and make
-  reservation ownership, timeouts, and crash recovery durable and inspectable.
-  Define enforcement and subprocess tracking in `DESIGN.md` before
-  implementation, with tests for concurrent requests, interrupted acquisition,
-  and recovery. Scope the guarantee to Coterie-managed workloads; unrelated
-  host processes require separate handling.
+  reservation ownership, timeouts, and crash recovery durable and
+  inspectable. Define enforcement and subprocess tracking in `DESIGN.md`
+  before implementation, with tests for concurrent requests, interrupted
+  acquisition, and recovery. Scope the guarantee to Coterie-managed
+  workloads; unrelated host processes require separate handling.
