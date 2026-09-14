@@ -449,6 +449,39 @@ Observed on September 11, 2026, in run
   hidden by the editor, missing or ambiguous processes, PID reuse, and both
   human and JSON diagnostics.
 
+## Follow-ups from the supervisor access failure
+
+Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
+`cr-01M2FCB65ZMA1S8J9DHBDCAMXC`.
+
+- [ ] **Make supervisor RPCs work under the effective provider sandbox.**
+  The foreground agent's `prime`, `progress --json`, and `inbox --after 0 --json`
+  all failed with `Operation not permitted (os error 1)` connecting to
+  `$XDG_RUNTIME_DIR/coterie/<run-id>.sock`. The selected Coterie profile was
+  `filesystem=project-write`, `network=provider-default`, and
+  `approvals=interactive`. The operator could reach the same supervisor.
+  The Codex adapter forces `--sandbox workspace-write` and exports
+  `COTERIE_SOCKET`, but does not configure a scoped socket grant. The operator's
+  Codex configuration already allowed Unix sockets; reproduce the effective
+  policy interaction before attributing the failure to a missing allowance.
+  Establish a supported, capability-checked transport under the selected policy
+  for interactive and job providers. Preserve filesystem restrictions, network
+  restrictions, and the prohibition on automatic sandbox bypasses or permission
+  widening. Propose any necessary trust-boundary change in `DESIGN.md` first.
+  Add regression coverage for allowed and denied supervisor access, including
+  an opt-in real-Codex sandbox test rather than relying only on fake providers.
+
+- [ ] **Distinguish operator health from agent connectivity in `doctor`.**
+  The operator's report marked every check healthy during the failure above.
+  Its supervisor handshake runs in the operator's process, while the provider
+  probe checks only the Codex version and CLI help. Neither proves that a tool
+  running inside the effective provider sandbox can reach the supervisor.
+  Report this distinction explicitly and provide a bounded, policy-preserving
+  connectivity check or report that sandbox access has not been verified.
+  Name an actionable next step when operator access succeeds but agent access
+  fails. Test that exact split, successful agent access, unavailable probes,
+  and human and JSON diagnostics without exposing tokens or widening access.
+
 ## M6: Cross-project orchestration
 
 - [x] Attach canonical project roots under unique aliases, enforce global root
