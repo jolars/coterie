@@ -1360,6 +1360,21 @@ lease-protected startup and desired-state reconciliation path. An indexed run
 must have a matching durable database; a responsive socket or ambiguous file
 ownership is never discarded as stale.
 
+Doctor distinguishes the operator-channel supervisor handshake and static
+provider version, CLI, and MCP configuration checks from authenticated agent
+connectivity. It reports `agent_connectivity` as `unavailable` for each enabled
+role because it has no live probe of the provider-launched bridge or sandboxed
+commands. A successful operator handshake, static probe, or earlier agent call
+does not establish current agent access. Diagnostics identify the saved role
+policy when available, otherwise label the current configuration as unverified
+for an active run. Provider checks use that same policy. If neither configuration
+is readable, a single unavailable check names the configuration prerequisite.
+The next step is to call `prime` through the agent's Coterie MCP tools. When
+operator access succeeds but that call fails, inspect the required bridge's
+startup diagnostics and selected policy without widening permissions. Doctor
+does not launch a model session, obtain agent credentials, or change policy to
+perform this check.
+
 Socket retirement verifies the original filesystem inode, private ownership,
 one link, and listener inactivity before unlinking. Stale socket repair pins
 the inspected inode and rechecks it after the connection probe. Active-run index

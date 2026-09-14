@@ -485,7 +485,7 @@ Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
   foreground, worker, startup-failure, capability-probe, and sandbox checks pass
   on NixOS with Codex 0.153.4.
 
-- [ ] **Distinguish operator health from agent connectivity in `doctor`.**
+- [x] **Distinguish operator health from agent connectivity in `doctor`.**
   The operator's report marked every check healthy during the failure above.
   Its supervisor handshake runs in the operator's process, while the provider
   probe checks the Codex version, CLI help, and now MCP configuration support.
@@ -495,6 +495,15 @@ Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
   Name an actionable next step when operator access succeeds but agent access
   fails. Test that exact split, successful agent access, unavailable probes,
   and human and JSON diagnostics without exposing tokens or widening access.
+  Doctor now labels its operator handshake and static provider probes explicitly
+  and reports per-role `agent_connectivity` as unavailable, with access not
+  verified. It identifies saved policy and directs the operator to check `prime`
+  through the agent's MCP tools and inspect required bridge startup diagnostics.
+  Runtime tests cover rejected and successful authenticated bridges, unavailable
+  probes, configuration drift and failure, read-only inspection, and credential
+  redaction in both output formats. `task check` passes with 450 ordinary tests
+  and 17 opt-in or generation tests skipped. This uses the explicit unverified
+  fallback; doctor does not launch a live agent probe.
 
 - [ ] **Honor configured provider names in foreground observations.**
   The real foreground MCP test exposed an existing hard-coded provider check:

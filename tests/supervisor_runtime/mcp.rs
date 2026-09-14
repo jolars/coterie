@@ -107,6 +107,97 @@ fn live_lead(fixture: &TestEnvironment) -> (Child, Vec<(String, String)>) {
 }
 
 #[test]
+fn doctor_distinguishes_operator_health_from_unverified_agent_access() {
+    let fixture = TestEnvironment::new();
+    let (mut lead, environment) = live_lead(&fixture);
+    let _run = StopRun(&fixture);
+    let token = environment_value(&environment, "COTERIE_TOKEN");
+    let mut rejected = fixture.agent_command(&environment);
+    rejected.env("COTERIE_TOKEN", format!("cot1_{}", "00".repeat(32)));
+    let denied = run({
+        rejected.arg("__mcp");
+        rejected
+    });
+    assert_eq!(denied.status.code(), Some(6));
+    assert!(denied.stdout.is_empty());
+    assert!(!String::from_utf8_lossy(&denied.stderr).contains(&token));
+
+    for connected in [false, true] {
+        let mut bridge = connected.then(|| {
+            let mut client =
+                McpClient::start(fixture.agent_command(&environment));
+            client.initialize();
+            assert_eq!(
+                client.call("prime", json!({}))["result"]["isError"],
+                false
+            );
+            client
+        });
+        let events = fixture.run_json(&["events", "--json"]);
+        for json_output in [false, true] {
+            let mut command = fixture.command();
+            command.arg("doctor");
+            if json_output {
+                command.arg("--json");
+            }
+            let output = run(command);
+            assert_eq!(output.status.code(), Some(0));
+            assert!(output.stderr.is_empty());
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(!text.contains(&token));
+            let value: Value = serde_json::from_str(&text).unwrap();
+            let data = if json_output { &value["data"] } else { &value };
+            let checks = data["report"]["checks"].as_array().unwrap();
+            for name in ["supervisor", "provider"] {
+                let check =
+                    checks.iter().find(|check| check["check"] == name).unwrap();
+                assert_eq!(check["status"], "ok");
+                assert!(
+                    check["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("does not verify agent access")
+                );
+            }
+            let check = checks
+                .iter()
+                .find(|check| {
+                    check["check"] == "agent_connectivity"
+                        && check["subject"] == "lead"
+                })
+                .expect("agent connectivity must be reported separately");
+            assert_eq!(check["status"], "unavailable");
+            let message = check["message"].as_str().unwrap();
+            for expected in [
+                "not verified",
+                "saved run policy",
+                "codex",
+                "interactive",
+                "project-write",
+                "provider-default",
+                "prime",
+                "MCP",
+                "startup diagnostics",
+            ] {
+                assert!(
+                    message.contains(expected),
+                    "missing {expected}: {message}"
+                );
+            }
+        }
+        assert_eq!(fixture.run_json(&["events", "--json"]), events);
+        if let Some(client) = bridge.as_mut() {
+            assert_eq!(
+                client.call("prime", json!({}))["result"]["isError"],
+                false
+            );
+        }
+    }
+    lead.stdin.take().unwrap().write_all(b"done\n").unwrap();
+    assert!(lead.wait().unwrap().success());
+}
+
+#[test]
 fn mcp_authenticates_forwards_and_replays_agent_operations() {
     let fixture = TestEnvironment::new();
     let (mut lead, environment) = live_lead(&fixture);

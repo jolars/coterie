@@ -51,7 +51,6 @@ pub(super) async fn run(
                     ConfigLock::for_config(&config).fingerprint
                 ),
             );
-            inspect_provider(&mut report, &config);
             Some(config)
         }
         Err(error) => {
@@ -64,6 +63,7 @@ pub(super) async fn run(
             None
         }
     };
+    let mut saved = None;
     if private {
         match ActiveRunIndex::new(&directories).lookup(&project.identity) {
             Ok(Some(entry)) => {
@@ -75,6 +75,7 @@ pub(super) async fn run(
                             && let Err(error) = ensure_configuration_compatible(entry.run_id, &snapshot, current) {
                             report.add("configuration", CheckStatus::Error, None, error.to_string());
                         }
+                        saved = Some(snapshot.effective);
                     }
                     Err(error) => report.add("configuration_snapshot", CheckStatus::Error, None, error.to_string()),
                 }
@@ -86,7 +87,42 @@ pub(super) async fn run(
     } else {
         report.add("supervisor", CheckStatus::Unavailable, None, "Runtime paths are absent or insecure; inspection did not open the run database or connect to a socket.");
     }
+    if let Some(config) = saved.as_ref().or(current.as_ref()) {
+        inspect_provider(&mut report, config);
+        inspect_agent_connectivity(&mut report, config, saved.is_some());
+    } else {
+        report.add("agent_connectivity", CheckStatus::Unavailable, None, "Agent access is not verified: no valid role policy is available. Resolve the configuration diagnostics, rerun `coterie doctor`, then call `prime` through the agent's Coterie MCP tools.");
+    }
     render_public_response(json_output, None, &RpcResponse::Doctor { report })
+}
+
+fn inspect_agent_connectivity(
+    report: &mut DoctorReport,
+    config: &EffectiveConfig,
+    saved: bool,
+) {
+    let source = if saved {
+        "saved run policy"
+    } else {
+        "current configuration; active run policy not verified"
+    };
+    for (name, role) in &config.archetype.roles {
+        let effective = &config.roles[name];
+        if !effective.enabled {
+            continue;
+        }
+        let mode = serde_json::to_value(role.mode).expect("typed role mode");
+        let profile = serde_json::to_value(effective.permission_profile)
+            .expect("typed permission profile");
+        report.add("agent_connectivity", CheckStatus::Unavailable, Some(name.clone()), format!(
+            "Authenticated agent access is not verified. Provider `{}`: mode={}, filesystem={}, network={}, approvals={} ({source}). Doctor has no live agent connectivity probe; static checks and operator access do not establish access through the provider-launched MCP bridge or from sandboxed commands. In this role's session, call `prime` through the Coterie MCP tools. If operator access succeeds but the MCP call fails, inspect the provider's required Coterie MCP bridge startup diagnostics and this permission profile. Keep filesystem, network, and approval restrictions unchanged.",
+            role.provider,
+            mode.as_str().expect("role mode string"),
+            profile["filesystem"].as_str().expect("filesystem policy string"),
+            profile["network"].as_str().expect("network policy string"),
+            profile["approvals"].as_str().expect("approval policy string"),
+        ));
+    }
 }
 
 fn inspect_provider(report: &mut DoctorReport, config: &EffectiveConfig) {
@@ -134,13 +170,13 @@ fn inspect_provider(report: &mut DoctorReport, config: &EffectiveConfig) {
                     }
                 }
                 report.add("provider", if errors.is_empty() { CheckStatus::Ok } else { CheckStatus::Error }, Some(name.into()),
-                    if errors.is_empty() { format!("Installed version {} supports the effective role capabilities.", probe.version) } else { errors.join("; ") });
+                    if errors.is_empty() { format!("Static version, CLI, and MCP configuration probe: installed version {} supports the effective role capabilities. This does not verify agent access.", probe.version) } else { format!("Static provider capability check failed: {}. This does not verify agent access.", errors.join("; ")) });
             }
             Err(error) => report.add(
                 "provider",
                 CheckStatus::Unavailable,
                 Some(name.into()),
-                error.to_string(),
+                format!("Static provider probe unavailable: {error}. This does not verify agent access."),
             ),
         }
     }
@@ -216,7 +252,7 @@ async fn inspect_run(
     let socket = directories.socket_path(entry.run_id);
     match SupervisorClient::connect_operator_at(&socket, entry).await {
         Ok(mut client) => {
-            report.add("supervisor", CheckStatus::Ok, None, "Supervisor handshake proves the indexed run and project identity.");
+            report.add("supervisor", CheckStatus::Ok, None, "Operator-channel supervisor handshake proves the indexed run and project identity. This does not verify agent access.");
             if private {
                 match client.request(RpcRequest::Doctor).await {
                     Ok(RpcResponse::Doctor { report: snapshot }) => report.checks.extend(snapshot.checks),

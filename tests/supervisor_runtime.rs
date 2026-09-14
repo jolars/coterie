@@ -2732,6 +2732,15 @@ fn doctor_is_read_only_without_a_run_and_refuses_agent_context() {
     let files = fixture.files();
     let report = fixture.run_json(&["doctor", "--json"]);
     assert!(report["data"]["report"]["run_id"].is_null());
+    let checks = report["data"]["report"]["checks"].as_array().unwrap();
+    assert!(checks.iter().any(|check| {
+        check["check"] == "agent_connectivity"
+            && check["status"] == "unavailable"
+            && check["message"]
+                .as_str()
+                .unwrap()
+                .contains("current configuration")
+    }));
     assert_eq!(fixture.files(), files);
     let mut command = fixture.command();
     command
@@ -2741,6 +2750,117 @@ fn doctor_is_read_only_without_a_run_and_refuses_agent_context() {
     assert_eq!(output.status.code(), Some(6));
     assert!(output.stdout.is_empty());
     assert_eq!(fixture.files(), files);
+}
+
+#[test]
+fn doctor_keeps_agent_access_unverified_when_provider_probes_are_unavailable() {
+    let fixture = TestEnvironment::new();
+    write_global(
+        &fixture,
+        "[providers.codex]\ncommand = ['/nonexistent/coterie-test-provider']\n",
+    );
+    let files = fixture.files();
+    let report = fixture.run_json(&["doctor", "--json"]);
+    let checks = report["data"]["report"]["checks"].as_array().unwrap();
+    for name in ["provider", "agent_connectivity"] {
+        assert!(
+            checks.iter().any(|check| check["check"] == name
+                && check["status"] == "unavailable"),
+            "{checks:?}"
+        );
+    }
+    assert_eq!(fixture.files(), files);
+}
+
+#[test]
+fn doctor_redacts_unavailable_probe_diagnostics_in_human_and_json_output() {
+    let fixture = TestEnvironment::new();
+    let token = format!("cot1_{}", "ab".repeat(32));
+    let credential = "doctor-provider-credential";
+    fs::write(fixture.root.join("bin/codex"), format!("#!/bin/sh\nprintf '%s\\n' \"$OPENAI_API_KEY\" '{token}' >&2\nexit 1\n")).unwrap();
+    let files = fixture.files();
+    for json_output in [false, true] {
+        let mut command = fixture.command();
+        command.arg("doctor").env("OPENAI_API_KEY", credential);
+        if json_output {
+            command.arg("--json");
+        }
+        let output = run(command);
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stderr.is_empty());
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(!text.contains(&token));
+        assert!(!text.contains(credential));
+        assert!(text.contains("[REDACTED]"));
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let data = if json_output { &value["data"] } else { &value };
+        let checks = data["report"]["checks"].as_array().unwrap();
+        for name in ["provider", "agent_connectivity"] {
+            assert!(checks.iter().any(|check| check["check"] == name
+                && check["status"] == "unavailable"));
+        }
+    }
+    assert_eq!(fixture.files(), files);
+}
+
+#[test]
+fn doctor_reports_unverified_access_without_a_valid_role_policy() {
+    let fixture = TestEnvironment::new();
+    fs::write(fixture.project.join("coterie.toml"), "invalid = true\n")
+        .unwrap();
+    let files = fixture.files();
+    let report = fixture.run_json(&["doctor", "--json"]);
+    let checks = report["data"]["report"]["checks"].as_array().unwrap();
+    assert!(
+        checks.iter().any(|check| check["check"] == "configuration"
+            && check["status"] == "error")
+    );
+    let check = checks
+        .iter()
+        .find(|check| check["check"] == "agent_connectivity")
+        .unwrap();
+    assert_eq!(check["status"], "unavailable");
+    assert!(check["subject"].is_null());
+    assert!(
+        check["message"]
+            .as_str()
+            .unwrap()
+            .contains("no valid role policy")
+    );
+    assert_eq!(fixture.files(), files);
+}
+
+#[test]
+fn doctor_uses_saved_role_policy_for_connectivity_despite_configuration_drift()
+{
+    let fixture = TestEnvironment::new();
+    fixture.launch(&["--role", "worker.enabled=false"]);
+    let report = fixture.run_json(&["doctor", "--json"]);
+    fixture.run_json(&["stop", "--json"]);
+    let checks = report["data"]["report"]["checks"].as_array().unwrap();
+    assert!(
+        checks.iter().any(|check| check["check"] == "configuration"
+            && check["status"] == "error")
+    );
+    let connectivity: Vec<_> = checks
+        .iter()
+        .filter(|check| check["check"] == "agent_connectivity")
+        .collect();
+    assert_eq!(connectivity.len(), 2);
+    assert!(
+        connectivity
+            .iter()
+            .all(|check| check["subject"] != "worker")
+    );
+    let reviewer = connectivity
+        .iter()
+        .find(|check| check["subject"] == "reviewer")
+        .unwrap();
+    assert_eq!(reviewer["status"], "unavailable");
+    let message = reviewer["message"].as_str().unwrap();
+    for expected in ["saved run policy", "job", "read-only", "deny", "never"] {
+        assert!(message.contains(expected), "{message}");
+    }
 }
 
 #[test]

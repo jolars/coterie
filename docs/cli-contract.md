@@ -204,11 +204,28 @@ coterie doctor [--json]
 Inspect supervisor reachability, the project lease and index, runtime file
 ownership and permissions, database integrity and migrations, pending operations,
 unfinished assignments, uncertain sessions, task cycles, transcript accessibility
-and incomplete tails, and worktree ownership. Provider checks probe the installed
-Codex version and required capabilities without launching a model session.
+and incomplete tails, and worktree ownership. The `supervisor` check verifies
+the operator-channel handshake. The `provider` checks probe the installed Codex
+version, CLI capabilities, and MCP configuration support without launching a
+model session. Neither proves authenticated agent access.
 Configuration and lock files are resolved and verified. An active run adds a
 `configuration_snapshot` check and a compatibility check against current effective
-values. These checks report errors without replacing the snapshot.
+values. These checks report errors without replacing the snapshot. Provider and
+connectivity checks use the saved policy when available; otherwise they use the
+current configuration and label active run policy as unverified.
+
+Each enabled role has an `agent_connectivity` check with status `unavailable`,
+its role name in `subject`, and a message identifying the provider, mode, and
+filesystem, network, and approval policies. Doctor has no live agent probe, so
+this status means **not verified**, even if a separate agent call has succeeded.
+It does not mean the bridge failed. Without a valid configuration or snapshot,
+one check with a null subject explains that prerequisite.
+
+To check access in a running session, call `prime` through that agent's Coterie
+MCP tools. If operator access succeeds but the MCP call fails, inspect the
+provider's required Coterie MCP bridge startup diagnostics and the reported
+permission profile. Keep filesystem, network, and approval restrictions intact;
+a shell command's socket access is separate from the MCP bridge's access.
 
 Doctor is operator-only and never starts a supervisor, migrates a database,
 changes permissions, signals a process, or removes work. If the supervisor is
