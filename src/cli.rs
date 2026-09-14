@@ -99,6 +99,8 @@ pub(crate) enum Command {
     SupervisorConnect,
     #[command(name = "__supervisor-shutdown", hide = true)]
     SupervisorShutdown,
+    #[command(name = "__mcp", hide = true)]
+    Mcp,
 }
 
 /// Run-scoped project commands.

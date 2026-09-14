@@ -1,5 +1,7 @@
 //! Out-of-process agent harness adapters.
 
+mod mcp;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
 use std::ffi::OsStr;
@@ -62,6 +64,7 @@ mod sandbox_tests;
 /// A provider feature that Coterie must verify before depending on it.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ProviderCapability {
+    SupervisorRpc,
     StartupInstructions,
     ForegroundInteractive,
     BackgroundJobs,
@@ -78,6 +81,7 @@ pub(crate) enum ProviderCapability {
 impl fmt::Display for ProviderCapability {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::SupervisorRpc => "authenticated agent supervisor transport",
             Self::StartupInstructions => "startup instruction injection",
             Self::ForegroundInteractive => "foreground interactive sessions",
             Self::BackgroundJobs => "background job execution",
@@ -631,6 +635,8 @@ pub(crate) trait Provider {
 /// A provider adapter could not perform a requested session operation.
 #[derive(Debug, Error)]
 pub(crate) enum ProviderError {
+    #[error("the Codex MCP transport requires a UTF-8 Coterie executable path")]
+    McpConfiguration,
     #[error("the fake provider has no launch script remaining")]
     NoLaunchScript,
     #[error("provider session `{provider_id}` does not exist")]
@@ -640,7 +646,7 @@ pub(crate) enum ProviderError {
     )]
     EmptyCodexCommand,
     #[error(
-        "could not execute a Codex probe with `{executable}`: {source}; install Codex CLI 0.151.0 or later and ensure `{executable}` is on PATH"
+        "could not execute a Codex probe with `{executable}`: {source}; install Codex CLI 0.153.4 or later and ensure `{executable}` is on PATH"
     )]
     ProbeExecution {
         executable: String,
@@ -648,7 +654,7 @@ pub(crate) enum ProviderError {
         source: io::Error,
     },
     #[error(
-        "the Codex {probe} probe exited with {status}: {diagnostic}; run `codex update` or install Codex CLI 0.151.0 or later"
+        "the Codex {probe} probe exited with {status}: {diagnostic}; run `codex update` or install Codex CLI 0.153.4 or later"
     )]
     ProbeFailed {
         probe: &'static str,
@@ -656,7 +662,7 @@ pub(crate) enum ProviderError {
         diagnostic: String,
     },
     #[error(
-        "could not parse {output:?}; expected `codex-cli <semantic-version>` from `codex --version`; run `codex update` or install Codex CLI 0.151.0 or later"
+        "could not parse {output:?}; expected `codex-cli <semantic-version>` from `codex --version`; run `codex update` or install Codex CLI 0.153.4 or later"
     )]
     InvalidVersionOutput { output: String },
     #[error("the Codex adapter does not implement {operation} yet")]
@@ -739,14 +745,15 @@ impl ProviderError {
                 | Self::InteractiveLaunch { .. }
                 | Self::MissingInteractiveEnvironment
                 | Self::BootstrapExecutable(_)
+                | Self::McpConfiguration
                 | Self::SignalRegistration(_)
                 | Self::SignalThread(_)
         )
     }
 }
 
-const MINIMUM_CODEX_VERSION: &str = "0.151.0";
-const CODEX_VERSION_REQUIREMENT: &str = ">=0.151.0 and <1.0.0";
+const MINIMUM_CODEX_VERSION: &str = "0.153.4";
+const CODEX_VERSION_REQUIREMENT: &str = ">=0.153.4 and <1.0.0";
 
 /// The installed Codex CLI, invoked only through its documented process boundary.
 pub(crate) struct CodexProvider {
@@ -836,6 +843,7 @@ impl CodexProvider {
         let mut command = Command::new(program);
         command.args(configured_arguments);
         apply_codex_permission_profile(&mut command, specification);
+        mcp::configure(&mut command, specification, &executable)?;
         command
             .arg("--cd")
             .arg(&specification.working_directory)
@@ -893,8 +901,9 @@ impl CodexProvider {
         let bootstrap = codex_bootstrap(specification, &executable);
         let mut command = Command::new(program);
         command.args(configured_arguments);
-        apply_codex_permission_profile(&mut command, specification);
         command.arg("exec").arg("--json");
+        apply_codex_permission_profile(&mut command, specification);
+        mcp::configure(&mut command, specification, &executable)?;
         command
             .arg("--cd")
             .arg(&specification.working_directory)
@@ -1131,7 +1140,15 @@ impl CodexProvider {
                 .stdout,
         )
         .into_owned();
-        let capabilities = codex_capabilities(&interactive_help, &job_help);
+        let mut capabilities = codex_capabilities(&interactive_help, &job_help);
+        let arguments = mcp::probe_arguments();
+        let output = self.command_output(
+            &arguments.iter().map(String::as_str).collect::<Vec<_>>(),
+            "MCP transport configuration",
+        )?;
+        if mcp::supports_transport(&output.stdout) {
+            capabilities.insert(ProviderCapability::SupervisorRpc);
+        }
 
         Ok(ProviderProbe {
             name: "codex".to_owned(),
@@ -1190,8 +1207,10 @@ fn codex_bootstrap(
 ) -> String {
     let profile = serde_json::to_string(&specification.permission_profile)
         .expect("permission profiles serialize as JSON");
+    let server = mcp::server_name(specification.scope);
     let instruction = format!(
-        "Coterie CLI absolute path: {executable:?}. COTERIE_BIN contains this path; use `\"$COTERIE_BIN\"` for every Coterie command. Run `\"$COTERIE_BIN\" prime` now. Selected permission profile: {profile}. Use non-login shell tools to preserve the inherited toolchain PATH. If the executable is missing or inaccessible, report its path and the error to the operator. If the supervisor socket is denied, report its path and the selected permission profile to the operator; do not bypass the sandbox or change permissions. Never print tokens or the complete environment.\n{}",
+        "Coterie MCP server: {server}. {} Selected permission profile: {profile}. Coterie executable: {executable:?}. Use non-login shell tools to preserve the inherited toolchain PATH. If the Coterie tools are missing or inaccessible, report the server name and error to the operator; do not bypass the sandbox or change permissions. Never print tokens or the complete environment.\n{}",
+        crate::mcp::INSTRUCTIONS,
         specification.bootstrap_instruction
     );
     serde_json::to_string(&instruction)
@@ -1815,8 +1834,8 @@ fn apply_codex_permission_profile(
     command
         .arg("--sandbox")
         .arg(sandbox)
-        .arg("--ask-for-approval")
-        .arg(approvals);
+        .arg("--config")
+        .arg(format!("approval_policy=\"{approvals}\""));
     if profile.approvals == ApprovalPolicy::Interactive {
         command.arg("--config").arg("approvals_reviewer=\"user\"");
     }
@@ -1940,6 +1959,7 @@ pub(crate) mod fake {
                 #[cfg(test)]
                 controls: Vec::new(),
                 capabilities: BTreeSet::from([
+                    ProviderCapability::SupervisorRpc,
                     ProviderCapability::StartupInstructions,
                     ProviderCapability::ForegroundInteractive,
                     ProviderCapability::BackgroundJobs,
@@ -2229,7 +2249,7 @@ mod tests {
     #[test]
     fn codex_probe_discovers_the_supported_command_surface() {
         let runner = ScriptedProbeRunner::new([
-            Ok(success("codex-cli 0.151.0\n")),
+            Ok(success("codex-cli 0.153.4\n")),
             Ok(success(
                 "Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --ask-for-approval <APPROVAL_POLICY>\n",
             )),
@@ -2246,11 +2266,12 @@ mod tests {
         let probe = provider.probe().expect("the probe should complete");
 
         assert_eq!(probe.name, "codex");
-        assert_eq!(probe.version, semver::Version::new(0, 151, 0));
+        assert_eq!(probe.version, semver::Version::new(0, 153, 4));
         assert_eq!(probe.compatibility, ProviderCompatibility::Compatible);
         assert_eq!(
             probe.capabilities,
             BTreeSet::from([
+                ProviderCapability::SupervisorRpc,
                 ProviderCapability::StartupInstructions,
                 ProviderCapability::ForegroundInteractive,
                 ProviderCapability::BackgroundJobs,
@@ -2286,6 +2307,15 @@ mod tests {
                     OsString::from("exec"),
                     OsString::from("--help"),
                 ],
+                ["codex-wrapper", "--provider", "codex"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .chain(
+                        super::mcp::probe_arguments()
+                            .into_iter()
+                            .map(OsString::from)
+                    )
+                    .collect(),
             ]
         );
     }
@@ -2318,7 +2348,7 @@ mod tests {
             let provider = CodexProvider::with_runner(
                 ["codex"],
                 ScriptedProbeRunner::new([
-                    Ok(success("codex-cli 0.151.0\n")),
+                    Ok(success("codex-cli 0.153.4\n")),
                     Ok(success(&interactive_help)),
                     Ok(success(&job_help)),
                 ]),
@@ -2334,11 +2364,40 @@ mod tests {
     }
 
     #[test]
+    fn codex_probe_does_not_claim_unverified_mcp_transport() {
+        for transport in [
+            "not JSON",
+            "{}",
+            r#"{"enabled":true,"transport":{"type":"streamable_http"}}"#,
+        ] {
+            let provider = CodexProvider::with_runner(
+                ["codex"],
+                ScriptedProbeRunner::new([
+                    Ok(success("codex-cli 0.153.4\n")),
+                    Ok(success(
+                        "Usage: codex [OPTIONS] [PROMPT]\n --config --cd --sandbox --ask-for-approval",
+                    )),
+                    Ok(success(
+                        "Usage: codex exec [OPTIONS] [PROMPT]\n --config --cd --sandbox --json",
+                    )),
+                    Ok(success(transport)),
+                ]),
+            );
+            let probe = provider.probe().unwrap();
+            assert!(
+                !probe
+                    .capabilities
+                    .contains(&ProviderCapability::SupervisorRpc)
+            );
+        }
+    }
+
+    #[test]
     fn codex_probe_marks_unvalidated_versions_incompatible() {
         for (version, expected_reason) in [
             (
                 "0.150.0",
-                "is older than the minimum supported version 0.151.0",
+                "is older than the minimum supported version 0.153.4",
             ),
             ("1.0.0", "has an unvalidated major version"),
         ] {
@@ -2358,7 +2417,7 @@ mod tests {
                 ProviderCompatibility::Incompatible { ref reason, ref remedy }
                     if reason.contains(expected_reason)
                         && remedy.contains("codex update")
-                        && remedy.contains("0.151.0")
+                        && remedy.contains("0.153.4")
             ));
         }
     }
@@ -2368,7 +2427,7 @@ mod tests {
         let provider = CodexProvider::with_runner(
             ["codex"],
             ScriptedProbeRunner::new([
-                Ok(success("codex-cli 0.151.0\n")),
+                Ok(success("codex-cli 0.153.4\n")),
                 Ok(success(
                     "Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n",
                 )),
@@ -2400,9 +2459,9 @@ mod tests {
     #[test]
     fn codex_probe_rejects_malformed_version_output() {
         for output in [
-            "0.151.0\n",
+            "0.153.4\n",
             "codex-cli newest\n",
-            "codex-cli 0.151.0 unexpected\n",
+            "codex-cli 0.153.4 unexpected\n",
         ] {
             let provider = CodexProvider::with_runner(
                 ["codex"],
@@ -2447,7 +2506,7 @@ mod tests {
         let provider = CodexProvider::with_runner(
             ["codex"],
             ScriptedProbeRunner::new([
-                Ok(success("codex-cli 0.151.0\n")),
+                Ok(success("codex-cli 0.153.4\n")),
                 Ok(failure(2, "unknown option `--help`\n")),
             ]),
         );
@@ -2485,7 +2544,7 @@ mod tests {
         let command = provider
             .interactive_command(&specification, &environment)
             .expect("the interactive command should be valid");
-        let arguments = command.get_args().collect::<Vec<_>>();
+        let arguments = arguments_without_mcp(&command);
 
         assert_eq!(command.get_program(), "codex-wrapper");
         assert_eq!(
@@ -2499,8 +2558,8 @@ mod tests {
                 "codex",
                 "--sandbox",
                 "workspace-write",
-                "--ask-for-approval",
-                "on-request",
+                "--config",
+                "approval_policy=\"on-request\"",
                 "--config",
                 "approvals_reviewer=\"user\"",
             ]
@@ -2565,8 +2624,8 @@ mod tests {
         let command = provider
             .job_command(&specification, &environment)
             .expect("the job command should be valid");
-        let arguments = command
-            .get_args()
+        let arguments = arguments_without_mcp(&command)
+            .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
@@ -2580,16 +2639,16 @@ mod tests {
             [
                 "--provider",
                 "codex",
+                "exec",
+                "--json",
                 "--sandbox",
                 "workspace-write",
-                "--ask-for-approval",
-                "never",
+                "--config",
+                "approval_policy=\"never\"",
                 "--config",
                 "sandbox_workspace_write.network_access=false",
                 "--config",
                 "web_search=\"disabled\"",
-                "exec",
-                "--json",
                 "--cd",
                 "/tmp/project",
                 "--config",
@@ -2670,24 +2729,24 @@ mod tests {
         let command = provider
             .job_command(&specification, &job_environment())
             .expect("the review command should be valid");
-        let arguments = command
-            .get_args()
+        let arguments = arguments_without_mcp(&command)
+            .into_iter()
             .map(|argument| argument.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
         assert_eq!(
             &arguments[..12],
             [
+                "exec",
+                "--json",
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
-                "never",
+                "--config",
+                "approval_policy=\"never\"",
                 "--config",
                 "sandbox_workspace_write.network_access=false",
                 "--config",
                 "web_search=\"disabled\"",
-                "exec",
-                "--json",
                 "--cd",
                 "/tmp/project",
             ]
@@ -2992,6 +3051,7 @@ mod tests {
 
         assert_eq!(probe.compatibility, ProviderCompatibility::Compatible);
         for capability in [
+            ProviderCapability::SupervisorRpc,
             ProviderCapability::StartupInstructions,
             ProviderCapability::ForegroundInteractive,
             ProviderCapability::BackgroundJobs,
@@ -3262,6 +3322,68 @@ mod tests {
         }
     }
 
+    fn arguments_without_mcp(command: &Command) -> Vec<&OsStr> {
+        let arguments = command.get_args().collect::<Vec<_>>();
+        let position = arguments
+            .iter()
+            .position(|argument| {
+                argument
+                    .to_string_lossy()
+                    .starts_with("mcp_servers.coterie_")
+            })
+            .expect("every launch needs the MCP server");
+        assert_eq!(arguments[position - 1], "--config");
+        if let Some(exec_position) =
+            arguments.iter().position(|argument| *argument == "exec")
+        {
+            assert!(
+                position > exec_position,
+                "Codex exec must receive its own config overrides"
+            );
+            let sandbox_position = arguments
+                .iter()
+                .position(|argument| *argument == "--sandbox")
+                .unwrap();
+            assert!(sandbox_position > exec_position);
+        }
+        let config: toml::Value =
+            toml::from_str(arguments[position].to_str().unwrap()).unwrap();
+        let server = config["mcp_servers"]
+            .as_table()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap();
+        assert_eq!(server["required"].as_bool(), Some(true));
+        assert_eq!(server["enabled"].as_bool(), Some(true));
+        assert_eq!(server["args"][0].as_str(), Some("__mcp"));
+        assert!(server.get("cwd").is_none());
+        assert!(server.get("env").is_none());
+        assert!(server.get("default_tools_approval_mode").is_none());
+        let approvals = server["tools"].as_table().unwrap();
+        assert_eq!(
+            approvals.len(),
+            server["enabled_tools"].as_array().unwrap().len()
+        );
+        for name in server["enabled_tools"].as_array().unwrap() {
+            assert_eq!(
+                approvals[name.as_str().unwrap()]["approval_mode"].as_str(),
+                Some("approve")
+            );
+        }
+        assert_eq!(
+            server["env_vars"].as_array().unwrap().len(),
+            super::mcp::AGENT_ENVIRONMENT.len()
+        );
+        arguments
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, argument)| {
+                (index != position && index + 1 != position).then_some(argument)
+            })
+            .collect()
+    }
+
     #[derive(Clone)]
     struct ScriptedProbeRunner {
         outputs: Rc<RefCell<VecDeque<Result<ProbeOutput, io::Error>>>>,
@@ -3273,7 +3395,7 @@ mod tests {
             outputs: impl IntoIterator<Item = Result<ProbeOutput, io::Error>>,
         ) -> Self {
             Self {
-                outputs: Rc::new(RefCell::new(outputs.into_iter().collect())),
+                outputs: Rc::new(RefCell::new(outputs.into_iter().chain([Ok(success(r#"{"enabled":true,"transport":{"type":"stdio","command":"coterie","args":["__mcp"],"env_vars":["COTERIE_TOKEN"]}}"#))]).collect())),
                 observations: Rc::new(RefCell::new(Vec::new())),
             }
         }

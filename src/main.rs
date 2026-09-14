@@ -12,6 +12,7 @@ mod fault;
     reason = "M1 defines stable identifiers before later milestones consume them"
 )]
 mod id;
+mod mcp;
 mod private_fs;
 #[allow(
     dead_code,

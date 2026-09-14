@@ -60,9 +60,14 @@ fn coordinator_polls_multiple_completions_through_validated_closure() {
     let planner = captured_environment(&capture);
     let bootstrap = fs::read_to_string(&capture).unwrap();
     assert!(bootstrap.contains("If you are coordinating delegated work"));
-    assert!(bootstrap.contains("progress --after <progress_cursor> --wait 5"));
-    assert!(bootstrap.contains("workspace integrate --assignment"));
-    assert!(bootstrap.contains("task close <task_id> --summary"));
+    assert!(
+        bootstrap
+            .contains("after=<progress_cursor>, limit=50, and wait_seconds=5")
+    );
+    assert!(bootstrap.contains("`workspace_integrate` with assignment_id="));
+    assert!(
+        bootstrap.contains("`task_close` with task_id=<task_id> and summary=")
+    );
     let request = |args: &[&str]| fixture.run_agent_json(args, &planner);
     let mut jobs = Vec::new();
     for file in ["alpha.txt", "beta.txt"] {
@@ -86,10 +91,17 @@ fn coordinator_polls_multiple_completions_through_validated_closure() {
         let bootstrap = fs::read_to_string(&capture).unwrap();
         assert!(bootstrap.contains("If you are coordinating delegated work"));
         assert!(
-            bootstrap.contains("progress --after <progress_cursor> --wait 5")
+            bootstrap.contains(
+                "after=<progress_cursor>, limit=50, and wait_seconds=5"
+            )
         );
-        assert!(!bootstrap.contains("workspace integrate --assignment"));
-        assert!(!bootstrap.contains("task close <task_id> --summary"));
+        assert!(
+            !bootstrap.contains("`workspace_integrate` with assignment_id=")
+        );
+        assert!(
+            !bootstrap
+                .contains("`task_close` with task_id=<task_id> and summary=")
+        );
         assert_eq!(
             fs::read_to_string(workspace.join("AGENTS.md")).unwrap(),
             instructions

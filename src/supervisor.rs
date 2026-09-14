@@ -128,6 +128,17 @@ pub(crate) async fn run(
     let json_output = arguments.json;
     let foreground_operation_id = arguments.operation_id;
     match arguments.command {
+        Some(CliCommand::Mcp) => {
+            if json_output || foreground_operation_id.is_some() {
+                return Err(SupervisorError::Rejected {
+                    code: RpcFailureCode::InvalidArgument,
+                    message: "the MCP entrypoint accepts only MCP over stdio"
+                        .to_owned(),
+                });
+            }
+            crate::mcp::run().await?;
+            Ok(crate::cli::ExitCategory::Success)
+        }
         Some(CliCommand::SupervisorConnect) => {
             let project = discover_current_project()?;
             let directories = CoterieDirectories::from_environment()?;
@@ -753,7 +764,7 @@ fn validate_foreground_exit_response(
     }
 }
 
-async fn connect_from_agent_environment()
+pub(crate) async fn connect_from_agent_environment()
 -> Result<Option<SupervisorClient>, SupervisorError> {
     let agent_id = env::var_os("COTERIE_AGENT_ID");
     let session_id = env::var_os("COTERIE_SESSION_ID");
@@ -1085,6 +1096,7 @@ fn public_request(
             unreachable!("configuration commands run locally")
         }
         CliCommand::Supervisor(_)
+        | CliCommand::Mcp
         | CliCommand::SupervisorConnect
         | CliCommand::SupervisorShutdown => unreachable!(
             "private commands are dispatched before public request conversion"
@@ -5501,7 +5513,7 @@ fn bootstrap_instruction(
         .and_then(|role| role.instructions.as_deref())
         .unwrap_or_default();
     let mut bootstrap = format!(
-        "You are a {role} agent for Coterie run {run_id}. Run `\"$COTERIE_BIN\" prime` now for current orchestration context. Follow the repository's AGENTS.md instructions. Before `coterie finish --status completed`, validate the work and commit any intended Git worktree changes successfully. Uncommitted changes keep the assignment active; resolve them and retry finish. A clean assignment may finish with no new commit.\n{instructions}"
+        "You are a {role} agent for Coterie run {run_id}. Call the `prime` orchestration tool now for current orchestration context. Follow the repository's AGENTS.md instructions. Before calling `finish` with status completed, validate the work and commit any intended Git worktree changes successfully. Uncommitted changes keep the assignment active; resolve them and retry finish. A clean assignment may finish with no new commit.\n{instructions}"
     );
     let allowed = |namespace, action| {
         configuration
@@ -5514,19 +5526,19 @@ fn bootstrap_instruction(
     );
     if allowed("task", "read") {
         bootstrap.push_str(
-            "\nPoll `\"$COTERIE_BIN\" progress --json` initially, then `\"$COTERIE_BIN\" progress --after <progress_cursor> --wait 5 --json`. Save each next_cursor and drain pages while has_more is true, even when changes is empty. Inspect current tasks and submitted results with `\"$COTERIE_BIN\" prime`.",
+            "\nCall `progress` initially with after=null, limit=50, and wait_seconds=0, then with after=<progress_cursor>, limit=50, and wait_seconds=5. Save each next_cursor and drain pages while has_more is true, even when changes is empty. Inspect current tasks and submitted results with `prime`.",
         );
     } else {
         bootstrap.push_str(
-            "\nYour role lacks task:read, so progress polling is unavailable. Use `\"$COTERIE_BIN\" prime` for current orchestration context and report any monitoring blocker to the user or an authorized coordinator.",
+            "\nYour role lacks task:read, so progress polling is unavailable. Use `prime` for current orchestration context and report any monitoring blocker to the user or an authorized coordinator.",
         );
     }
     bootstrap.push_str(
-        "\nOn each coordination cycle, including after an empty or timed-out progress wait, read `\"$COTERIE_BIN\" inbox --after <inbox_cursor> --json` (start at 0). Keep its next_cursor separate from the progress cursor. Acknowledge messages with `\"$COTERIE_BIN\" inbox ack <inbox_cursor>` only after handling every message through that cursor. Progress does not read or acknowledge messages. Also check the inbox at startup, task boundaries, and before finishing.",
+        "\nOn each coordination cycle, including after an empty or timed-out progress wait, call `inbox` with after=<inbox_cursor> (start at 0). Keep its next_cursor separate from the progress cursor. Acknowledge messages with `inbox_acknowledge` and through=<inbox_cursor> only after handling every message through that cursor. Progress does not read or acknowledge messages. Also check the inbox at startup, task boundaries, and before finishing.",
     );
     if allowed("workspace", "integrate") {
         bootstrap.push_str(
-            "\nAfter reviewing a submitted Git result, use `\"$COTERIE_BIN\" workspace integrate --assignment <assignment_id>` when integration is needed, then validate the integrated target.",
+            "\nAfter reviewing a submitted Git result, use `workspace_integrate` with assignment_id=<assignment_id> when integration is needed, then validate the integrated target.",
         );
     } else {
         bootstrap.push_str(
@@ -5535,7 +5547,7 @@ fn bootstrap_instruction(
     }
     if allowed("task", "close") {
         bootstrap.push_str(
-            "\nAfter the acceptance conditions pass, use `\"$COTERIE_BIN\" task close <task_id> --summary <validation_evidence>` to record validated closure.",
+            "\nAfter the acceptance conditions pass, use `task_close` with task_id=<task_id> and summary=<validation_evidence> to record validated closure.",
         );
     } else {
         bootstrap.push_str(
@@ -6566,6 +6578,8 @@ async fn reject(
 /// A failure while locating, starting, or communicating with a supervisor.
 #[derive(Debug, Error)]
 pub(crate) enum SupervisorError {
+    #[error(transparent)]
+    Mcp(#[from] crate::mcp::McpError),
     #[error(
         "configuration overrides apply only to foreground startup, config commands, and doctor; an active run uses its saved snapshot"
     )]
@@ -6798,6 +6812,7 @@ impl SupervisorError {
                 crate::cli::ErrorCode::CorruptState
             }
             Self::RpcTimeout { .. }
+            | Self::Mcp(_)
             | Self::SocketIo { .. }
             | Self::Frame(_)
             | Self::Spawn { .. }

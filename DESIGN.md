@@ -850,8 +850,8 @@ The bootstrap establishes only orchestration behavior:
 
 ```text
 You are the lead agent for Coterie run 7b2f.
-Use the coterie CLI for delegation and communication.
-Run `coterie prime` now for current identity, peers, tasks, and command guidance.
+Use the Coterie MCP tools for delegation and communication.
+Call `prime` now for current identity, peers, tasks, and tool guidance.
 Follow the repository's AGENTS.md instructions for work in the project.
 ```
 
@@ -867,7 +867,7 @@ while work remains, unless the user pauses it. This is conditional guidance for
 every configured role, not a runtime classification of role names or an automatic
 assignment of coordination responsibility. The run's snapshotted capabilities
 select command guidance: `task:read` permits continued
-`progress --after <cursor> --wait 5` polling, `workspace:integrate` permits
+`progress` polling with `after=<cursor>` and `wait_seconds=5`, `workspace:integrate` permits
 explicit integration, and `task:close` permits closure after validation. Agents
 without a needed capability report the blocker to the user or an authorized
 coordinator instead of attempting the restricted command.
@@ -905,15 +905,16 @@ COTERIE_BIN
 ```
 
 `COTERIE_BIN` is the absolute executable path of the launching Coterie
-process, supplied by Coterie rather than inherited from the environment.
-Bootstrap instructions include this path and use `"$COTERIE_BIN" prime` so
-orchestration does not depend on shell PATH lookup. They identify the selected
-filesystem, network, and approval policy. An unavailable executable or denied
-supervisor socket must be reported to the operator with that policy and the
-failed path; agents must not bypass the sandbox or change permissions.
-Socket permission errors retain the stable `unavailable` diagnostic and direct
-the operator to inspect the selected profile and run `coterie doctor` outside
-the agent sandbox. Coterie does not retry with broader access.
+process, supplied by Coterie rather than inherited from the environment. The
+Codex adapter uses that executable to launch a required, session-specific MCP
+server through the provider's supported stdio configuration. Bootstrap names
+the server and selected permission profile, directs agents to discover deferred
+tools with `tool_search`, and calls `prime` through MCP. It does not advertise
+shell RPCs as usable when the provider sandbox denies the supervisor socket.
+An unavailable bridge or rejected initialization is a launch failure. Agents
+report the server and selected policy without printing credentials. Direct CLI
+socket errors retain the stable `unavailable` diagnostic. Coterie never retries
+with broader filesystem, network, or shell approval permissions.
 
 Background Codex jobs use the documented `allow_login_shell=false` setting.
 Non-login shell tools preserve the inherited toolchain PATH. NixOS shells also
@@ -1403,15 +1404,30 @@ The ordinary provider sandbox remains mandatory policy, not an optimization.
 Workspace isolation prevents concurrent Git changes from colliding; it does not
 by itself restrict filesystem or network access.
 
-### Proposed supervisor transport clarification
+### Supervisor transport
 
-The supervisor access follow-up must verify this proposal against the installed
-provider before adopting it. A session needs access to the exact run supervisor
-Unix socket as part of its orchestration capabilities. This local RPC access is
-separate from the permission profile's task network access: `network=deny` must
-still prohibit external and other local network destinations. The socket grant
-must not grant writes to its containing runtime directory or the run database,
-and every request must retain the existing token and generation checks.
+The opt-in tests on Linux with Codex 0.153.4 reproduce the reported socket
+denial even when global Unix socket access is allowed. The standalone probe
+selects the workspace policy explicitly; it does not test TUI flag precedence.
+A named profile with an exact socket allowance and network disabled also
+receives `EPERM` under both writable and read-only filesystem policies. The
+scoped socket proposal therefore cannot provide the required Linux transport
+on this version.
+
+Inspection of the source packaged with the installed provider confirms the
+cause: restricted network mode unconditionally denies `connect()` in
+`codex-rs/linux-sandbox/src/landlock.rs`. Proxy-routed mode denies creating
+`AF_UNIX` sockets, and `unix_socket_permissions_supported()` in
+`codex-rs/network-proxy/src/runtime.rs` is true only on macOS. The provider's
+own non-macOS test rejects even the global Unix socket allowance. These are
+version-specific findings, not an interface Coterie may depend on.
+
+A session needs access to the run supervisor as part of its orchestration
+capabilities. This local RPC access is separate from the permission profile's
+task network access: `network=deny` must still prohibit external and other local
+network destinations. The socket grant must not grant writes to its containing
+runtime directory or the run database, and every request must retain the
+existing token and generation checks.
 
 An adapter may use a provider-supported, exact-path socket allowance only when
 it can enforce these restrictions together with the selected filesystem and
@@ -1423,6 +1439,46 @@ denied access must fail before starting agent work, with a policy-preserving
 diagnostic. It must never retry by disabling the sandbox, enabling unrestricted
 network access, granting a runtime-directory write root, or allowing arbitrary
 Unix sockets. Real-provider regression tests remain explicit opt-ins.
+
+Coterie provides a stdio MCP endpoint through the private `__mcp` entrypoint
+of the same binary. Codex launches one bridge per session through its supported
+MCP configuration for interactive sessions and jobs. This fixed-function broker
+runs outside the command sandbox. It receives the run socket and complete
+session-scoped agent credentials through an explicit environment allowlist,
+authenticates with `whoami` before MCP initialization, and forwards typed agent
+RPCs through the supervisor's existing authentication and capability checks.
+Missing, incomplete, invalid, or stale credentials fail closed. The bridge has
+no operator channel, arbitrary command execution, general file access tool, or
+direct database mutation. Tool arguments cannot select a different caller or
+socket. The supervisor remains the only run database writer.
+
+The generated MCP catalog defines the exact tool allowlist. The adapter
+preauthorizes only those named Coterie tools through Codex's per-tool approval
+settings: invoking the transport may exercise existing Coterie role authority,
+including from non-interactive jobs, but cannot acquire new role authority.
+Every request still undergoes supervisor authorization. This is separate from
+the provider's command approval policy, which remains unchanged; managed
+provider requirements may still deny a tool. New or unrelated MCP tools receive
+no automatic approval from this configuration. Invalid or denied operations
+return explicit errors rather than retrying through another channel.
+
+Each mutation requires an operation ID. `new_operation_id` allocates one, and
+bootstrap instructs agents to preserve it and identical arguments on retries.
+MCP uses bounded newline-delimited JSON-RPC, negotiated protocol version
+`2025-06-18`, typed input schemas, and matching redacted textual and structured
+results. The generated [tool catalog](schemas/mcp-tools-v1.json) is checked
+against the Rust input types. Unknown tools and operator-only fields are
+rejected before forwarding.
+
+The adapter probes the installed provider's stdio configuration interface and
+requires its configured bridge to initialize. Unique session server names
+prevent a prior generation's tool catalog from proving startup readiness.
+For `codex exec`, all generated permission and MCP configuration overrides
+follow the `exec` subcommand so its own configuration parser receives them.
+Real-provider acceptance covers the foreground TUI in a PTY and actual worker
+launches under writable and read-only profiles. It checks tool discovery, allowed
+and denied agent RPCs, stale credentials, failed initialization, and preserved
+command restrictions, including a conflicting provider network default.
 
 An agent with `project:attach` may attach only a canonical path beneath a
 trusted global `allowed_project_roots` entry. The array defaults to empty and
@@ -1551,7 +1607,7 @@ platform.
 
 The design succeeds when a user can open a project in Neovim, launch Coterie
 through sidekick.nvim, and converse naturally with one lead agent while that
-agent safely delegates work through the Coterie CLI. The same conversation can
+agent safely delegates work through Coterie orchestration tools. The same conversation can
 implement a change in one project and then update a dependent project, with each
 worker launched in the correct working directory and the downstream task blocked
 until the upstream result is integrated and verified. Configuration is

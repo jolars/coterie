@@ -122,11 +122,12 @@ client or authentication. Before starting Coterie:
    `codex` is on the `PATH` inherited by the terminal or editor.
 2. Run `codex` directly once and complete one of its offered sign-in methods.
 3. Run `codex --version` and confirm that it reports `codex-cli` version
-   0.151.0 or later, but earlier than 1.0.0.
+   0.153.4 or later, but earlier than 1.0.0.
 
 At launch, Coterie probes the installed version and the documented command-line
 features needed for an interactive TUI, `codex exec --json` jobs, startup
-instructions, working-directory selection, sandboxing, and approvals. It fails
+instructions, working-directory selection, sandboxing, approvals, and the
+required stdio MCP bridge for agent orchestration. It fails
 closed with exit code 7 when the executable, version, or required capability is
 unavailable.
 

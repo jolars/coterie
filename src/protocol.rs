@@ -187,7 +187,16 @@ pub(crate) struct ClosureOverrideRequest {
 }
 
 /// The durable task outcome reported by an assigned agent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FinishStatus {
     Completed,

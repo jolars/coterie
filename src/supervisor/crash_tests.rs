@@ -698,7 +698,8 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
 // This executable exercises the actual Codex process adapter without a model,
 // network, or credentials. Its independent ledger detects repeated launches.
 const PROCESS_PROVIDER: &str = r#"#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'codex-cli 0.151.0\n'; exit 0; fi
+if [ "${3-}" = "mcp" ] && [ "${4-}" = "get" ]; then printf '%s\n' '{"enabled":true,"transport":{"type":"stdio","command":"coterie","args":["__mcp"],"env_vars":["COTERIE_TOKEN"]}}'; exit 0; fi
+if [ "$1" = "--version" ]; then printf 'codex-cli 0.153.4\n'; exit 0; fi
 if [ "$1" = "--help" ] || [ "${2-}" = "--help" ]; then
   printf '%s\n' 'Usage: codex exec [OPTIONS] [PROMPT]' '--config <key=value>' '--cd <DIR>' '--sandbox <SANDBOX_MODE>' '--ask-for-approval <APPROVAL_POLICY>' '--json'
   exit 0

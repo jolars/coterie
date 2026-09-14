@@ -24,10 +24,11 @@ streams, so Coterie prints no wrapper response while the TUI owns the terminal.
 Coterie injects its orchestration bootstrap through Codex's
 `developer_instructions` setting, while leaving normal project instruction
 discovery—including `AGENTS.md`—intact. Configured role instructions are included
-in that provider bootstrap. `COTERIE_BIN` contains the absolute path of the
-launching Coterie binary, and the bootstrap names it and the selected permission
-profile. Use `"$COTERIE_BIN" prime` and the same quoted executable for subsequent
-Coterie commands, even when `coterie` is absent from the shell's PATH.
+in that provider bootstrap. Coterie configures a required stdio MCP server
+using the absolute path of its own binary. The bootstrap identifies the server
+and selected permission profile, calls `prime` through MCP, and directs agents
+to `tool_search` when the tools are deferred. Other orchestration actions also
+use MCP. The public CLI remains available to operators and ordinary processes.
 
 The bootstrap includes conditional guidance for any role coordinating delegated
 work: keep coordinating while work remains, unless the user pauses it. Command
@@ -830,28 +831,63 @@ selected permission profile and run `coterie doctor` outside the agent sandbox.
 Coterie does not broaden the sandbox or retry with different permissions.
 Neither diagnostic requires printing the session token or full environment.
 
-The supervisor transport follow-up has an opt-in reproduction for Codex
-0.153.4 on Linux. It creates a temporary Codex configuration with Unix sockets
-already allowed, applies the legacy workspace sandbox policy, and checks
-socket access and filesystem restrictions using a local test executable. It
-does not call a model, use authentication, or change the operator's Codex
-configuration. An absolute `XDG_RUNTIME_DIR` outside system temp directories
-and an installed Codex CLI are required. With explicit operator opt-in, run:
+The Codex adapter requires version 0.153.4 or later, below 1.0.0, and probes
+its stdio MCP configuration support. Both launch modes configure
+`coterie_<session-id>` to execute the private `__mcp` entrypoint. The bridge
+requires the complete agent environment and authenticates before exposing any
+tools; it never falls back to operator discovery. It forwards only the typed
+agent operations in the generated [MCP catalog](../schemas/mcp-tools-v1.json).
+It rejects operator requests, arbitrary commands, unknown arguments, and caller
+or socket overrides. Each call retains the supervisor's capability and session
+generation checks.
+
+The adapter explicitly approves only the catalog's named orchestration tools
+through Codex's per-tool settings. Those tools exercise Coterie capabilities
+already granted to the session, including in jobs with `approvals=never`.
+Provider command approval settings and filesystem/network restrictions are
+unchanged. New or unrelated MCP tools receive no approval through this list,
+and managed provider policy can still deny calls. Generated job configuration
+follows `exec`; placing it before `exec` did not expose the tools to the actual
+Codex 0.153.4 job when later job-specific overrides were present.
+
+Tools use MCP version `2025-06-18` and bounded JSON-RPC messages over stdio.
+Successful supervisor RPC results contain `schema_version=1` and the typed supervisor response
+in `data`, including its `result` discriminator. Failed operations return
+`isError=true` with the CLI's stable diagnostic envelope. Text content and
+`structuredContent` contain the same redacted value. `prime.commands` names the
+MCP operations. Mutations require a `co-ULID` operation ID; call
+`new_operation_id` once and retain the ID for retries with identical arguments.
+That local tool returns the allocated `operation_id` directly.
+
+The explicitly opted-in checks use the installed Codex provider. The MCP
+startup/call check uses App Server to exercise Codex's MCP client without a
+model. The job check launches real workers through Coterie; the foreground check
+launches its real TUI in a PTY and observes the task created through MCP. Both
+exercise writable and read-only profiles and require model access. A separate
+check rejects invalid bridge authentication before App Server or `exec` starts
+model work. Tests copy local `auth.json` into private temporary homes and isolate
+Codex configuration. An absolute
+`XDG_RUNTIME_DIR` outside system temp directories and Python 3 are required for
+command sandbox probes. Ordinary CI skips all real-provider checks.
 
 ```console
-cargo test providers::sandbox_tests::installed_codex_reproduces_legacy_socket_denial -- --ignored --exact
+cargo test --test supervisor_runtime mcp::installed_codex_mcp_routes_authenticated_rpc -- --ignored --exact
+cargo test --test supervisor_runtime mcp::installed_codex_jobs_use_mcp_and_preserve_the_sandbox -- --ignored --exact
+cargo test --test supervisor_runtime mcp::installed_codex_foreground_uses_mcp_under_both_profiles -- --ignored --exact
+cargo test --test supervisor_runtime mcp::installed_codex_rejects_failed_required_mcp_initialization -- --ignored --exact
 ```
 
-The reproduction expects the reported `EPERM` denial; its result and a
-replacement transport remain unverified. Ordinary tests and CI skip it.
-
-An additional opt-in contract tests whether a named Codex profile can allow
-only the supervisor socket while preserving network denial and both writable
-and read-only filesystem profiles. This candidate is not used by launches
-until the contract is verified:
+The earlier socket probe establishes why the bridge is necessary. On Linux,
+Codex 0.153.4 denies direct Unix socket connections even with global or exact
+socket allowances; its Unix socket proxy allowlist is macOS-only. The operator
+can reach the same live endpoints. The supervisor socket remains denied to
+sandboxed commands while authorized MCP calls use the authenticated bridge. The
+worker check executes a helper that asserts the expected Unix socket, TCP, and
+filesystem restrictions and requires its successful exit. This remains
+verifiable when Codex omits late command output from its completed JSONL item.
 
 ```console
-cargo test providers::sandbox_tests::installed_codex_scoped_socket_contract_preserves_restrictions -- --ignored --exact
+cargo test providers::sandbox_tests::installed_codex_reproduces_workspace_socket_denial -- --ignored --exact
 ```
 
 The shell contract has an ordinary Bash regression and a host-specific NixOS

@@ -24,11 +24,15 @@ mod recovery;
 #[path = "supervisor_runtime/workspace_reuse.rs"]
 mod workspace_reuse;
 
+#[path = "supervisor_runtime/mcp.rs"]
+mod mcp;
+
 const RUN_ID: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT_ID: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";
 const FAKE_CODEX: &str = r#"#!/bin/sh
+if [ "${3-}" = "mcp" ] && [ "${4-}" = "get" ]; then printf '%s\n' '{"enabled":true,"transport":{"type":"stdio","command":"coterie","args":["__mcp"],"env_vars":["COTERIE_TOKEN"]}}'; exit 0; fi
 if [ "$1" = "--version" ]; then
-  printf 'codex-cli 0.151.0\n'
+  printf 'codex-cli 0.153.4\n'
   exit 0
 fi
 if [ "$1" = "--help" ]; then
@@ -1420,22 +1424,22 @@ fn foreground_codex_inherits_streams_directory_identity_and_agents_discovery() {
         .iter()
         .filter_map(|record| record.strip_prefix("arg="))
         .collect::<Vec<_>>();
-    assert_eq!(arguments.len(), 10, "the bootstrap must not be a prompt");
+    assert_eq!(arguments.len(), 12, "the bootstrap must not be a prompt");
     assert_eq!(arguments[0], "--sandbox");
     assert_eq!(arguments[1], "workspace-write");
-    assert_eq!(arguments[2], "--ask-for-approval");
-    assert_eq!(arguments[3], "on-request");
+    assert_eq!(arguments[2], "--config");
+    assert_eq!(arguments[3], "approval_policy=\"on-request\"");
     assert_eq!(arguments[4], "--config");
     assert_eq!(arguments[5], "approvals_reviewer=\"user\"");
-    assert_eq!(arguments[6], "--cd");
-    assert_eq!(arguments[7], fixture.project.to_string_lossy());
-    assert_eq!(arguments[8], "--config");
-    assert!(arguments[9].starts_with("developer_instructions=\""));
-    assert!(arguments[9].contains("COTERIE_BIN"));
-    assert!(arguments[9].contains("AGENTS.md"));
-    assert!(arguments[9].contains("validate the work and commit"));
-    assert!(arguments[9].contains("coterie finish --status completed"));
-    assert!(arguments[9].contains("no new commit"));
+    assert_eq!(arguments[8], "--cd");
+    assert_eq!(arguments[9], fixture.project.to_string_lossy());
+    assert_eq!(arguments[10], "--config");
+    assert!(arguments[11].starts_with("developer_instructions=\""));
+    assert!(arguments[11].contains("Coterie MCP server"));
+    assert!(arguments[11].contains("AGENTS.md"));
+    assert!(arguments[11].contains("validate the work and commit"));
+    assert!(arguments[11].contains("calling `finish` with status completed"));
+    assert!(arguments[11].contains("no new commit"));
     for variable in [
         "COTERIE_PROJECT_ROOT",
         "COTERIE_PROJECT_ID",
@@ -3593,6 +3597,7 @@ impl TestEnvironment {
         // of an arbitrarily long `TMPDIR` used for its other files.
         let runtime =
             Path::new("/tmp").join(format!("ct-runtime-{fixture_id}"));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         let state = root.join("state");
         let project = root.join("project");
         let bin = root.join("bin");

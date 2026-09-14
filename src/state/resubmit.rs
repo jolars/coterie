@@ -3,7 +3,10 @@
 use super::*;
 
 /// Explicit commit compare-and-set and the human account of the correction.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Resubmission {
     pub(crate) assignment_id: AssignmentId,
     pub(crate) expected_result: String,

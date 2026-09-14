@@ -1,0 +1,683 @@
+{
+  "schema_version": 1,
+  "tools": [
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Report the authenticated agent and session identity.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Whoami",
+        "type": "object"
+      },
+      "name": "whoami"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read current orchestration context, capabilities, tasks, and assignment. Call at startup.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Prime",
+        "type": "object"
+      },
+      "name": "prime"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Inspect the run, agents, and tasks within this agent's authority.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Status",
+        "type": "object"
+      },
+      "name": "status"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read lifecycle changes. Save next_cursor, drain has_more, and keep the inbox cursor separate. wait_seconds is bounded by the supervisor.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "wait_seconds": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "wait_seconds"
+        ],
+        "title": "Progress",
+        "type": "object"
+      },
+      "name": "progress"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List projects attached to the run.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "ProjectList",
+        "type": "object"
+      },
+      "name": "project_list"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Attach an absolute project path beneath an operator-allowed root. Requires project:attach. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "path"
+        ],
+        "title": "ProjectAttach",
+        "type": "object"
+      },
+      "name": "project_attach"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Create a task with exactly one attached target project. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "TaskId": {
+            "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "dependencies": {
+            "items": {
+              "$ref": "#/$defs/TaskId"
+            },
+            "type": "array"
+          },
+          "description": {
+            "type": "string"
+          },
+          "group": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "project": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "title",
+          "description",
+          "project",
+          "dependencies"
+        ],
+        "title": "TaskCreate",
+        "type": "object"
+      },
+      "name": "task_create"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "List tasks ready for assignment.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "TaskReady",
+        "type": "object"
+      },
+      "name": "task_ready"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Retire an exited agent's unfinished assignment and preserve its work for continuation. Requires task:recover. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "AssignmentId": {
+            "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "assignment_id": {
+            "$ref": "#/$defs/AssignmentId"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "assignment_id",
+          "reason"
+        ],
+        "title": "TaskRecover",
+        "type": "object"
+      },
+      "name": "task_recover"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Supersede an unintegrated Git submission after validating and committing its correction. Requires task:resubmit. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "AssignmentId": {
+            "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "Resubmission": {
+            "additionalProperties": false,
+            "description": "Explicit commit compare-and-set and the human account of the correction.",
+            "properties": {
+              "assignment_id": {
+                "$ref": "#/$defs/AssignmentId"
+              },
+              "expected_result": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "result_commit": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "assignment_id",
+              "expected_result",
+              "result_commit",
+              "summary",
+              "reason"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "submission": {
+            "$ref": "#/$defs/Resubmission"
+          }
+        },
+        "required": [
+          "operation_id",
+          "submission"
+        ],
+        "title": "TaskResubmit",
+        "type": "object"
+      },
+      "name": "task_resubmit"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Accept a submitted task after review, integration when needed, and validation. Requires task:close. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "TaskId": {
+            "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "task_id": {
+            "$ref": "#/$defs/TaskId"
+          }
+        },
+        "required": [
+          "operation_id",
+          "task_id",
+          "summary"
+        ],
+        "title": "TaskClose",
+        "type": "object"
+      },
+      "name": "task_close"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Launch a configured role on a ready task within run limits. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "TaskId": {
+            "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "role": {
+            "type": "string"
+          },
+          "task_id": {
+            "$ref": "#/$defs/TaskId"
+          }
+        },
+        "required": [
+          "operation_id",
+          "role",
+          "task_id"
+        ],
+        "title": "Spawn",
+        "type": "object"
+      },
+      "name": "spawn"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Integrate a reviewed Git result into its clean, unchanged target. Requires workspace:integrate. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "AssignmentId": {
+            "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "assignment_id": {
+            "$ref": "#/$defs/AssignmentId"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          }
+        },
+        "required": [
+          "operation_id",
+          "assignment_id"
+        ],
+        "title": "WorkspaceIntegrate",
+        "type": "object"
+      },
+      "name": "workspace_integrate"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Submit this assignment. Before completed, validate and commit intended Git changes; dirty work rejects completion. Submission is separate from accepted task closure. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "FinishStatus": {
+            "description": "The durable task outcome reported by an assigned agent.",
+            "enum": [
+              "completed",
+              "failed"
+            ],
+            "type": "string"
+          },
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "status": {
+            "$ref": "#/$defs/FinishStatus"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "status",
+          "summary"
+        ],
+        "title": "Finish",
+        "type": "object"
+      },
+      "name": "finish"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Send a durable message to an authorized recipient. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "recipient": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "recipient",
+          "message"
+        ],
+        "title": "Send",
+        "type": "object"
+      },
+      "name": "send"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read messages after the saved inbox cursor, starting at zero. Read at startup, task boundaries, each coordination cycle, and before finishing.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "after"
+        ],
+        "title": "Inbox",
+        "type": "object"
+      },
+      "name": "inbox"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Acknowledge messages only after handling every message through the inbox cursor. Reuse operation_id on retry.",
+      "inputSchema": {
+        "$defs": {
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "through": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "operation_id",
+          "through"
+        ],
+        "title": "InboxAcknowledge",
+        "type": "object"
+      },
+      "name": "inbox_acknowledge"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read a bounded page of an authorized agent's provider transcript.",
+      "inputSchema": {
+        "$defs": {
+          "SessionId": {
+            "pattern": "^cs-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "limit": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "agent",
+          "after",
+          "limit"
+        ],
+        "title": "Logs",
+        "type": "object"
+      },
+      "name": "logs"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read a bounded page of run events within the agent's authority.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "limit": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "after",
+          "limit"
+        ],
+        "title": "Events",
+        "type": "object"
+      },
+      "name": "events"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Allocate one operation ID before a mutation. Save it and reuse it with identical arguments when retrying an uncertain outcome.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "title": "Empty",
+        "type": "object"
+      },
+      "name": "new_operation_id"
+    }
+  ]
+}

@@ -1,0 +1,308 @@
+//! Agent-only MCP access to the authenticated supervisor protocol.
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+use thiserror::Error;
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+    BufReader,
+};
+
+use crate::id::OperationId;
+use crate::protocol::RpcRequest;
+use crate::supervisor::{SupervisorClient, SupervisorError};
+
+#[cfg(test)]
+mod tests;
+mod tools;
+
+const MAXIMUM_MESSAGE_BYTES: usize = 1024 * 1024;
+const PROTOCOL_VERSION: &str = "2025-06-18";
+pub(crate) const INSTRUCTIONS: &str = "Use the Coterie MCP tools for all orchestration. Call prime at startup. If tools are deferred, discover them with tool_search using Coterie prime as the query. Call new_operation_id before each mutation and reuse that ID with identical arguments after an uncertain outcome. Tokens and caller identity are supplied by the bridge; never put them in tool arguments. Read inbox separately from progress. Shell commands retain their selected sandbox restrictions.";
+
+#[derive(Debug, Error)]
+pub(crate) enum McpError {
+    #[error("Coterie MCP stream failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Coterie MCP message exceeds the size limit")]
+    MessageTooLarge,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Message {
+    jsonrpc: String,
+    #[serde(default)]
+    id: Option<Value>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Deserialize)]
+struct Initialize {
+    #[serde(rename = "protocolVersion")]
+    protocol_version: String,
+    capabilities: serde_json::Map<String, Value>,
+    #[serde(rename = "clientInfo")]
+    client_info: ClientInfo,
+}
+
+#[derive(Deserialize)]
+struct ClientInfo {
+    name: String,
+    version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Call {
+    name: String,
+    #[serde(default = "empty_object")]
+    arguments: Value,
+    #[serde(rename = "_meta", default)]
+    _meta: Option<Value>,
+}
+
+fn empty_object() -> Value {
+    json!({})
+}
+
+pub(crate) fn catalog() -> Vec<Value> {
+    let mut catalog = tools::catalog();
+    catalog.push(json!({
+        "name": "new_operation_id",
+        "description": "Allocate one operation ID before a mutation. Save it and reuse it with identical arguments when retrying an uncertain outcome.",
+        "inputSchema": schemars::schema_for!(tools::Empty),
+        "annotations": {"readOnlyHint": true, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false}
+    }));
+    catalog
+}
+
+/// Missing credentials always fail; this entrypoint never discovers an operator run.
+pub(crate) async fn run() -> Result<(), SupervisorError> {
+    let mut client = crate::supervisor::connect_from_agent_environment()
+        .await?
+        .ok_or(SupervisorError::IncompleteAgentEnvironment)?;
+    // The socket handshake establishes run identity; Whoami also authenticates
+    // the token and checks that its session generation is still current.
+    client.request(RpcRequest::Whoami).await?;
+    serve(
+        BufReader::new(tokio::io::stdin()),
+        tokio::io::stdout(),
+        client,
+    )
+    .await
+}
+
+async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
+    mut input: R,
+    mut output: W,
+    mut client: SupervisorClient,
+) -> Result<(), SupervisorError> {
+    let mut initialized = false;
+    let mut ready = false;
+    loop {
+        let mut frame = Vec::new();
+        let count = (&mut input)
+            .take((MAXIMUM_MESSAGE_BYTES + 1) as u64)
+            .read_until(b'\n', &mut frame)
+            .await
+            .map_err(McpError::from)?;
+        if count == 0 {
+            return Ok(());
+        }
+        if count > MAXIMUM_MESSAGE_BYTES {
+            return Err(McpError::MessageTooLarge.into());
+        }
+        let value = match serde_json::from_slice::<Value>(&frame) {
+            Ok(value) => value,
+            Err(_) => {
+                write(&mut output, error(Value::Null, -32700, "Invalid JSON."))
+                    .await?;
+                continue;
+            }
+        };
+        if value.get("id").is_some_and(|id| !valid_id(id)) {
+            write(
+                &mut output,
+                error(Value::Null, -32600, "Invalid request ID."),
+            )
+            .await?;
+            continue;
+        }
+        let message = match serde_json::from_value::<Message>(value) {
+            Ok(message)
+                if message.jsonrpc == "2.0"
+                    && message.id.as_ref().is_none_or(valid_id) =>
+            {
+                message
+            }
+            _ => {
+                write(
+                    &mut output,
+                    error(Value::Null, -32600, "Invalid JSON-RPC request."),
+                )
+                .await?;
+                continue;
+            }
+        };
+        let Some(id) = message.id else {
+            if message.method == "notifications/initialized" && initialized {
+                ready = true;
+            }
+            // Unknown notifications have no response and cannot execute a tool.
+            continue;
+        };
+        let result = match message.method.as_str() {
+            "ping" => Ok(json!({})),
+            "initialize" if !initialized => {
+                match serde_json::from_value::<Initialize>(message.params) {
+                    Ok(parameters)
+                        if !parameters.protocol_version.is_empty()
+                            && !parameters.client_info.name.is_empty()
+                            && !parameters.client_info.version.is_empty() =>
+                    {
+                        let _capabilities = parameters.capabilities;
+                        initialized = true;
+                        Ok(json!({
+                            "protocolVersion": PROTOCOL_VERSION,
+                            "capabilities": {"tools": {"listChanged": false}},
+                            "serverInfo": {"name": "coterie", "version": env!("CARGO_PKG_VERSION")},
+                            "instructions": INSTRUCTIONS
+                        }))
+                    }
+                    _ => Err((-32602, "Invalid initialization parameters.")),
+                }
+            }
+            _ if !ready => Err((-32600, "Complete MCP initialization first.")),
+            "tools/list" => {
+                if !message.params.is_null() && !message.params.is_object() {
+                    Err((-32602, "Tool-list parameters must be an object."))
+                } else if message
+                    .params
+                    .get("cursor")
+                    .is_some_and(|cursor| !cursor.is_null())
+                {
+                    Err((-32602, "This catalog has no continuation cursor."))
+                } else {
+                    Ok(json!({"tools": catalog()}))
+                }
+            }
+            "tools/call" => {
+                match serde_json::from_value::<Call>(message.params) {
+                    Ok(call) => call_tool(&mut client, call).await,
+                    Err(_) => Err((-32602, "Invalid tool-call parameters.")),
+                }
+            }
+            _ => Err((-32601, "Unsupported MCP method.")),
+        };
+        let response = match result {
+            Ok(result) => json!({"jsonrpc":"2.0", "id":id, "result":result}),
+            Err((code, message)) => error(id, code, message),
+        };
+        write(&mut output, response).await?;
+    }
+}
+
+fn valid_id(id: &Value) -> bool {
+    id.is_string() || id.is_i64() || id.is_u64()
+}
+
+async fn call_tool(
+    client: &mut SupervisorClient,
+    call: Call,
+) -> Result<Value, (i32, &'static str)> {
+    if call.name == "new_operation_id" {
+        serde_json::from_value::<tools::Empty>(call.arguments)
+            .map_err(|_| (-32602, "This tool accepts no arguments."))?;
+        return Ok(tool_result(
+            json!({"operation_id": OperationId::generate()}),
+            false,
+        ));
+    }
+    let operation_id = call.arguments.get("operation_id").and_then(|value| {
+        serde_json::from_value::<OperationId>(value.clone()).ok()
+    });
+    let request = tools::request(&call.name, call.arguments)
+        .map_err(|message| (-32602, message))?;
+    match client.request(request).await {
+        Ok(mut response) => {
+            if let crate::protocol::RpcResponse::Prime { commands, .. } =
+                &mut response
+            {
+                for command in commands.iter_mut() {
+                    *command = command.replace(' ', "_");
+                }
+                commands.extend([
+                    "inbox_acknowledge".to_owned(),
+                    "new_operation_id".to_owned(),
+                ]);
+            }
+            Ok(tool_result(
+                json!({"schema_version": 1, "data": response}),
+                false,
+            ))
+        }
+        Err(failure) => {
+            let mut encoded = Vec::new();
+            crate::cli::render_json_error(
+                &mut std::io::sink(),
+                &mut encoded,
+                &match operation_id {
+                    Some(id) => failure.diagnostic().for_operation(id),
+                    None => failure.diagnostic(),
+                },
+            )
+            .expect("an in-memory diagnostic can be serialized");
+            Ok(tool_result(
+                serde_json::from_slice(&encoded)
+                    .expect("the diagnostic is JSON"),
+                true,
+            ))
+        }
+    }
+}
+
+fn tool_result(mut value: Value, failed: bool) -> Value {
+    // Keep structured and textual results identical, including redaction.
+    redact(&mut value);
+    let text = value.to_string();
+    json!({"content":[{"type":"text", "text":text}], "structuredContent":value, "isError":failed})
+}
+
+fn redact(value: &mut Value) {
+    match value {
+        Value::String(text) => *text = crate::redaction::text(text),
+        Value::Array(values) => values.iter_mut().for_each(redact),
+        Value::Object(values) => {
+            *values = std::mem::take(values)
+                .into_iter()
+                .map(|(key, mut value)| {
+                    redact(&mut value);
+                    (crate::redaction::text(&key), value)
+                })
+                .collect();
+        }
+        _ => {}
+    }
+}
+
+fn error(id: Value, code: i32, message: &str) -> Value {
+    json!({"jsonrpc":"2.0", "id":id, "error":{"code":code,"message":message}})
+}
+
+async fn write<W: AsyncWrite + Unpin>(
+    output: &mut W,
+    value: Value,
+) -> Result<(), McpError> {
+    let mut bytes = value.to_string().into_bytes();
+    // A result includes the bounded RPC output in both text and structured form.
+    if bytes.len() > 4 * MAXIMUM_MESSAGE_BYTES {
+        return Err(McpError::MessageTooLarge);
+    }
+    bytes.push(b'\n');
+    output.write_all(&bytes).await?;
+    output.flush().await?;
+    Ok(())
+}

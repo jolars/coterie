@@ -454,14 +454,14 @@ Observed on September 11, 2026, in run
 Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
 `cr-01M2FCB65ZMA1S8J9DHBDCAMXC`.
 
-- [ ] **Make supervisor RPCs work under the effective provider sandbox.**
+- [x] **Make supervisor RPCs work under the effective provider sandbox.**
   The foreground agent's `prime`, `progress --json`, and `inbox --after 0 --json`
   all failed with `Operation not permitted (os error 1)` connecting to
   `$XDG_RUNTIME_DIR/coterie/<run-id>.sock`. The selected Coterie profile was
   `filesystem=project-write`, `network=provider-default`, and
   `approvals=interactive`. The operator could reach the same supervisor.
-  The Codex adapter forces `--sandbox workspace-write` and exports
-  `COTERIE_SOCKET`, but does not configure a scoped socket grant. The operator's
+  At the time, the Codex adapter forced `--sandbox workspace-write` and exported
+  `COTERIE_SOCKET`, but configured no working agent transport. The operator's
   Codex configuration already allowed Unix sockets; reproduce the effective
   policy interaction before attributing the failure to a missing allowance.
   Establish a supported, capability-checked transport under the selected policy
@@ -470,26 +470,41 @@ Observed on September 14, 2026, on NixOS with Codex CLI 0.153.4, in run
   widening. Propose any necessary trust-boundary change in `DESIGN.md` first.
   Add regression coverage for allowed and denied supervisor access, including
   an opt-in real-Codex sandbox test rather than relying only on fake providers.
-  Investigation is in progress on `fix/sandbox-supervisor-rpc`: `DESIGN.md`
-  contains a proposed local RPC clarification, and the opt-in reproduction in
-  [sandbox tests](src/providers/sandbox_tests.rs) checks the legacy policy with
-  Unix sockets already allowed. A second opt-in contract checks the proposed
-  exact-socket grant under writable and read-only profiles with network denied.
-  Both real-Codex tests await the explicit opt-in required by `AGENTS.md`.
-  Ordinary `task check` passes with 437 tests and 12 opt-in or generation tests
-  skipped. The transport fix and its real-provider acceptance gate remain
-  outstanding.
+  The opted-in [sandbox tests](src/providers/sandbox_tests.rs) reproduce the
+  Linux denial, including the rejected exact-socket grant. The approved
+  `DESIGN.md` boundary is implemented as a required stdio MCP bridge. Its typed
+  tools retain agent authentication, capability checks, generation fencing,
+  operation IDs, and redaction. The adapter probes support, requires Codex
+  0.153.4 or later, and configures both launch modes without broadening command
+  permissions. Real tests now cover authenticated calls, capability denial,
+  stale sessions, failed required initialization, foreground TUI task creation,
+  and worker completion under writable and read-only policies. The worker test
+  also proves socket, TCP, and filesystem restrictions despite a conflicting
+  provider network default. `task check` passes with 445 ordinary tests and 17
+  opt-in or generation tests skipped. The explicitly opted-in real-Codex MCP,
+  foreground, worker, startup-failure, capability-probe, and sandbox checks pass
+  on NixOS with Codex 0.153.4.
 
 - [ ] **Distinguish operator health from agent connectivity in `doctor`.**
   The operator's report marked every check healthy during the failure above.
   Its supervisor handshake runs in the operator's process, while the provider
-  probe checks only the Codex version and CLI help. Neither proves that a tool
-  running inside the effective provider sandbox can reach the supervisor.
+  probe checks the Codex version, CLI help, and now MCP configuration support.
+  These static checks do not prove authenticated access from an agent bridge.
   Report this distinction explicitly and provide a bounded, policy-preserving
   connectivity check or report that sandbox access has not been verified.
   Name an actionable next step when operator access succeeds but agent access
   fails. Test that exact split, successful agent access, unavailable probes,
   and human and JSON diagnostics without exposing tokens or widening access.
+
+- [ ] **Honor configured provider names in foreground observations.**
+  The real foreground MCP test exposed an existing hard-coded provider check:
+  naming the Codex adapter `real_codex` makes `require_foreground_scope` reject
+  startup because it compares `session.provider` with `codex`. The default
+  `codex` provider passes the foreground tests. Validate the configured adapter
+  and session mode while retaining identity and generation checks, and add a
+  regression for foreground startup and shutdown with an arbitrary provider
+  name. The failed launch also left a supervisor alive after the fixture's
+  normal stop attempt; cover cleanup of that failure.
 
 ## M6: Cross-project orchestration
 

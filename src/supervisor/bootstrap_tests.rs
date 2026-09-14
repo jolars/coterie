@@ -36,8 +36,11 @@ fn coordination_bootstrap_follows_capabilities_for_any_role_name() {
                 bootstrap.contains("If you are coordinating delegated work")
             );
             assert!(bootstrap.contains("unless the user pauses"));
-            assert!(bootstrap.contains("inbox --after <inbox_cursor>"));
-            assert!(bootstrap.contains("inbox ack <inbox_cursor>"));
+            assert!(bootstrap.contains("`inbox` with after=<inbox_cursor>"));
+            assert!(
+                bootstrap
+                    .contains("`inbox_acknowledge` and through=<inbox_cursor>")
+            );
             assert!(bootstrap.contains("only after handling"));
             assert!(bootstrap.contains("separate"));
             assert!(bootstrap.contains("review"));
@@ -48,17 +51,20 @@ fn coordination_bootstrap_follows_capabilities_for_any_role_name() {
             );
             assert!(bootstrap.contains("capability-probed provider support"));
             assert_eq!(
-                bootstrap
-                    .contains("progress --after <progress_cursor> --wait 5"),
+                bootstrap.contains(
+                    "after=<progress_cursor>, limit=50, and wait_seconds=5"
+                ),
                 read
             );
             assert_eq!(bootstrap.contains("has_more"), read);
             assert_eq!(
-                bootstrap.contains("workspace integrate --assignment"),
+                bootstrap.contains("`workspace_integrate` with assignment_id="),
                 integrate
             );
             assert_eq!(
-                bootstrap.contains("task close <task_id> --summary"),
+                bootstrap.contains(
+                    "`task_close` with task_id=<task_id> and summary="
+                ),
                 close
             );
         }
@@ -75,9 +81,14 @@ fn builtin_coordination_bootstrap_preserves_configured_instructions() {
     .unwrap();
     let bootstrap = bootstrap_instruction(RunId::generate(), "lead", &config);
     assert!(bootstrap.contains("Delegate independent implementation"));
-    assert!(bootstrap.contains("progress --after <progress_cursor> --wait 5"));
-    assert!(bootstrap.contains("workspace integrate --assignment"));
-    assert!(bootstrap.contains("task close <task_id> --summary"));
+    assert!(
+        bootstrap
+            .contains("after=<progress_cursor>, limit=50, and wait_seconds=5")
+    );
+    assert!(bootstrap.contains("`workspace_integrate` with assignment_id="));
+    assert!(
+        bootstrap.contains("`task_close` with task_id=<task_id> and summary=")
+    );
     assert!(bootstrap.contains("AGENTS.md"));
     assert!(
         bootstrap

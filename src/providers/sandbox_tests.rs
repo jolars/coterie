@@ -61,15 +61,10 @@ impl SandboxFixture {
         }
     }
 
-    fn legacy_command(&self) -> Command {
+    fn workspace_command(&self) -> Command {
         let mut command = Command::new("codex");
         command
-            .args([
-                "sandbox",
-                "--config",
-                "sandbox_mode=\"workspace-write\"",
-                "--cd",
-            ])
+            .args(["sandbox", "--permission-profile", ":workspace", "--cd"])
             .arg(self.root.join("project"));
         self.append_child(&mut command);
         command
@@ -82,6 +77,8 @@ impl SandboxFixture {
         command
             .args([
                 "sandbox",
+                "--permission-profile",
+                "coterie-probe",
                 "--config",
                 "default_permissions=\"coterie-probe\"",
                 "--config",
@@ -95,7 +92,7 @@ impl SandboxFixture {
                 "--config",
             ])
             .arg(format!(
-                "permissions.coterie-probe.network.unix_sockets.{socket_key}=\"allow\""
+                "permissions.coterie-probe.network.unix_sockets={{{socket_key}=\"allow\"}}"
             ))
             .arg("--cd")
             .arg(self.root.join("project"));
@@ -218,7 +215,7 @@ fn sandbox_observation_control_reaches_live_endpoints_and_writes_files() {
 
 #[test]
 #[ignore = "requires explicit opt-in to run the installed Codex Linux sandbox"]
-fn installed_codex_reproduces_legacy_socket_denial() {
+fn installed_codex_reproduces_workspace_socket_denial() {
     let fixture = SandboxFixture::new();
     for name in ["supervisor.sock", "unrelated.sock"] {
         UnixStream::connect(fixture.root.join(name))
@@ -226,7 +223,7 @@ fn installed_codex_reproduces_legacy_socket_denial() {
     }
     TcpStream::connect(fixture.tcp_listener.local_addr().unwrap())
         .expect("the operator must reach the same TCP endpoint");
-    let observation = observe(fixture.legacy_command());
+    let observation = observe(fixture.workspace_command());
     assert_eq!(observation["project/write-check"]["allowed"], true);
     assert_eq!(observation["outside-write-check"]["allowed"], false);
     assert_eq!(observation["supervisor.sock"]["allowed"], false);
@@ -236,15 +233,13 @@ fn installed_codex_reproduces_legacy_socket_denial() {
 }
 
 #[test]
-#[ignore = "unverified transport contract; requires explicit opt-in to run the installed Codex Linux sandbox"]
-fn installed_codex_scoped_socket_contract_preserves_restrictions() {
-    for parent in [":workspace", ":read-only"] {
+#[ignore = "requires explicit opt-in; reproduces the rejected scoped grant on Codex 0.153.4 Linux"]
+fn installed_codex_reproduces_scoped_socket_denial() {
+    let observations = [":workspace", ":read-only"].map(|parent| {
         let fixture = SandboxFixture::new();
-        let observation = observe(fixture.scoped_command(parent));
-        assert_eq!(
-            observation["supervisor.sock"]["allowed"], true,
-            "the exact supervisor grant must work under {parent}: {observation}"
-        );
+        (parent, observe(fixture.scoped_command(parent)))
+    });
+    for (parent, observation) in &observations {
         for denied in ["unrelated.sock", "tcp", "outside-write-check"] {
             assert_eq!(
                 observation[denied]["allowed"], false,
@@ -253,8 +248,14 @@ fn installed_codex_scoped_socket_contract_preserves_restrictions() {
         }
         assert_eq!(
             observation["project/write-check"]["allowed"],
-            parent == ":workspace",
+            *parent == ":workspace",
             "the selected filesystem restriction must remain effective"
         );
     }
+    assert!(
+        observations.iter().all(|(_, observation)| {
+            observation["supervisor.sock"]["allowed"] == false
+        }),
+        "Linux must reproduce the unsupported grant under both profiles: {observations:?}"
+    );
 }

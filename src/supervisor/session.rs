@@ -1322,6 +1322,7 @@ pub(crate) fn required_permission_capabilities(
     let network = (permission_profile.network == NetworkPolicy::Deny)
         .then_some(ProviderCapability::NetworkSandbox);
     [
+        Some(ProviderCapability::SupervisorRpc),
         Some(ProviderCapability::WorkingDirectory),
         Some(ProviderCapability::FilesystemSandbox),
         network,
@@ -2465,7 +2466,8 @@ mod tests {
         fs::write(
             &executable,
             "#!/bin/sh\n\
-             if [ \"$1\" = \"--version\" ]; then printf 'codex-cli 0.151.0\\n'; exit 0; fi\n\
+             if [ \"${3-}\" = \"mcp\" ] && [ \"${4-}\" = \"get\" ]; then printf '%s\\n' '{\"enabled\":true,\"transport\":{\"type\":\"stdio\",\"command\":\"coterie\",\"args\":[\"__mcp\"],\"env_vars\":[\"COTERIE_TOKEN\"]}}'; exit 0; fi\n\
+             if [ \"$1\" = \"--version\" ]; then printf 'codex-cli 0.153.4\\n'; exit 0; fi\n\
              if [ \"$1\" = \"--help\" ]; then printf 'Usage: codex [OPTIONS] [PROMPT]\\n  --config <key=value>\\n  --cd <DIR>\\n  --sandbox <SANDBOX_MODE>\\n  --ask-for-approval <APPROVAL_POLICY>\\n'; exit 0; fi\n\
              if [ \"$1\" = \"exec\" ] && [ \"$2\" = \"--help\" ]; then printf 'Usage: codex exec [OPTIONS] [PROMPT]\\n  --config <key=value>\\n  --cd <DIR>\\n  --sandbox <SANDBOX_MODE>\\n  --ask-for-approval <APPROVAL_POLICY>\\n  --json\\n'; exit 0; fi\n\
              {\n\
