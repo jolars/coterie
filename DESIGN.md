@@ -1076,6 +1076,31 @@ skip-worktree make cleanliness unprovable, so integration refuses them with a
 diagnostic. Coterie does not autonomously choose an integration order or
 resolve conflicts.
 
+Integration defaults to `rebase`: fast-forward when the target is still at the
+recorded base; otherwise replay each contribution commit in order onto the
+captured target tip. Replayed commits retain their authors and messages,
+including empty commits, with a deterministic Coterie committer and the saved
+integration timestamp. This adds no merge commits and preserves the target's
+existing history. `--strategy merge` explicitly selects the former behavior:
+fast-forward when possible, otherwise create a two-parent merge commit.
+Results already reachable from the target require no new commit.
+
+The CLI and agent MCP tool accept an optional strategy. Each new integration
+plan records the resolved strategy before side effects, and the success response
+and integration event report it. Retries use the original arguments and saved
+plan, including when the strategy was omitted. Changing the strategy under the
+same operation ID is a conflict. Migration 16 pins historical plans to `merge`, so
+recovery never recomputes their commits using the new default.
+
+Preflight checks the combined result without writing Git objects. Rebase also
+checks each replayed commit before checkout or reference advancement; an
+intermediate conflict is refused even if the combined result is conflict-free.
+Commit construction may leave unreferenced objects after durable intent, but
+never rewrites the submitted worktree or its owned reference. Reconciliation
+reproduces the same commit IDs from the saved plan and original commits. Original
+contribution commits remain recoverable through their owned reference even when
+rebasing gives the integrated commits new IDs.
+
 ### Compact progress inspection
 
 `coterie progress [--after <cursor>] [--limit <1..100>] [--wait <0..5>]`

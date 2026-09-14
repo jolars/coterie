@@ -119,6 +119,11 @@ const MIGRATIONS: &[Migration] = &[
             "state/migrations/0015_foreground_process_identity.sql"
         ),
     },
+    Migration {
+        version: 16,
+        name: "integration_strategy",
+        sql: include_str!("state/migrations/0016_integration_strategy.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -5627,6 +5632,10 @@ mod tests {
                 .expect("migrated integration plan");
             let plan: crate::workspace::IntegrationPlan =
                 serde_json::from_str(&plan_json).expect("typed migrated plan");
+            assert_eq!(
+                plan.strategy,
+                crate::workspace::IntegrationStrategy::Merge
+            );
             assert_eq!(generation, 2);
             let workspace: (String, Vec<u8>, String, i64) = store.connection.query_row(
                 "SELECT kind, path, state, created_at FROM workspaces WHERE assignment_id = ?1",

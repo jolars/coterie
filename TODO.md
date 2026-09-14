@@ -132,6 +132,13 @@ later milestones build on.
 - [x] Implement explicit guarded integration. Refuse dirty targets, unexpected
   tips, ambiguous histories, and conflicts; never remove dirty,
   unintegrated, running, or ambiguously owned work.
+  Integration defaults to rebase, preserving contribution commits in linear
+  history, with explicit `--strategy merge` support in the CLI and agent MCP
+  tool. Migration 16 preserves historical merge plans. Real-repository tests
+  cover authors, messages, empty commits, intermediate conflicts, and preserved
+  submissions; crash matrices cover both strategies and repeated recovery.
+  The multi-worker workflow verifies linear integration through accepted task
+  closure. `task check` passes with 478 tests and 17 opt-in or helper tests skipped.
 - [x] Complete the operator loop for task creation, worker spawn, logs and
   messages, assignment submission, integration, validation, task closure,
   and safe stop.

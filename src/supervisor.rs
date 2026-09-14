@@ -1010,6 +1010,7 @@ fn public_request(
                     RpcRequest::WorkspaceIntegrate {
                         operation_id,
                         assignment_id: arguments.assignment,
+                        strategy: arguments.strategy,
                     },
                     Some(operation_id),
                     false,
@@ -2940,6 +2941,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
         RpcRequest::WorkspaceIntegrate {
             operation_id,
             assignment_id,
+            strategy,
         } => integrate_workspace(
             store,
             workspaces,
@@ -2947,6 +2949,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             caller,
             operation_id,
             assignment_id,
+            strategy,
         ),
         RpcRequest::Finish {
             operation_id,
@@ -4697,10 +4700,14 @@ fn integrate_workspace<B: WorkspaceBackend>(
     caller: &AuthenticatedCaller,
     operation_id: OperationId,
     assignment_id: AssignmentId,
+    strategy: Option<crate::workspace::IntegrationStrategy>,
 ) -> Result<RpcResponse, RpcFailure> {
     require_capability(store, run_id, caller, "workspace", "integrate")?;
     let attempted_at = rpc_timestamp()?;
-    let request = json!({"assignment_id": assignment_id});
+    let mut request = json!({"assignment_id": assignment_id});
+    if let Some(strategy) = strategy {
+        request["strategy"] = json!(strategy);
+    }
     let existing = store
         .transaction(|repositories| repositories.operation(operation_id))
         .map_err(rpc_state_failure)?;
@@ -4761,7 +4768,12 @@ fn integrate_workspace<B: WorkspaceBackend>(
         }
         Some(
             workspaces
-                .prepare_integration(store, workspace.scope(), attempted_at)
+                .prepare_integration(
+                    store,
+                    workspace.scope(),
+                    attempted_at,
+                    strategy.unwrap_or_default(),
+                )
                 .map_err(rpc_workspace_failure)?,
         )
     } else {
@@ -4846,6 +4858,7 @@ fn integrate_workspace<B: WorkspaceBackend>(
 
 fn integration_summary(integration: IntegrationRecord) -> IntegrationSummary {
     IntegrationSummary {
+        strategy: integration.strategy,
         assignment_id: integration.assignment_id,
         project_id: integration.project_id,
         target_reference: integration.target_reference,
@@ -8721,15 +8734,19 @@ while :; do :; done
                     actor_agent_id: None,
                     status: "succeeded".to_owned(),
                     request: json!({"assignment_id": assignment_id}),
-                    result: Some(json!({
-                        "run_id": active.run_id,
-                        "generation": 0,
-                        "assignment_id": assignment_id,
-                        "project_id": active.project_id,
-                        "target_reference": "refs/heads/main",
-                        "target_commit": base_commit,
-                        "integrated_at": 13,
-                    })),
+                    result: Some(serde_json::to_value(
+                        crate::workspace::IntegrationPlan {
+                            run_id: active.run_id,
+                            generation: 0,
+                            assignment_id,
+                            project_id: active.project_id,
+                            target_reference: "refs/heads/main".to_owned(),
+                            target_commit: base_commit.to_owned(),
+                            integrated_at: 13,
+                            strategy:
+                                crate::workspace::IntegrationStrategy::Rebase,
+                        },
+                    )?),
                     attempt_count: 1,
                     reconciliation_state: Some(ExternalResourceState::Desired),
                     reconciliation_attempt_count: 0,
@@ -9105,6 +9122,7 @@ while :; do :; done
                 .request(RpcRequest::WorkspaceIntegrate {
                     operation_id: OperationId::generate(),
                     assignment_id,
+                    strategy: None,
                 })
                 .await,
             Err(SupervisorError::Rejected {
@@ -9116,6 +9134,7 @@ while :; do :; done
         let integration_request = || RpcRequest::WorkspaceIntegrate {
             operation_id: integration_operation,
             assignment_id,
+            strategy: None,
         };
         let integrated = operator
             .request(integration_request())
@@ -9141,6 +9160,21 @@ while :; do :; done
                 .expect("the integration retry should replay"),
             integrated
         );
+        assert!(matches!(
+            operator
+                .request(RpcRequest::WorkspaceIntegrate {
+                    operation_id: integration_operation,
+                    assignment_id,
+                    strategy: Some(
+                        crate::workspace::IntegrationStrategy::Merge
+                    ),
+                })
+                .await,
+            Err(SupervisorError::Rejected {
+                code: RpcFailureCode::Conflict,
+                ..
+            })
+        ));
         let close_operation = OperationId::generate();
         let close_request = || RpcRequest::TaskClose {
             operation_id: close_operation,

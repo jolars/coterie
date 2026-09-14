@@ -577,25 +577,40 @@ the original result even after later Git changes, without duplicating events.
 
 ```console
 coterie workspace integrate --assignment <assignment-id>
-  [--operation-id <co-ULID>]
+  [--strategy <rebase|merge>] [--operation-id <co-ULID>]
 ```
 
 Apply a successfully completed worktree assignment whose task is `submitted`.
+The default strategy is `rebase`: fast-forward when possible, otherwise replay
+contribution commits in order onto the target. Authors, messages, and empty
+commits are preserved; replayed commits get new IDs. This adds no merge commits.
+Use `--strategy merge` to fast-forward when possible and otherwise create a
+two-parent merge commit. Existing target history is preserved with either
+strategy.
+
 Before recording durable intent, Coterie verifies the assignment worktree and
 target repository identities, requires both worktrees to be clean, requires the
 recorded result to be the assignment tip with a linear history from its base,
 captures the target branch and tip, and preflights any merge without changing
-the target. Applying the plan uses a compare-and-set reference update, so a
-changed target, conflict, or ambiguous history is refused without resolution.
+the target. Rebase also checks every replayed commit before checkout, refusing
+intermediate conflicts even when the final diff merges cleanly. Applying the
+plan uses a compare-and-set reference update, so a changed target, conflict, or
+ambiguous history is refused without resolution.
 Checkout preserves ignored files, including files that collide with the result.
 Assume-unchanged or skip-worktree index flags cause a conflict diagnostic because
 they prevent proof of cleanliness. A redirected Git working directory or a
 symlink substituted into an owned workspace path also blocks integration.
 
-The success response records the target reference, base commit, result commit,
-target commit before integration, and resulting target commit. Integration does
+The success response records the strategy, target reference, base commit, result
+commit, target commit before integration, and resulting target commit. Integration does
 not remove the worktree or its owned reference. The operator or an agent with
 `workspace:integrate` may call this mutation.
+
+Reuse the operation ID and original arguments when retrying. The saved strategy
+survives supervisor restarts. Historical integration plans retain `merge` after
+upgrade; a retry does not adopt the new default. Changing an explicitly supplied
+strategy under the same operation ID fails with `conflict` (exit 5). The agent
+`workspace_integrate` MCP tool exposes the same optional `strategy` field.
 
 ### `coterie finish`
 

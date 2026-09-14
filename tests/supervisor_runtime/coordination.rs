@@ -260,6 +260,8 @@ fn coordinator_polls_multiple_completions_through_validated_closure() {
             command
         });
         assert_eq!(premature.status.code(), Some(5));
+        let target = Repository::open(&fixture.project).unwrap();
+        let target_before = target.head().unwrap().target().unwrap();
         let integrated = request(&[
             "workspace",
             "integrate",
@@ -274,12 +276,24 @@ fn coordinator_polls_multiple_completions_through_validated_closure() {
         assert_repository_clean(&fixture.project);
         let target = Repository::open(&fixture.project).unwrap();
         let target_commit = target.head().unwrap().target().unwrap();
-        assert!(
-            target_commit.to_string() == *result
-                || target
-                    .graph_descendant_of(target_commit, result.parse().unwrap())
-                    .unwrap()
+        let tip = target.find_commit(target_commit).unwrap();
+        assert_eq!(tip.parent_count(), 1);
+        assert_eq!(tip.parent_id(0).unwrap(), target_before);
+        let original = target.find_commit(result.parse().unwrap()).unwrap();
+        assert_eq!(tip.message_raw_bytes(), original.message_raw_bytes());
+        assert!(tip.author() == original.author());
+        assert_eq!(
+            Repository::open(workspace)
+                .unwrap()
+                .head()
+                .unwrap()
+                .target()
+                .unwrap()
+                .to_string(),
+            *result
         );
+        assert_eq!(integrated["data"]["integration"]["strategy"], "rebase");
+        assert_eq!(integrated["data"]["integration"]["result_commit"], *result);
         assert_eq!(
             integrated["data"]["integration"]["target_commit"],
             target_commit.to_string()

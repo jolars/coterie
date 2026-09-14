@@ -16,7 +16,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 9;
+pub(crate) const PROTOCOL_VERSION: u16 = 10;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -144,6 +144,8 @@ pub(crate) enum RpcRequest {
     WorkspaceIntegrate {
         operation_id: OperationId,
         assignment_id: AssignmentId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        strategy: Option<crate::workspace::IntegrationStrategy>,
     },
     Finish {
         operation_id: OperationId,
@@ -449,6 +451,7 @@ pub(crate) struct RecoverySummary {
 /// Exact identities recorded by one explicit guarded integration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct IntegrationSummary {
+    pub(crate) strategy: crate::workspace::IntegrationStrategy,
     pub(crate) assignment_id: AssignmentId,
     pub(crate) project_id: ProjectId,
     pub(crate) target_reference: String,
@@ -633,7 +636,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 9,
+                    "protocol_version": 10,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -660,6 +663,7 @@ mod tests {
         let request = RpcRequest::WorkspaceIntegrate {
             operation_id,
             assignment_id,
+            strategy: None,
         };
 
         assert_eq!(
@@ -746,7 +750,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 9,
+                    "protocol_version": 10,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

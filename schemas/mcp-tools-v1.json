@@ -407,12 +407,27 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Integrate a reviewed Git result into its clean, unchanged target. Requires workspace:integrate. Reuse operation_id on retry.",
+      "description": "Integrate a reviewed Git result into its clean, unchanged target. Defaults to rebase for linear history; merge is opt-in. Requires workspace:integrate. Reuse operation_id on retry.",
       "inputSchema": {
         "$defs": {
           "AssignmentId": {
             "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
             "type": "string"
+          },
+          "IntegrationStrategy": {
+            "description": "How a submitted linear history is applied to its target branch.",
+            "oneOf": [
+              {
+                "const": "rebase",
+                "description": "Replay contribution commits on the target, fast-forwarding when possible.",
+                "type": "string"
+              },
+              {
+                "const": "merge",
+                "description": "Fast-forward when possible, otherwise create a two-parent merge commit.",
+                "type": "string"
+              }
+            ]
           },
           "OperationId": {
             "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
@@ -427,6 +442,16 @@
           },
           "operation_id": {
             "$ref": "#/$defs/OperationId"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/IntegrationStrategy"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [

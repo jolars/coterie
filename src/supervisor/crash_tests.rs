@@ -80,6 +80,11 @@ fn crash_matrix_merge() {
 }
 
 #[test]
+fn crash_matrix_rebase() {
+    matrix("rebase");
+}
+
+#[test]
 fn crash_matrix_transcript() {
     matrix("transcript");
 }
@@ -216,6 +221,11 @@ fn crash_matrix_integration_recovery() {
 }
 
 #[test]
+fn crash_matrix_rebase_recovery() {
+    recovery_matrix("rebase", "integration.rebase.commit.after");
+}
+
+#[test]
 fn crash_matrix_runtime_recovery() {
     recovery_matrix("runtime", "socket.permissions.after");
 }
@@ -258,6 +268,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "resubmit",
         "integrate",
         "merge",
+        "rebase",
         "transcript",
         "shutdown",
         "idle-shutdown",
@@ -1345,6 +1356,7 @@ impl Fixture {
             "finish"
                 | "integrate"
                 | "merge"
+                | "rebase"
                 | "close"
                 | "resubmit"
                 | "external-close"
@@ -1363,7 +1375,12 @@ impl Fixture {
         }
         if matches!(
             case,
-            "integrate" | "merge" | "close" | "resubmit" | "external-close"
+            "integrate"
+                | "merge"
+                | "rebase"
+                | "close"
+                | "resubmit"
+                | "external-close"
         ) {
             self.finish();
         }
@@ -1389,9 +1406,9 @@ impl Fixture {
             );
         }
         if case == "close" {
-            self.integrate();
+            self.integrate(case);
         }
-        if case == "merge" {
+        if matches!(case, "merge" | "rebase") {
             commit(
                 &self.root.join("project"),
                 "concurrent.txt",
@@ -1414,7 +1431,7 @@ impl Fixture {
             "recover-assignment" | "continue-assignment" => {
                 recovery_tests::exercise(self, case)
             }
-            "integrate" | "merge" => self.integrate(),
+            "integrate" | "merge" | "rebase" => self.integrate(case),
             "message" => self.message(),
             "acknowledge" => self.acknowledge(),
             "close" => self.close(false),
@@ -1492,7 +1509,7 @@ impl Fixture {
         .unwrap();
     }
 
-    fn integrate(&mut self) {
+    fn integrate(&mut self, case: &str) {
         let assignment = self.workspace().assignment_id;
         integrate_workspace(
             &mut self.store,
@@ -1501,6 +1518,8 @@ impl Fixture {
             &AuthenticatedCaller::Operator,
             "co-01ARZ3NDEKTSV4RRFFQ69G5FB0".parse().unwrap(),
             assignment,
+            (case == "merge")
+                .then_some(crate::workspace::IntegrationStrategy::Merge),
         )
         .unwrap();
     }
@@ -1652,7 +1671,7 @@ impl Fixture {
                     .unwrap();
                 reconcile_operations(&mut self.runtime(), now).unwrap();
             }
-            "integrate" | "merge" => {
+            "integrate" | "merge" | "rebase" => {
                 if self
                     .store
                     .transaction(|r| {
@@ -1663,7 +1682,7 @@ impl Fixture {
                     .unwrap()
                     .is_none()
                 {
-                    self.integrate();
+                    self.integrate(case);
                 }
             }
             "message" => self.message(),
@@ -1845,6 +1864,7 @@ impl Fixture {
                 "finish"
                     | "integrate"
                     | "merge"
+                    | "rebase"
                     | "close"
                     | "resubmit"
                     | "external-close"
@@ -1902,7 +1922,7 @@ impl Fixture {
                     page.bytes.len() > prefix.len()
                 );
             }
-            if matches!(case, "integrate" | "merge")
+            if matches!(case, "integrate" | "merge" | "rebase")
                 && workspace.target_commit.is_none()
             {
                 let operation = self
@@ -1919,16 +1939,17 @@ impl Fixture {
                     Some(ExternalResourceState::Unknown)
                 );
                 assert!(operation.reconciliation_error.is_some());
-                assert!(
-                    fs::read_to_string(self.root.join("trace"))
-                        .unwrap()
-                        .lines()
-                        .last()
-                        == Some("integration.checkout.progress")
-                );
+                assert!(["trace", "recovery.trace"].iter().any(|name| {
+                    fs::read_to_string(self.root.join(name)).is_ok_and(
+                        |trace| {
+                            trace.lines().last()
+                                == Some("integration.checkout.progress")
+                        },
+                    )
+                }));
                 return;
             }
-            if matches!(case, "integrate" | "merge" | "close") {
+            if matches!(case, "integrate" | "merge" | "rebase" | "close") {
                 assert_eq!(
                     workspace.target_commit.as_deref(),
                     Some(
@@ -1946,13 +1967,42 @@ impl Fixture {
                         .unwrap(),
                     "recoverable worker result\n"
                 );
+                let tip = repository.head().unwrap().peel_to_commit().unwrap();
+                assert_eq!(
+                    tip.parent_count(),
+                    if case == "merge" { 2 } else { 1 }
+                );
+                if case == "rebase" {
+                    assert_eq!(tip.message().unwrap(), "second.txt");
+                    let first = tip.parent(0).unwrap();
+                    assert_eq!(first.parent_count(), 1);
+                    assert_eq!(first.message().unwrap(), "result.txt");
+                    assert_eq!(
+                        first.parent(0).unwrap().message().unwrap(),
+                        "concurrent.txt"
+                    );
+                    assert_eq!(
+                        Repository::open(&workspace.path)
+                            .unwrap()
+                            .head()
+                            .unwrap()
+                            .target()
+                            .unwrap()
+                            .to_string(),
+                        workspace.result_commit.as_deref().unwrap()
+                    );
+                }
                 assert!(repository.statuses(None).unwrap().is_empty());
                 assert_eq!(
                     repository
                         .reflog(repository.head().unwrap().name().unwrap())
                         .unwrap()
                         .len(),
-                    if case == "merge" { 3 } else { 2 }
+                    if matches!(case, "merge" | "rebase") {
+                        3
+                    } else {
+                        2
+                    }
                 );
             }
         }

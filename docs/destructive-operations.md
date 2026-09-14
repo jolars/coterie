@@ -43,7 +43,12 @@ previously observed.
 Guarded integration is an explicit, capability-authorized write to an active
 project. It requires current run and generation ownership, a submitted result,
 the recorded worker tip and base, clean and inspectable worktrees, a matching
-Git working directory, unambiguous history, and a conflict-free merge. Safe
+Git working directory, unambiguous history, and a conflict-free integration.
+Rebase is the default, preserving individual commits in a linear target history;
+merge commits require explicit selection. The saved strategy and timestamp make
+recovery deterministic, and migration 16 preserves historical merge plans. Each
+replayed commit is checked for conflicts before checkout. Original submission
+commits and their owned reference remain intact. Safe
 checkout disables overwriting ignored files. Assume-unchanged and skip-worktree
 flags block integration because status cannot establish cleanliness. Reference
 advancement compares the original tip and retains both original histories.

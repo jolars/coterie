@@ -2258,6 +2258,12 @@ fn foreground_lead_completes_the_codex_worker_loop_through_validation() {
             .is_some_and(|message| message.contains("not been integrated"))
     );
 
+    let target_before = commit_file(
+        &fixture.project,
+        Path::new("concurrent.txt"),
+        "independent target work\n",
+        "target advanced",
+    );
     let integrated = fixture.run_agent_json(
         &[
             "workspace",
@@ -2272,6 +2278,7 @@ fn foreground_lead_completes_the_codex_worker_loop_through_validation() {
         integrated["data"]["integration"]["result_commit"],
         result_commit
     );
+    assert_eq!(integrated["data"]["integration"]["strategy"], "rebase");
     let target_commit = integrated["data"]["integration"]["target_commit"]
         .as_str()
         .expect("integration should return the target commit")
@@ -2291,6 +2298,14 @@ fn foreground_lead_completes_the_codex_worker_loop_through_validation() {
             .id()
             .to_string(),
         target_commit
+    );
+    let tip = target_repository.head().unwrap().peel_to_commit().unwrap();
+    assert_eq!(tip.parent_count(), 1);
+    assert_eq!(tip.parent_id(0).unwrap().to_string(), target_before);
+    assert_ne!(target_commit, result_commit);
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("concurrent.txt")).unwrap(),
+        "independent target work\n"
     );
     assert_repository_clean(&fixture.project);
 

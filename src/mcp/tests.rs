@@ -88,3 +88,32 @@ fn mcp_results_redact_credentials_without_corrupting_json() {
         result["structuredContent"]
     );
 }
+
+#[test]
+fn integration_strategy_is_optional_and_validated() {
+    use crate::workspace::IntegrationStrategy;
+    let arguments = json!({"operation_id": crate::id::OperationId::generate(), "assignment_id": crate::id::AssignmentId::generate()});
+    assert!(matches!(
+        tools::request("workspace_integrate", arguments.clone()).unwrap(),
+        RpcRequest::WorkspaceIntegrate { strategy: None, .. }
+    ));
+    for (name, expected) in [
+        ("rebase", IntegrationStrategy::Rebase),
+        ("merge", IntegrationStrategy::Merge),
+    ] {
+        let mut arguments = arguments.clone();
+        arguments["strategy"] = json!(name);
+        let request = tools::request("workspace_integrate", arguments).unwrap();
+        assert!(
+            matches!(request, RpcRequest::WorkspaceIntegrate { strategy: Some(strategy), .. } if strategy == expected)
+        );
+        let wire = serde_json::to_vec(&request).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<RpcRequest>(&wire).unwrap(),
+            request
+        );
+    }
+    let mut invalid = arguments;
+    invalid["strategy"] = json!("unknown");
+    assert!(tools::request("workspace_integrate", invalid).is_err());
+}

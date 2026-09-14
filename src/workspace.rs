@@ -76,6 +76,7 @@ pub(crate) trait WorkspaceBackend {
         workspace: &WorkspaceRecord,
         project: &ProjectRecord,
         integrated_at: i64,
+        strategy: IntegrationStrategy,
     ) -> Result<IntegrationPlan, WorkspaceBackendError>;
 
     fn integrate(
@@ -84,6 +85,28 @@ pub(crate) trait WorkspaceBackend {
         project: &ProjectRecord,
         plan: &IntegrationPlan,
     ) -> Result<IntegrationRecord, WorkspaceBackendError>;
+}
+
+/// How a submitted linear history is applied to its target branch.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Eq,
+    PartialEq,
+    Serialize,
+    clap::ValueEnum,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IntegrationStrategy {
+    /// Replay contribution commits on the target, fast-forwarding when possible.
+    #[default]
+    Rebase,
+    /// Fast-forward when possible, otherwise create a two-parent merge commit.
+    Merge,
 }
 
 /// Immutable Git observations recorded before an integration side effect.
@@ -96,6 +119,7 @@ pub(crate) struct IntegrationPlan {
     pub(crate) target_reference: String,
     pub(crate) target_commit: String,
     pub(crate) integrated_at: i64,
+    pub(crate) strategy: IntegrationStrategy,
 }
 
 impl IntegrationPlan {
@@ -111,6 +135,7 @@ impl IntegrationPlan {
 /// Exact Git identities observed after applying an integration plan.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct IntegrationRecord {
+    pub(crate) strategy: IntegrationStrategy,
     pub(crate) assignment_id: AssignmentId,
     pub(crate) project_id: crate::id::ProjectId,
     pub(crate) target_reference: String,
@@ -318,12 +343,14 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         store: &mut Store,
         scope: AssignmentScope,
         integrated_at: i64,
+        strategy: IntegrationStrategy,
     ) -> Result<IntegrationPlan, WorkspaceError> {
         let (workspace, project) = workspace_records(store, scope)?;
         Ok(self.backend.prepare_integration(
             &workspace,
             &project,
             integrated_at,
+            strategy,
         )?)
     }
 
@@ -1182,6 +1209,7 @@ impl WorkspaceBackend for GitWorkspace {
         workspace: &WorkspaceRecord,
         project: &ProjectRecord,
         integrated_at: i64,
+        strategy: IntegrationStrategy,
     ) -> Result<IntegrationPlan, WorkspaceBackendError> {
         let inputs = self.integration_inputs(workspace, project)?;
         Ok(IntegrationPlan {
@@ -1192,6 +1220,7 @@ impl WorkspaceBackend for GitWorkspace {
             target_reference: inputs.target_reference,
             target_commit: inputs.target_commit.to_string(),
             integrated_at,
+            strategy,
         })
     }
 
@@ -1270,6 +1299,7 @@ impl WorkspaceBackend for GitWorkspace {
             result,
             expected_target,
             plan.integrated_at,
+            plan.strategy,
         )?;
         let head =
             target.head().map_err(|source| WorkspaceBackendError::Git {
@@ -1348,7 +1378,7 @@ impl WorkspaceBackend for GitWorkspace {
         }
 
         crate::fault::point("integration.commit.before");
-        candidate.write_commit(&target, workspace, plan)?;
+        candidate.write_commit(&target, workspace)?;
         crate::fault::point("integration.commit.after");
         crate::fault::point("integration.reference.before");
         target
@@ -1409,6 +1439,7 @@ impl IntegrationCandidate {
         plan: &IntegrationPlan,
     ) -> IntegrationRecord {
         IntegrationRecord {
+            strategy: plan.strategy,
             assignment_id: workspace.assignment_id,
             project_id: project.id,
             target_reference: plan.target_reference.clone(),
@@ -1429,7 +1460,6 @@ impl IntegrationCandidate {
         &self,
         repository: &Repository,
         workspace: &WorkspaceRecord,
-        _plan: &IntegrationPlan,
     ) -> Result<(), WorkspaceBackendError> {
         let Some(buffer) = self.commit_buffer.as_deref() else {
             return Ok(());
@@ -1771,6 +1801,7 @@ fn integration_candidate(
     result: Oid,
     target: Oid,
     integrated_at: i64,
+    strategy: IntegrationStrategy,
 ) -> Result<IntegrationCandidate, WorkspaceBackendError> {
     if target == result
         || repository
@@ -1809,6 +1840,17 @@ fn integration_candidate(
             target_commit: result,
             commit_buffer: None,
         });
+    }
+
+    if strategy == IntegrationStrategy::Rebase {
+        return rebase_candidate(
+            repository,
+            workspace,
+            base,
+            result,
+            target,
+            integrated_at,
+        );
     }
 
     let base_tree = repository
@@ -1914,6 +1956,75 @@ fn integration_candidate(
         target_commit,
         commit_buffer: Some(buffer),
     })
+}
+
+fn rebase_candidate(
+    repository: &Repository,
+    workspace: &WorkspaceRecord,
+    base: Oid,
+    result: Oid,
+    target: Oid,
+    integrated_at: i64,
+) -> Result<IntegrationCandidate, WorkspaceBackendError> {
+    let git_error = |source| WorkspaceBackendError::Git {
+        action: "replay the assignment commits onto the integration target",
+        path: repository.path().to_owned(),
+        source,
+    };
+    let mut commits = Vec::new();
+    let mut current = result;
+    while current != base {
+        let commit = repository.find_commit(current).map_err(git_error)?;
+        current = commit.parent_id(0).map_err(git_error)?;
+        commits.push(commit);
+    }
+    let signature = Signature::new(
+        "Coterie",
+        "coterie@localhost",
+        &Time::new(integrated_at, 0),
+    )
+    .map_err(git_error)?;
+    let mut parent = repository.find_commit(target).map_err(git_error)?;
+    let mut commits = commits.into_iter().rev().peekable();
+    while let Some(commit) = commits.next() {
+        let mut index = repository
+            .cherrypick_commit(&commit, &parent, 0, None)
+            .map_err(git_error)?;
+        if index.has_conflicts() {
+            return Err(WorkspaceBackendError::IntegrationConflict {
+                assignment_id: workspace.assignment_id,
+            });
+        }
+        let tree_id = index.write_tree_to(repository).map_err(git_error)?;
+        let tree = repository.find_tree(tree_id).map_err(git_error)?;
+        let buffer = repository
+            .commit_create_buffer(
+                &commit.author(),
+                &signature,
+                commit.message_raw().map_err(git_error)?,
+                &tree,
+                &[&parent],
+            )
+            .map_err(git_error)?
+            .to_vec();
+        let target_commit =
+            Oid::hash_object(ObjectType::Commit, &buffer).map_err(git_error)?;
+        let candidate = IntegrationCandidate {
+            tree_id,
+            target_commit,
+            commit_buffer: Some(buffer),
+        };
+        if commits.peek().is_none() {
+            return Ok(candidate);
+        }
+        // libgit2 needs each parent object to construct the next commit. The
+        // durable plan already exists; these objects do not move any reference.
+        crate::fault::point("integration.rebase.commit.before");
+        candidate.write_commit(repository, workspace)?;
+        crate::fault::point("integration.rebase.commit.after");
+        parent = repository.find_commit(target_commit).map_err(git_error)?;
+    }
+    unreachable!("the already-integrated check handles an unchanged result")
 }
 
 fn target_matches_candidate(
@@ -2155,6 +2266,7 @@ pub(crate) mod fake {
             workspace: &WorkspaceRecord,
             project: &ProjectRecord,
             integrated_at: i64,
+            strategy: super::IntegrationStrategy,
         ) -> Result<IntegrationPlan, WorkspaceBackendError> {
             let target_commit = workspace.base_commit.clone().ok_or(
                 WorkspaceBackendError::MissingCommit {
@@ -2177,6 +2289,7 @@ pub(crate) mod fake {
                 target_reference: "refs/heads/main".to_owned(),
                 target_commit,
                 integrated_at,
+                strategy,
             })
         }
 
@@ -2208,6 +2321,7 @@ pub(crate) mod fake {
                     field: "result",
                 })?;
             Ok(IntegrationRecord {
+                strategy: plan.strategy,
                 assignment_id: workspace.assignment_id,
                 project_id: project.id,
                 target_reference: plan.target_reference.clone(),
@@ -2451,7 +2565,12 @@ mod tests {
             );
             assert!(
                 supervisor
-                    .prepare_integration(&mut store, stale, 11)
+                    .prepare_integration(
+                        &mut store,
+                        stale,
+                        11,
+                        super::IntegrationStrategy::default()
+                    )
                     .is_err()
             );
             store
@@ -2550,7 +2669,12 @@ mod tests {
             "result",
         ));
         let plan = backend
-            .prepare_integration(&workspace, &fixture.project, 11)
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default(),
+            )
             .expect("plan");
         for stale in [
             super::IntegrationPlan {
@@ -2906,7 +3030,12 @@ mod tests {
                 "worker result",
             ));
             let plan = backend
-                .prepare_integration(&workspace, &fixture.project, 11)
+                .prepare_integration(
+                    &workspace,
+                    &fixture.project,
+                    11,
+                    super::IntegrationStrategy::default(),
+                )
                 .unwrap();
             let target =
                 Repository::open(&fixture.project.canonical_path).unwrap();
@@ -2919,7 +3048,12 @@ mod tests {
             let path = fixture.project.canonical_path.join("README.md");
             fs::write(&path, "hidden operator edits\n").unwrap();
             assert!(matches!(
-                backend.prepare_integration(&workspace, &fixture.project, 11),
+                backend.prepare_integration(
+                    &workspace,
+                    &fixture.project,
+                    11,
+                    super::IntegrationStrategy::default()
+                ),
                 Err(WorkspaceBackendError::UnverifiableIndex { .. })
             ));
             assert!(
@@ -2949,7 +3083,12 @@ mod tests {
             "worker result",
         ));
         let plan = backend
-            .prepare_integration(&workspace, &fixture.project, 11)
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default(),
+            )
             .unwrap();
         let target = Repository::open(&fixture.project.canonical_path).unwrap();
         fs::write(target.path().join("info/exclude"), "result.txt\n").unwrap();
@@ -2978,7 +3117,12 @@ mod tests {
             "worker result",
         ));
         let plan = backend
-            .prepare_integration(&workspace, &fixture.project, 11)
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default(),
+            )
             .unwrap();
         let outside = fixture.root.join("outside");
         fs::create_dir(&outside).unwrap();
@@ -3036,7 +3180,12 @@ mod tests {
         workspace.result_commit = Some(result.clone());
 
         let plan = backend
-            .prepare_integration(&workspace, &fixture.project, 11)
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default(),
+            )
             .expect("the clean linear integration should preflight");
         let integrated = backend
             .integrate(&workspace, &fixture.project, &plan)
@@ -3069,7 +3218,87 @@ mod tests {
     }
 
     #[test]
-    fn guarded_integration_merges_nonconflicting_target_changes() {
+    fn guarded_integration_rebases_nonconflicting_target_changes() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        let first = commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "worker result",
+        );
+        let result = commit_file(
+            &workspace.path,
+            "second.txt",
+            "second result\n",
+            "second worker commit",
+        );
+        workspace.result_commit = Some(result.clone());
+        let target_before = commit_file(
+            &fixture.project.canonical_path,
+            "target.txt",
+            "target\n",
+            "target advanced",
+        );
+
+        let plan = backend
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default(),
+            )
+            .expect("nonconflicting histories should preflight");
+        let integrated = backend
+            .integrate(&workspace, &fixture.project, &plan)
+            .expect("nonconflicting histories should merge");
+
+        assert_eq!(integrated.target_commit_before, target_before);
+        assert_ne!(integrated.target_commit, target_before);
+        assert_ne!(integrated.target_commit, result);
+        let repository = Repository::open(&fixture.project.canonical_path)
+            .expect("the target repository should open");
+        let commit = repository
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .expect("the integration commit should resolve");
+        assert_eq!(commit.parent_count(), 1);
+        assert_eq!(commit.message().unwrap(), "second worker commit");
+        let original = repository.find_commit(result.parse().unwrap()).unwrap();
+        assert!(commit.author() == original.author());
+        let commit = commit.parent(0).unwrap();
+        assert_eq!(commit.parent_count(), 1);
+        assert_eq!(commit.message().unwrap(), "worker result");
+        assert_ne!(commit.id().to_string(), first);
+        assert_eq!(
+            commit.parent_id(0).expect("a first parent").to_string(),
+            target_before
+        );
+        assert_eq!(head_commit(&workspace.path), result);
+        assert_eq!(
+            backend
+                .integrate(&workspace, &fixture.project, &plan)
+                .unwrap(),
+            integrated
+        );
+        assert_eq!(
+            fs::read_to_string(
+                fixture.project.canonical_path.join("result.txt")
+            )
+            .expect("the worker result should be checked out"),
+            "result\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                fixture.project.canonical_path.join("target.txt")
+            )
+            .expect("the target change should remain checked out"),
+            "target\n"
+        );
+    }
+
+    #[test]
+    fn guarded_integration_supports_explicit_merge_and_replays_saved_plans() {
         let fixture = GitFixture::new();
         let (mut backend, mut workspace) = fixture.materialized_workspace();
         let result = commit_file(
@@ -3087,12 +3316,26 @@ mod tests {
         );
 
         let plan = backend
-            .prepare_integration(&workspace, &fixture.project, 11)
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::Merge,
+            )
             .expect("nonconflicting histories should preflight");
         let integrated = backend
             .integrate(&workspace, &fixture.project, &plan)
             .expect("nonconflicting histories should merge");
 
+        let saved = serde_json::to_vec(&plan).unwrap();
+        let restored = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(
+            backend
+                .integrate(&workspace, &fixture.project, &restored)
+                .unwrap(),
+            integrated
+        );
+        assert_eq!(integrated.strategy, super::IntegrationStrategy::Merge);
         assert_eq!(integrated.target_commit_before, target_before);
         assert_ne!(integrated.target_commit, target_before);
         assert_ne!(integrated.target_commit, result);
@@ -3128,6 +3371,150 @@ mod tests {
     }
 
     #[test]
+    fn guarded_integration_rebase_refuses_an_intermediate_conflict() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        let original =
+            fs::read_to_string(workspace.path.join("README.md")).unwrap();
+        commit_file(
+            &workspace.path,
+            "README.md",
+            "temporary worker change\n",
+            "temporary change",
+        );
+        commit_file(
+            &workspace.path,
+            "README.md",
+            &original,
+            "restore the original",
+        );
+        workspace.result_commit = Some(commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "result",
+        ));
+        let target = commit_file(
+            &fixture.project.canonical_path,
+            "README.md",
+            "concurrent target change\n",
+            "target advanced",
+        );
+        let plan = backend
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::Rebase,
+            )
+            .unwrap();
+        for _ in 0..2 {
+            assert!(matches!(
+                backend.integrate(&workspace, &fixture.project, &plan),
+                Err(WorkspaceBackendError::IntegrationConflict { .. })
+            ));
+            assert_eq!(head_commit(&fixture.project.canonical_path), target);
+            assert_eq!(
+                Some(head_commit(&workspace.path)),
+                workspace.result_commit
+            );
+            let repository =
+                Repository::open(&fixture.project.canonical_path).unwrap();
+            assert!(repository.statuses(None).unwrap().is_empty());
+            assert!(
+                !fixture.project.canonical_path.join("result.txt").exists()
+            );
+        }
+    }
+
+    #[test]
+    fn guarded_integration_rebase_preserves_empty_commits() {
+        let fixture = GitFixture::new();
+        let (mut backend, mut workspace) = fixture.materialized_workspace();
+        commit_file(&workspace.path, "result.txt", "result\n", "worker result");
+        workspace.result_commit = Some(commit_file(
+            &workspace.path,
+            "result.txt",
+            "result\n",
+            "empty checkpoint",
+        ));
+        let target = commit_file(
+            &fixture.project.canonical_path,
+            "target.txt",
+            "target\n",
+            "target advanced",
+        );
+        let plan = backend
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::Rebase,
+            )
+            .unwrap();
+        backend
+            .integrate(&workspace, &fixture.project, &plan)
+            .unwrap();
+        let repository =
+            Repository::open(&fixture.project.canonical_path).unwrap();
+        let tip = repository.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(tip.message().unwrap(), "empty checkpoint");
+        let first = tip.parent(0).unwrap();
+        assert_eq!(tip.tree_id(), first.tree_id());
+        assert_eq!(first.message().unwrap(), "worker result");
+        assert_eq!(first.parent_id(0).unwrap().to_string(), target);
+    }
+
+    #[test]
+    fn guarded_integration_unchanged_and_already_reachable_results_do_not_add_commits()
+     {
+        for unchanged in [false, true] {
+            let fixture = GitFixture::new();
+            let (mut backend, mut workspace) = fixture.materialized_workspace();
+            if unchanged {
+                workspace.result_commit = workspace.base_commit.clone();
+            } else {
+                workspace.result_commit = Some(commit_file(
+                    &workspace.path,
+                    "result.txt",
+                    "result\n",
+                    "worker result",
+                ));
+                let plan = backend
+                    .prepare_integration(
+                        &workspace,
+                        &fixture.project,
+                        11,
+                        super::IntegrationStrategy::Rebase,
+                    )
+                    .unwrap();
+                backend
+                    .integrate(&workspace, &fixture.project, &plan)
+                    .unwrap();
+            }
+            let target = commit_file(
+                &fixture.project.canonical_path,
+                "target.txt",
+                "target\n",
+                "target advanced",
+            );
+            let plan = backend
+                .prepare_integration(
+                    &workspace,
+                    &fixture.project,
+                    12,
+                    super::IntegrationStrategy::Rebase,
+                )
+                .unwrap();
+            let integrated = backend
+                .integrate(&workspace, &fixture.project, &plan)
+                .unwrap();
+            assert_eq!(integrated.target_commit, target);
+            assert_eq!(head_commit(&fixture.project.canonical_path), target);
+        }
+    }
+
+    #[test]
     fn guarded_integration_refuses_a_dirty_target_without_changing_it() {
         let fixture = GitFixture::new();
         let (backend, mut workspace) = fixture.materialized_workspace();
@@ -3145,7 +3532,12 @@ mod tests {
         .expect("the target should become dirty");
 
         assert!(matches!(
-            backend.prepare_integration(&workspace, &fixture.project, 11),
+            backend.prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default()
+            ),
             Err(WorkspaceBackendError::DirtyTarget { .. })
         ));
         assert_eq!(head_commit(&fixture.project.canonical_path), fixture.base);
@@ -3170,7 +3562,12 @@ mod tests {
         );
         workspace.result_commit = Some(result);
         let plan = backend
-            .prepare_integration(&workspace, &fixture.project, 11)
+            .prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default(),
+            )
             .expect("the initial target should preflight");
         let new_target = commit_file(
             &fixture.project.canonical_path,
@@ -3209,7 +3606,7 @@ mod tests {
         );
 
         assert!(matches!(
-            backend.prepare_integration(&workspace, &fixture.project, 11),
+            backend.prepare_integration(&workspace, &fixture.project, 11, super::IntegrationStrategy::default()),
             Err(WorkspaceBackendError::UnexpectedWorkspaceTip {
                 expected,
                 actual,
@@ -3263,7 +3660,12 @@ mod tests {
         workspace.result_commit = Some(merge);
 
         assert!(matches!(
-            backend.prepare_integration(&workspace, &fixture.project, 11),
+            backend.prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default()
+            ),
             Err(WorkspaceBackendError::AmbiguousHistory { .. })
         ));
         assert_eq!(head_commit(&fixture.project.canonical_path), fixture.base);
@@ -3288,7 +3690,12 @@ mod tests {
         );
 
         assert!(matches!(
-            backend.prepare_integration(&workspace, &fixture.project, 11),
+            backend.prepare_integration(
+                &workspace,
+                &fixture.project,
+                11,
+                super::IntegrationStrategy::default()
+            ),
             Err(WorkspaceBackendError::IntegrationConflict { .. })
         ));
         assert_eq!(head_commit(&fixture.project.canonical_path), target);
@@ -3422,7 +3829,12 @@ mod tests {
             .parse::<OperationId>()
             .expect("valid operation ID");
         let plan = supervisor
-            .prepare_integration(&mut store, workspace.scope(), 11)
+            .prepare_integration(
+                &mut store,
+                workspace.scope(),
+                11,
+                super::IntegrationStrategy::default(),
+            )
             .expect("the fake integration should preflight");
 
         let integrated = supervisor
@@ -3497,7 +3909,12 @@ mod tests {
         );
         let mut supervisor = WorkspaceSupervisor::new(backend);
         let plan = supervisor
-            .prepare_integration(&mut store, workspace.scope(), 11)
+            .prepare_integration(
+                &mut store,
+                workspace.scope(),
+                11,
+                super::IntegrationStrategy::default(),
+            )
             .expect("the integration should preflight");
         store
             .transaction(|repositories| {

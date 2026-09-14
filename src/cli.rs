@@ -282,6 +282,9 @@ pub(crate) struct WorkspaceIntegrateArguments {
     /// The submitted assignment whose result should be integrated.
     #[arg(long)]
     pub(crate) assignment: crate::id::AssignmentId,
+    /// Integration strategy (default: rebase). Retries retain the saved strategy.
+    #[arg(long, value_enum)]
+    pub(crate) strategy: Option<crate::workspace::IntegrationStrategy>,
     #[command(flatten)]
     pub(crate) mutation: MutationArguments,
 }
@@ -953,6 +956,45 @@ mod tests {
         assert_eq!(
             integration.mutation.operation_id,
             Some(OPERATION_ID.parse().expect("a valid operation ID"))
+        );
+    }
+
+    #[test]
+    fn workspace_integration_strategy_is_optional_and_validated() {
+        use crate::workspace::IntegrationStrategy;
+        for (value, expected) in [
+            (None, None),
+            (Some("rebase"), Some(IntegrationStrategy::Rebase)),
+            (Some("merge"), Some(IntegrationStrategy::Merge)),
+        ] {
+            let mut args = vec![
+                "coterie",
+                "workspace",
+                "integrate",
+                "--assignment",
+                "ca-01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+            ];
+            if let Some(value) = value {
+                args.extend(["--strategy", value]);
+            }
+            let parsed = Arguments::try_parse_from(args).unwrap();
+            let Command::Workspace(workspace) = parsed.command.unwrap() else {
+                panic!("workspace command");
+            };
+            let WorkspaceCommand::Integrate(integration) = workspace.command;
+            assert_eq!(integration.strategy, expected);
+        }
+        assert!(
+            Arguments::try_parse_from([
+                "coterie",
+                "workspace",
+                "integrate",
+                "--assignment",
+                "ca-01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+                "--strategy",
+                "unknown"
+            ])
+            .is_err()
         );
     }
 

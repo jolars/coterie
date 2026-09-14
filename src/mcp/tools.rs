@@ -75,9 +75,9 @@ agent_tools! {
     Spawn("spawn", "Launch a configured role on a ready task within run limits. Reuse operation_id on retry.", false) {
         operation_id: OperationId, role: String, task_id: TaskId
     } => RpcRequest::Spawn { operation_id, role, task_id },
-    WorkspaceIntegrate("workspace_integrate", "Integrate a reviewed Git result into its clean, unchanged target. Requires workspace:integrate. Reuse operation_id on retry.", false) {
-        operation_id: OperationId, assignment_id: AssignmentId
-    } => RpcRequest::WorkspaceIntegrate { operation_id, assignment_id },
+    WorkspaceIntegrate("workspace_integrate", "Integrate a reviewed Git result into its clean, unchanged target. Defaults to rebase for linear history; merge is opt-in. Requires workspace:integrate. Reuse operation_id on retry.", false) {
+        operation_id: OperationId, assignment_id: AssignmentId, strategy: Option<crate::workspace::IntegrationStrategy>
+    } => RpcRequest::WorkspaceIntegrate { operation_id, assignment_id, strategy },
     Finish("finish", "Submit this assignment. Before completed, validate and commit intended Git changes; dirty work rejects completion. Submission is separate from accepted task closure. Reuse operation_id on retry.", false) {
         operation_id: OperationId, status: FinishStatus, summary: String
     } => RpcRequest::Finish { operation_id, status, summary },
