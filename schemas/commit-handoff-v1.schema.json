@@ -1,0 +1,120 @@
+{
+  "$defs": {
+    "AgentId": {
+      "pattern": "^cg-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "type": "string"
+    },
+    "ApprovalPolicy": {
+      "description": "How a provider process may request operator approval.",
+      "enum": [
+        "interactive",
+        "never"
+      ],
+      "type": "string"
+    },
+    "AssignmentId": {
+      "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "type": "string"
+    },
+    "FilesystemPolicy": {
+      "description": "Filesystem authority granted to a provider process.",
+      "enum": [
+        "project-write",
+        "workspace-write",
+        "read-only"
+      ],
+      "type": "string"
+    },
+    "NetworkPolicy": {
+      "description": "Network authority granted to a provider process.",
+      "enum": [
+        "provider-default",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "PermissionProfile": {
+      "additionalProperties": false,
+      "description": "Provider sandbox policy referenced by a role.",
+      "properties": {
+        "approvals": {
+          "$ref": "#/$defs/ApprovalPolicy"
+        },
+        "filesystem": {
+          "$ref": "#/$defs/FilesystemPolicy"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy"
+        }
+      },
+      "required": [
+        "filesystem",
+        "network",
+        "approvals"
+      ],
+      "type": "object"
+    },
+    "TaskId": {
+      "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Active worktree context for a commit through separately authorized access.",
+  "properties": {
+    "agent_id": {
+      "$ref": "#/$defs/AgentId"
+    },
+    "assignment_id": {
+      "$ref": "#/$defs/AssignmentId"
+    },
+    "base_commit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "generation": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "owned_reference": {
+      "type": "string"
+    },
+    "permission_profile": {
+      "$ref": "#/$defs/PermissionProfile"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "task_id": {
+      "$ref": "#/$defs/TaskId"
+    },
+    "workspace_path": {
+      "type": "string"
+    },
+    "workspace_path_bytes": {
+      "items": {
+        "format": "uint8",
+        "maximum": 255,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "assignment_id",
+    "agent_id",
+    "task_id",
+    "generation",
+    "workspace_path",
+    "workspace_path_bytes",
+    "owned_reference",
+    "base_commit",
+    "provider",
+    "permission_profile"
+  ],
+  "title": "CommitHandoff",
+  "type": "object"
+}

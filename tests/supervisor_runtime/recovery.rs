@@ -36,6 +36,43 @@ fn captured_job(
 }
 
 #[test]
+fn read_only_worktree_has_no_commit_handoff() {
+    let fixture = TestEnvironment::new();
+    write_global(
+        &fixture,
+        &include_str!("../../examples/config/global.toml").replace(
+            "permission_profile = \"implementation\"",
+            "permission_profile = \"inspect\"",
+        ),
+    );
+    fs::write(
+        fixture.root.join("bin/codex"),
+        format!(
+            "{}{}",
+            FAKE_CODEX.split_once("is_job=false").unwrap().0,
+            JOB
+        ),
+    )
+    .unwrap();
+    fixture.launch(&[]);
+    let task =
+        fixture.run_json(&["task", "create", "Read-only assignment", "--json"]);
+    let spawn = fixture.run_json(&[
+        "spawn",
+        "builder",
+        "--task",
+        task["data"]["task"]["id"].as_str().unwrap(),
+        "--json",
+    ]);
+    let (_, environment, _) = captured_job(&fixture, &spawn);
+    assert_eq!(
+        fixture.run_agent_json(&["prime", "--json"], &environment)["data"]["commit_handoffs"],
+        serde_json::json!([])
+    );
+    fixture.run_json(&["stop", "--json"]);
+}
+
+#[test]
 fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure()
  {
     let fixture = TestEnvironment::new();
@@ -73,6 +110,40 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         fixture.run_json(&["spawn", "builder", "--task", task_id, "--json"]);
     let assignment = spawn["data"]["assignment_id"].as_str().unwrap();
     let (capture, old_environment, source) = captured_job(&fixture, &spawn);
+    for json_output in [false, true] {
+        let mut command = fixture.agent_command(&old_environment);
+        command.arg("prime");
+        if json_output {
+            command.arg("--json");
+        }
+        let output = run(command);
+        assert!(output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let data = if json_output { &value["data"] } else { &value };
+        let handoff = &data["commit_handoffs"][0];
+        assert_eq!(handoff["assignment_id"], assignment);
+        assert_eq!(handoff["task_id"], task_id);
+        assert_eq!(handoff["agent_id"], spawn["data"]["agent"]["id"]);
+        assert_eq!(handoff["workspace_path"], source.to_str().unwrap());
+        assert_eq!(
+            handoff["workspace_path_bytes"],
+            serde_json::json!(source.as_os_str().as_bytes())
+        );
+        assert_eq!(
+            handoff["permission_profile"]["filesystem"],
+            "workspace-write"
+        );
+        assert_eq!(handoff["provider"], "codex");
+        let repo = Repository::open(&source).unwrap();
+        assert_eq!(
+            handoff["owned_reference"],
+            repo.head().unwrap().name().unwrap()
+        );
+        assert_eq!(
+            handoff["base_commit"],
+            repo.head().unwrap().target().unwrap().to_string()
+        );
+    }
     let source_head = commit_file(
         &source,
         Path::new("committed.txt"),
@@ -107,6 +178,10 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
     let doctor = fixture.run_json(&["doctor", "--json"]);
     assert!(doctor.to_string().contains("task recover"));
     let recovered = fixture.run_json(&recovery_args);
+    assert_eq!(
+        fixture.run_json(&["prime", "--json"])["data"]["commit_handoffs"],
+        serde_json::json!([])
+    );
     assert_eq!(recovered["data"]["assignment_id"], assignment);
     assert_eq!(
         recovered["data"]["workspace_path"],
@@ -139,6 +214,18 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         next["data"]["assignment_id"]
     );
     assert_eq!(prime["data"]["active_task"]["id"], task_id);
+    assert_eq!(
+        prime["data"]["commit_handoffs"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        prime["data"]["commit_handoffs"][0]["assignment_id"],
+        next["data"]["assignment_id"]
+    );
+    assert_eq!(
+        prime["data"]["commit_handoffs"][0]["workspace_path"],
+        continuation.to_str().unwrap()
+    );
     for name in ["committed.txt", "untracked.txt"] {
         commit_file(
             &continuation,

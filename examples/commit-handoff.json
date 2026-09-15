@@ -1,0 +1,32 @@
+{
+  "agent_id": "cg-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "assignment_id": "ca-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "generation": 0,
+  "owned_reference": "refs/heads/coterie/cr-01ARZ3NDEKTSV4RRFFQ69G5FAV/ca-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "permission_profile": {
+    "approvals": "never",
+    "filesystem": "workspace-write",
+    "network": "deny"
+  },
+  "provider": "codex",
+  "task_id": "ct-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "workspace_path": "/state/worktree",
+  "workspace_path_bytes": [
+    47,
+    115,
+    116,
+    97,
+    116,
+    101,
+    47,
+    119,
+    111,
+    114,
+    107,
+    116,
+    114,
+    101,
+    101
+  ]
+}

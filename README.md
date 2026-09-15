@@ -37,6 +37,12 @@ assignment after verifying inactivity and reopens the same task. A continuation
 gets a fresh worktree and a link to the preserved files and history. See the
 [unfinished-work recovery command](docs/cli-contract.md#coterie-task-recover).
 
+Writable worktree workers use an explicit
+[coordinator-commit handoff](docs/linked-worktree-commits.md). Bootstrap explains
+the Git metadata restriction before editing, and `prime.commit_handoffs` supplies
+the assignment context. Workers validate and request a commit through durable
+messages, then confirm the coordinator's commit before submitting.
+
 Configuration inspection supports `config check`,
 `config show --effective --provenance`, `config schema`, and explicit
 `config lock` creation. These commands resolve layered configuration and verify

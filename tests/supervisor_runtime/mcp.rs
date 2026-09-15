@@ -4,6 +4,9 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, ChildStdin};
 use std::sync::mpsc::{Receiver, channel};
 
+#[path = "commit_handoff.rs"]
+mod commit_handoff;
+
 struct McpClient {
     child: Child,
     input: Option<ChildStdin>,

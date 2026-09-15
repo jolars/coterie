@@ -286,6 +286,7 @@ pub(crate) enum RpcResponse {
         ready_tasks: Vec<TaskSummary>,
         active_task: Option<Box<TaskSummary>>,
         recoveries: Vec<RecoverySummary>,
+        commit_handoffs: Vec<CommitHandoff>,
         commands: Vec<String>,
     },
     Progress {
@@ -428,6 +429,23 @@ pub(crate) struct ResubmissionSummary {
     pub(crate) assignment_id: AssignmentId,
     pub(crate) previous_result: serde_json::Value,
     pub(crate) task: TaskSummary,
+}
+
+/// Active worktree context for a commit through separately authorized access.
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub(crate) struct CommitHandoff {
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) agent_id: AgentId,
+    pub(crate) task_id: TaskId,
+    pub(crate) generation: i64,
+    pub(crate) workspace_path: String,
+    pub(crate) workspace_path_bytes: Vec<u8>,
+    pub(crate) owned_reference: String,
+    pub(crate) base_commit: Option<String>,
+    pub(crate) provider: String,
+    pub(crate) permission_profile: crate::config::PermissionProfile,
 }
 
 /// Preserved source context and the explicit link to a later assignment.

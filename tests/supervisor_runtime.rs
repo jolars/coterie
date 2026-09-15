@@ -3731,9 +3731,13 @@ impl TestEnvironment {
     }
 
     fn new_with_repository(initialize_repository: bool) -> Self {
+        Self::under(&std::env::temp_dir(), initialize_repository)
+    }
+
+    fn under(parent: &Path, initialize_repository: bool) -> Self {
         let fixture_id =
             format!("{}-{}", std::process::id(), ulid::Ulid::generate());
-        let root = std::env::temp_dir().join(format!("ct-{fixture_id}"));
+        let root = parent.join(format!("ct-{fixture_id}"));
         // The kernel bounds Unix socket paths, so keep this fixture independent
         // of an arbitrarily long `TMPDIR` used for its other files.
         let runtime =

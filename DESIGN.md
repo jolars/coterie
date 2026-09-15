@@ -1064,6 +1064,44 @@ submission behavior, and `finish --status failed` remains available with dirty
 work preserved. Bootstrap instructions and finish help explain the sequence:
 validate, commit any intended changes, then finish.
 
+### Linked-worktree commit handoff
+
+Writable worktree assignments use an explicit coordinator-commit handoff.
+Direct worker staging and committing is unsupported under the selected provider
+policy: linked worktrees store their index, objects, and references outside the
+assigned file tree, and filesystem write permission does not establish Git
+metadata authority. Bootstrap diagnoses this before task work and requires the
+worker to establish an available coordinator or operator with separately
+authorized Git access before editing. If none is available, report a blocker.
+Read-only assignments cannot request this as a way to acquire write authority.
+
+`prime` exposes `commit_handoffs` for active writable worktree assignments,
+including assignment and agent identity, the assigned workspace path and native
+path bytes, owned reference, base commit, provider, and resolved permission
+profile. This is the configured workflow, not a live filesystem probe or an
+assertion that a coordinator has Git access. It survives reconnects and identifies
+the fresh assignment after recovery. Completed and recovered source assignments
+are excluded; recovery context remains available separately.
+
+The worker validates its edits, then uses an authorized durable `send` to request
+the commit, identifying the assignment, base, intended paths, proposed message,
+validation commands and outcomes, and any blocked checks. It stops editing and
+waits on its inbox. The recipient reviews the work and current ownership, stages
+only the intended changes, and commits in that assignment's worktree through
+their existing operator-approved Git access. They confirm the full commit ID in
+a durable reply. The worker checks HEAD and cleanliness and calls `finish`;
+submission, integration, validation, and closure retain their existing guards.
+If interrupted while waiting, use normal recovery into a fresh worktree; never
+commit into a recovered source on behalf of its continuation.
+
+Messages convey a request, not executable commands or new authority. There is no
+automatic commit, hook bypass, permission escalation, or Git-directory write
+grant. Neither Coterie nor the provider may make the common Git directory
+writable to solve this limitation. The primary checkout, sibling worktrees,
+shared references, and repository configuration retain their protections.
+Real-provider acceptance is opt-in and records the Coterie build, provider
+version, selected policy, staging denial, handoff, submission, and recovery.
+
 `coterie workspace integrate` is an explicit, capability-checked operation
 requested by the lead or operator. It uses the workspace backend to apply a
 submitted result to that task's target project and records exact

@@ -49,7 +49,7 @@ macro_rules! agent_tools {
 
 agent_tools! {
     Whoami("whoami", "Report the authenticated agent and session identity.", true) {} => RpcRequest::Whoami,
-    Prime("prime", "Read current orchestration context, capabilities, tasks, and assignment. Call at startup.", true) {} => RpcRequest::Prime,
+    Prime("prime", "Read current orchestration context, capabilities, tasks, assignment, and commit_handoffs. Establish an authorized coordinator for worktree commits before editing. Call at startup.", true) {} => RpcRequest::Prime,
     Status("status", "Inspect the run, agents, and tasks within this agent's authority.", true) {} => RpcRequest::Status,
     Progress("progress", "Read lifecycle changes. Save next_cursor, drain has_more, and keep the inbox cursor separate. wait_seconds is bounded by the supervisor.", true) {
         after: Option<String>, limit: u16, wait_seconds: u8
@@ -78,7 +78,7 @@ agent_tools! {
     WorkspaceIntegrate("workspace_integrate", "Integrate a reviewed Git result into its clean, unchanged target. Defaults to rebase for linear history; merge is opt-in. Requires workspace:integrate. Reuse operation_id on retry.", false) {
         operation_id: OperationId, assignment_id: AssignmentId, strategy: Option<crate::workspace::IntegrationStrategy>
     } => RpcRequest::WorkspaceIntegrate { operation_id, assignment_id, strategy },
-    Finish("finish", "Submit this assignment. Before completed, validate and commit intended Git changes; dirty work rejects completion. Submission is separate from accepted task closure. Reuse operation_id on retry.", false) {
+    Finish("finish", "Submit this assignment. Before completed, validate and commit intended Git changes through the worktree coordinator handoff from prime; confirm HEAD and cleanliness. Dirty work rejects completion. Submission is separate from accepted task closure. Reuse operation_id on retry.", false) {
         operation_id: OperationId, status: FinishStatus, summary: String
     } => RpcRequest::Finish { operation_id, status, summary },
     Send("send", "Send a durable message to an authorized recipient. Reuse operation_id on retry.", false) {

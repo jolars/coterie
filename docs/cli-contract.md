@@ -279,6 +279,27 @@ Reconstruct the caller's identity, project, peers, tasks, ready work, active
 assignment, and authorized command list. Agents use this durable context after
 a fresh session or context compaction.
 
+`commit_handoffs` lists active writable worktree assignments requiring a
+coordinator commit. Each entry contains `assignment_id`, `agent_id`, `task_id`,
+`generation`, `workspace_path`, `workspace_path_bytes`, `owned_reference`,
+`base_commit`, `provider`, and the resolved `permission_profile`. The native
+path bytes disambiguate non-UTF-8 paths. The same context appears in human and
+JSON output and through MCP. Completed or recovered source assignments are
+excluded. A continuation receives a new entry for its fresh worktree.
+
+This is a declared workflow, not proof of a coordinator's filesystem access.
+Workers establish an available coordinator or operator with separately
+authorized Git access before editing, validate their changes, and send a durable
+commit request identifying the assignment, base, intended paths, proposed
+message, and validation commands and outcomes. They stop editing while waiting.
+The recipient reviews ownership and changes, stages and commits only the
+intended paths in the assigned worktree, and replies with the full commit ID.
+The worker verifies HEAD and cleanliness, then submits with `finish`. An
+unavailable coordinator or denied Git access is a blocker; a message grants no
+additional authority. Never make the common Git directory writable to workers.
+See [the commit handoff guide](linked-worktree-commits.md) for reproduction and
+recovery details. Existing exit codes and submission guards are unchanged.
+
 `recoveries` lists preserved interrupted assignments and their continuation
 links. Each entry uses the fields described by `task recover` below. A
 continuation inspects its source and ports useful changes into its own worktree.

@@ -289,7 +289,7 @@ build, provider version, and effective policy in reproductions before attributin
 a cause. Specify new interfaces or authority in `DESIGN.md` before implementation.
 Scientific relevance and task scope remain agent responsibilities.
 
-- [ ] **High: Make the linked-worktree commit path usable under the selected
+- [x] **High: Make the linked-worktree commit path usable under the selected
   policy.** Reproduce edit, validate, stage, commit, and submit with actual
   provider-launched workers in a real linked worktree, including a recovery
   continuation. Diagnose an unsupported commit path before work begins, and
@@ -297,6 +297,9 @@ Scientific relevance and task scope remain agent responsibilities.
   Test that the primary checkout, sibling worktrees, shared references, and
   repository configuration remain protected; broad write access to the Git
   common directory is not an acceptable fix. Keep real-provider tests opt-in.
+  The explicit coordinator handoff passed with Codex 0.153.4 on NixOS, including
+  normal submission and recovery through validated closure. See the
+  [reproduction and acceptance evidence](docs/linked-worktree-commits.md).
 - [ ] **High: Diagnose validation environment access separately from Git
   permissions.** Reproduce Nix daemon access and `.devenv` write failures in
   assigned workspaces, recording the command and selected policy. Report which
@@ -335,6 +338,28 @@ Scientific relevance and task scope remain agent responsibilities.
   authentication. Document the recovery steps and test that stale credentials
   remain rejected. Distinguish restored tool access from automatic foreground
   wake-up, which requires separate provider capability evidence.
+
+### Commit-handoff validation follow-ups
+
+These observations come from the September 15, 2026
+[linked-worktree reproduction](docs/linked-worktree-commits.md#recorded-reproduction).
+
+- [ ] **High: Verify Git commit publication after write failures.** Isolate
+  libgit2 1.9.7 returning a commit ID after an object-write failure while a fresh
+  repository handle observes the original HEAD. Add a regression that checks
+  object readability and reference advancement, audit Coterie's Git write paths
+  before recording observed success, and verify recovery and idempotent retries
+  after failed writes. Track the upstream error-propagation fix and evaluate a
+  dependency update without treating a returned ID as proof of publication.
+- [ ] **Medium: Diagnose missing Codex code-tool transcript entries.** Reproduce
+  shell commands invoked through Codex's code tool being absent from
+  `exec --json` command-execution events on 0.153.4. Compare emitted events with
+  independent command-result artifacts and direct shell invocations, pinning
+  the provider version and policy. Preserve available events and expose any
+  observability limitation explicitly; do not infer that an omitted command
+  never ran or rely on undocumented provider session-file formats. Test human
+  and JSON log views, credential redaction, and any supported adapter change.
+  Keep real-provider coverage opt-in.
 
 ### M7 gate
 

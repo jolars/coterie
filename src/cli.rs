@@ -11,6 +11,9 @@ mod resubmit_tests;
 #[cfg(test)]
 mod recovery_tests;
 
+#[cfg(test)]
+mod commit_handoff_tests;
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
@@ -61,7 +64,7 @@ pub(crate) enum Command {
     Doctor,
     /// Report the authenticated caller's identity.
     Whoami,
-    /// Reconstruct the caller's current orchestration context.
+    /// Reconstruct orchestration context, including active commit handoffs.
     Prime,
     /// Inspect compact lifecycle changes; task submission and provider exit are separate.
     Progress(ProgressArguments),
@@ -81,6 +84,8 @@ pub(crate) enum Command {
     /// resolve them and retry, optionally with the same operation ID. Clean
     /// worktrees may finish with no new commit, including review and non-code
     /// assignments. --status failed preserves dirty work and reopens the task.
+    /// Writable worktree workers use the coordinator-commit handoff reported
+    /// by `prime`; confirm the commit and cleanliness before completing.
     /// To correct an already submitted Git result, ask an authorized coordinator
     /// to run `coterie task resubmit` with the recorded and corrected commits.
     Finish(FinishArguments),

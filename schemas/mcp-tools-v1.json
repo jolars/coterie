@@ -22,7 +22,7 @@
         "idempotentHint": true,
         "readOnlyHint": true
       },
-      "description": "Read current orchestration context, capabilities, tasks, and assignment. Call at startup.",
+      "description": "Read current orchestration context, capabilities, tasks, assignment, and commit_handoffs. Establish an authorized coordinator for worktree commits before editing. Call at startup.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
@@ -469,7 +469,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Submit this assignment. Before completed, validate and commit intended Git changes; dirty work rejects completion. Submission is separate from accepted task closure. Reuse operation_id on retry.",
+      "description": "Submit this assignment. Before completed, validate and commit intended Git changes through the worktree coordinator handoff from prime; confirm HEAD and cleanliness. Dirty work rejects completion. Submission is separate from accepted task closure. Reuse operation_id on retry.",
       "inputSchema": {
         "$defs": {
           "FinishStatus": {

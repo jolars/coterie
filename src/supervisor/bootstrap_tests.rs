@@ -1,6 +1,51 @@
 use super::*;
 
 #[test]
+fn worktree_bootstrap_diagnoses_commit_handoff_before_edits() {
+    let global = include_str!("../../examples/config/global.toml");
+    for read_only in [false, true] {
+        let input = if read_only {
+            global.replace(
+                "permission_profile = \"implementation\"",
+                "permission_profile = \"inspect\"",
+            )
+        } else {
+            global.to_owned()
+        };
+        let config = crate::config::resolve(
+            &toml::from_str(&input).unwrap(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        let bootstrap =
+            bootstrap_instruction(RunId::generate(), "builder", &config);
+        assert_eq!(
+            bootstrap.contains(
+                "Direct worker staging and committing is unsupported"
+            ),
+            !read_only
+        );
+        if !read_only {
+            for expected in [
+                "before editing",
+                "commit_handoffs",
+                "intended paths",
+                "validation commands",
+                "stop editing",
+                "full commit ID",
+                "common Git directory",
+            ] {
+                assert!(
+                    bootstrap.contains(expected),
+                    "missing {expected}: {bootstrap}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn coordination_bootstrap_follows_capabilities_for_any_role_name() {
     for role in ["coordinator", "lead", "worker", "custom_planner"] {
         for (grants, read, integrate, close) in [

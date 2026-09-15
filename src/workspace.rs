@@ -2074,7 +2074,7 @@ fn target_matches_candidate(
         .all(|entry| !entry.status().intersects(WORKTREE_CHANGES)))
 }
 
-fn workspace_reference(workspace: &WorkspaceRecord) -> String {
+pub(crate) fn workspace_reference(workspace: &WorkspaceRecord) -> String {
     format!(
         "refs/heads/coterie/{}/{}",
         workspace.run_id, workspace.assignment_id

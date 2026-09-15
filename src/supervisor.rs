@@ -1,6 +1,7 @@
 //! Desired-state reconciliation and process ownership.
 
 mod closure_override;
+mod commit_handoff;
 mod doctor;
 mod idle;
 mod progress;
@@ -3794,6 +3795,7 @@ fn prime(
         recoveries: store
             .transaction(|r| r.task_recoveries(run_id))
             .map_err(rpc_state_failure)?,
+        commit_handoffs: commit_handoff::summaries(store, run_id)?,
         commands: available_commands(store, run_id, caller)?,
     })
 }
@@ -5574,6 +5576,7 @@ fn bootstrap_instruction(
     let mut bootstrap = format!(
         "You are a {role} agent for Coterie run {run_id}. Call the `prime` orchestration tool now for current orchestration context. Follow the repository's AGENTS.md instructions. Before calling `finish` with status completed, validate the work and commit any intended Git worktree changes successfully. Uncommitted changes keep the assignment active; resolve them and retry finish. A clean assignment may finish with no new commit.\n{instructions}"
     );
+    bootstrap.push_str(commit_handoff::bootstrap(role, configuration));
     let allowed = |namespace, action| {
         configuration
             .archetype
