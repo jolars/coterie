@@ -169,7 +169,9 @@ pub(crate) enum TaskCommand {
     /// Requires operator authority or task:recover and a verified process exit.
     /// Preserves the source worktree, edits, commits, and history. Spawn a
     /// worktree role for the reopened task, inspect its recovery context with
-    /// prime, and port useful changes into the fresh continuation worktree.
+    /// prime and assignment show, and port useful changes into the fresh
+    /// continuation worktree. Supply reported checks and remaining work with
+    /// --report; its statements are not mechanically verified.
     Recover(TaskRecoverArguments),
 }
 
@@ -230,8 +232,18 @@ pub(crate) struct TaskRecoverArguments {
     /// Why this interrupted assignment needs a continuation.
     #[arg(long)]
     pub(crate) reason: String,
+    /// JSON with validation_evidence and unfinished_steps arrays of {text, source}.
+    /// Missing evidence remains unknown. Sources refer to messages, logs, or artifacts.
+    #[arg(long, value_parser = parse_recovery_report)]
+    pub(crate) report: Option<crate::protocol::recovery::RecoveryReport>,
     #[command(flatten)]
     pub(crate) mutation: MutationArguments,
+}
+
+fn parse_recovery_report(
+    value: &str,
+) -> Result<crate::protocol::recovery::RecoveryReport, String> {
+    serde_json::from_str(value).map_err(|_| "report must be JSON with validation_evidence and unfinished_steps arrays of {text, source}".to_owned())
 }
 
 /// Common options for idempotent mutations.

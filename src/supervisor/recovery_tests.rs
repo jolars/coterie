@@ -29,6 +29,7 @@ fn request(
             operation_id,
             assignment_id,
             reason: reason.into(),
+            report: None,
         },
     )
 }
@@ -226,6 +227,22 @@ fn recovery_preserves_dirty_source_and_fences_late_output_before_continuation()
                 Some(assignment_id)
             );
             assert_eq!(sources[0].assignment_id, workspace.assignment_id);
+            let handoff = r
+                .recovery_handoff(scope.run_id, workspace.assignment_id)?
+                .unwrap();
+            assert_eq!(
+                handoff.mechanical.staged_paths[0].path,
+                "committed.txt"
+            );
+            assert_eq!(
+                handoff.mechanical.unstaged_paths[0].path,
+                "committed.txt"
+            );
+            assert_eq!(
+                handoff.mechanical.untracked_paths[0].path,
+                "untracked.txt"
+            );
+            assert!(handoff.reported.validation_evidence.is_empty());
             assert_ne!(
                 r.workspace(assignment_id)?.unwrap().path,
                 workspace.path
@@ -314,6 +331,106 @@ fn recovery_refuses_uncertain_sessions_controls_and_integration_intents() {
             })
             .unwrap();
     }
+}
+
+#[test]
+fn recovery_reports_require_sources_redact_credentials_and_replay_original_observations()
+ {
+    use crate::protocol::recovery::{RecoveryReport, ReportedEvidence};
+    let (_directory, mut fixture) = fixture();
+    exit(&mut fixture);
+    let assignment_id = fixture.workspace().assignment_id;
+    let operation_id = OperationId::generate();
+    let token = format!("cot1_{}", "a1".repeat(32));
+    let report = RecoveryReport {
+        validation_evidence: vec![ReportedEvidence {
+            text: format!("Check blocked: {token}"),
+            source: "artifact validation.log".into(),
+        }],
+        unfinished_steps: vec![ReportedEvidence {
+            text: "Run validation after porting changes.".into(),
+            source: "original acceptance criteria".into(),
+        }],
+    };
+    let make_request = |report| RpcRequest::TaskRecover {
+        operation_id,
+        assignment_id,
+        reason: "Needs continuation.".into(),
+        report: Some(report),
+    };
+    let execute = |fixture: &mut Fixture, request| {
+        execute_request(
+            &mut fixture.store,
+            &mut fixture.sessions,
+            &mut fixture.workspaces,
+            RuntimePaths {
+                run_state_directory: &fixture.run,
+                socket_path: &fixture.socket,
+            },
+            RUN.parse().unwrap(),
+            &AuthenticatedCaller::Operator,
+            request,
+        )
+    };
+    let mut missing_source = report.clone();
+    missing_source.validation_evidence[0].source = " ".into();
+    assert_eq!(
+        execute(&mut fixture, make_request(missing_source))
+            .unwrap_err()
+            .code,
+        RpcFailureCode::InvalidArgument
+    );
+    let response = execute(&mut fixture, make_request(report.clone())).unwrap();
+    let handoff = fixture
+        .store
+        .transaction(|r| {
+            r.recovery_handoff(RUN.parse().unwrap(), assignment_id)
+        })
+        .unwrap()
+        .unwrap();
+    assert!(!serde_json::to_string(&handoff).unwrap().contains(&token));
+    assert!(
+        handoff.reported.validation_evidence[0]
+            .text
+            .contains("[REDACTED")
+    );
+    // Later operator edits cannot rewrite the recorded observation or its revision.
+    fs::write(fixture.workspace().path.join("later.txt"), "later edit")
+        .unwrap();
+    assert_eq!(
+        execute(&mut fixture, make_request(report.clone())).unwrap(),
+        response
+    );
+    assert_eq!(
+        fixture
+            .store
+            .transaction(
+                |r| r.recovery_handoff(RUN.parse().unwrap(), assignment_id)
+            )
+            .unwrap()
+            .unwrap(),
+        handoff
+    );
+    let mut changed = report;
+    changed.unfinished_steps[0].text = "Different next step.".into();
+    assert_eq!(
+        execute(&mut fixture, make_request(changed))
+            .unwrap_err()
+            .code,
+        RpcFailureCode::Conflict
+    );
+    let database =
+        rusqlite::Connection::open(fixture.run.join("state.sqlite3")).unwrap();
+    assert!(
+        database
+            .execute("UPDATE recovery_handoffs SET document_json = '{}'", [])
+            .is_err()
+    );
+    assert!(
+        database
+            .execute("DELETE FROM recovery_handoffs", [])
+            .is_err()
+    );
 }
 
 #[test]
@@ -415,6 +532,107 @@ fn recovery_requires_capability_and_current_caller_even_for_replay() {
 }
 
 #[test]
+fn large_recovery_handoffs_keep_prime_bounded_and_full_details_retrievable() {
+    use crate::protocol::recovery::{RecoveryReport, ReportedEvidence};
+    let (_directory, mut fixture) = fixture();
+    let workspace = fixture.workspace();
+    for index in 0..1000 {
+        fs::write(
+            workspace
+                .path
+                .join(format!("artifact-{index:04}-{}", "x".repeat(200))),
+            "data",
+        )
+        .unwrap();
+    }
+    exit(&mut fixture);
+    let run_id = RUN.parse().unwrap();
+    let report = RecoveryReport {
+        validation_evidence: vec![ReportedEvidence {
+            text: "\u{0001}".repeat(20_000),
+            source: "source details ".repeat(2000),
+        }],
+        unfinished_steps: vec![ReportedEvidence {
+            text: "Remaining work. ".repeat(3000),
+            source: "source details ".repeat(2000),
+        }],
+    };
+    let response = execute_request(
+        &mut fixture.store,
+        &mut fixture.sessions,
+        &mut fixture.workspaces,
+        RuntimePaths {
+            run_state_directory: &fixture.run,
+            socket_path: &fixture.socket,
+        },
+        run_id,
+        &AuthenticatedCaller::Operator,
+        RpcRequest::TaskRecover {
+            operation_id: OperationId::generate(),
+            assignment_id: workspace.assignment_id,
+            reason: "Large preserved artifacts.".into(),
+            report: Some(report.clone()),
+        },
+    )
+    .unwrap();
+    assert!(serde_json::to_vec(&response).unwrap().len() < 16 * 1024);
+    let RpcResponse::Prime { page } = context::prime(
+        &mut fixture.store,
+        run_id,
+        &AuthenticatedCaller::Operator,
+        None,
+        20,
+    )
+    .unwrap() else {
+        panic!("prime expected")
+    };
+    assert!(
+        serde_json::to_vec(&page.context).unwrap().len()
+            <= crate::protocol::context::CONTEXT_BUDGET
+    );
+    let brief = page.context.recoveries[0].handoff.as_ref().unwrap();
+    assert_eq!(brief.untracked_paths, 1000);
+    assert!(brief.validation_evidence.as_ref().unwrap().text.truncated);
+    let mut after = 0;
+    let mut revision = None;
+    let mut document = String::new();
+    loop {
+        let RpcResponse::Detail { page } = context::assignment_show(
+            &mut fixture.store,
+            run_id,
+            &AuthenticatedCaller::Operator,
+            workspace.assignment_id,
+            after,
+            65536,
+            revision.as_deref(),
+        )
+        .unwrap() else {
+            panic!("detail expected")
+        };
+        assert!(page.text.len() <= 65539);
+        after = page.next_cursor;
+        revision = Some(page.revision);
+        document.push_str(&page.text);
+        if page.eof {
+            break;
+        }
+    }
+    assert!(document.len() > 1024 * 1024);
+    let document: serde_json::Value = serde_json::from_str(&document).unwrap();
+    assert_eq!(
+        document["recovery_handoffs"][0]["reported"],
+        serde_json::to_value(report).unwrap()
+    );
+    assert_eq!(
+        document["recovery_handoffs"][0]["mechanical"]["untracked_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1000
+    );
+}
+
+#[test]
 fn recovery_after_execution_timeout_requires_completed_process_control() {
     let (_directory, mut fixture) = fixture();
     let scope = fixture.scope();
@@ -462,6 +680,15 @@ pub(super) fn prepare(fixture: &mut Fixture, case: &str) {
     commit(&workspace.path, "preserved.txt", "committed work\n");
     fs::write(workspace.path.join("preserved.txt"), "uncommitted work\n")
         .unwrap();
+    let repository = Repository::open(&workspace.path).unwrap();
+    let mut index = repository.index().unwrap();
+    index.add_path(Path::new("preserved.txt")).unwrap();
+    index.write().unwrap();
+    fs::write(
+        fixture.run.join("source-index"),
+        fs::read(repository.path().join("index")).unwrap(),
+    )
+    .unwrap();
     fs::write(workspace.path.join("untracked.txt"), "untracked work\n")
         .unwrap();
     exit(fixture);
@@ -541,6 +768,10 @@ pub(super) fn verify(fixture: &mut Fixture, case: &str) {
         "Preserve project instructions.\n"
     );
     let repository = Repository::open(&workspace.path).unwrap();
+    assert_eq!(
+        fs::read(repository.path().join("index")).unwrap(),
+        fs::read(fixture.run.join("source-index")).unwrap()
+    );
     let head = repository.head().unwrap().peel_to_commit().unwrap();
     assert_eq!(
         repository
@@ -558,6 +789,18 @@ pub(super) fn verify(fixture: &mut Fixture, case: &str) {
             let recoveries = r.task_recoveries(run_id)?;
             assert_eq!(recoveries.len(), 1);
             assert_eq!(recoveries[0].assignment_id, workspace.assignment_id);
+            let handoff = r
+                .recovery_handoff(run_id, workspace.assignment_id)?
+                .unwrap();
+            assert_eq!(Some(Box::new(handoff.brief())), recoveries[0].handoff);
+            assert_eq!(
+                handoff.mechanical.staged_paths[0].path,
+                "preserved.txt"
+            );
+            assert_eq!(
+                handoff.mechanical.untracked_paths[0].path,
+                "untracked.txt"
+            );
             assert_eq!(
                 r.assignment(workspace.assignment_id)?.unwrap().state,
                 "released"

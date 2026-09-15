@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::protocol::RecoverySummary;
+use crate::protocol::recovery::RecoveryHandoff;
 
 impl Repositories<'_, '_> {
     pub(crate) fn recovery_preflight(
@@ -126,6 +127,7 @@ impl Repositories<'_, '_> {
         mutation: &Mutation,
         assignment_id: AssignmentId,
         reason: &str,
+        handoff: &RecoveryHandoff,
     ) -> Result<RecoverySummary, StoreError> {
         let (assignment, workspace) =
             self.recovery_preflight(mutation.run_id, assignment_id)?;
@@ -146,7 +148,14 @@ impl Repositories<'_, '_> {
             base_commit: workspace.base_commit,
             reason: reason.to_owned(),
             continuation_assignment_id: None,
+            handoff: Some(Box::new(handoff.brief())),
         };
+        crate::fault::point("recovery.handoff.record.before");
+        self.transaction.execute(
+            "INSERT INTO recovery_handoffs (assignment_id, run_id, operation_id, document_json) VALUES (?1, ?2, ?3, ?4)",
+            params![assignment_id, mutation.run_id, mutation.id, serde_json::to_string(handoff)?],
+        )?;
+        crate::fault::point("recovery.handoff.record.after");
         self.apply_task_transition(&TaskTransitionMutation {
             operation_id: mutation.id,
             run_id: mutation.run_id,
@@ -190,6 +199,20 @@ impl Repositories<'_, '_> {
             })?;
         }
         Ok(recovery)
+    }
+
+    pub(crate) fn recovery_handoff(
+        &self,
+        run_id: RunId,
+        assignment_id: AssignmentId,
+    ) -> Result<Option<RecoveryHandoff>, StoreError> {
+        let document: Option<String> = self.transaction.query_row(
+            "SELECT document_json FROM recovery_handoffs WHERE run_id = ?1 AND assignment_id = ?2",
+            params![run_id, assignment_id], |row| row.get(0),
+        ).optional()?;
+        document
+            .map(|text| serde_json::from_str(&text).map_err(StoreError::from))
+            .transpose()
     }
 
     pub(crate) fn task_recoveries(

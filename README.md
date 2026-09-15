@@ -36,6 +36,9 @@ For a worker that exited before submission, `coterie task recover` retires its
 assignment after verifying inactivity and reopens the same task. A continuation
 gets a fresh worktree and a link to the preserved files and history. See the
 [unfinished-work recovery command](docs/cli-contract.md#coterie-task-recover).
+Recovery snapshots the preserved Git state. Supply sourced validation evidence
+and unfinished steps with `--report`; the continuation retrieves the complete
+[handoff](docs/recovery-handoffs.md) through `assignment show`.
 
 Writable worktree workers use an explicit
 [coordinator-commit handoff](docs/linked-worktree-commits.md). Bootstrap explains

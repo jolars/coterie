@@ -28,6 +28,48 @@
     ],
     "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "reason": "Provider exited before submission.",
-    "continuation_assignment_id": null
+    "continuation_assignment_id": null,
+    "handoff": {
+      "operation_id": "co-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "source_assignment_id": "ca-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "recorded_at": 1789430400,
+      "reported_by": null,
+      "head_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "complete": true,
+      "operation_in_progress": false,
+      "dirty_paths": 1,
+      "staged_paths": 1,
+      "unstaged_paths": 0,
+      "untracked_paths": 0,
+      "conflicted_paths": 0,
+      "unreadable_paths": 0,
+      "hidden_index_paths": 0,
+      "validation_evidence_count": 1,
+      "unfinished_steps_count": 1,
+      "validation_evidence": {
+        "text": {
+          "text": "python3 validate.py passed in the source worktree; full suite blocked by Nix daemon access.",
+          "total_bytes": 91,
+          "truncated": false
+        },
+        "source": {
+          "text": "message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+          "total_bytes": 37,
+          "truncated": false
+        }
+      },
+      "unfinished_step": {
+        "text": {
+          "text": "Port result.json, rerun validation, and request a coordinator commit before submission.",
+          "total_bytes": 87,
+          "truncated": false
+        },
+        "source": {
+          "text": "message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+          "total_bytes": 37,
+          "truncated": false
+        }
+      }
+    }
   }
 }

@@ -23,6 +23,12 @@ stored text. A task ID references its full document, which also lists every
 assignment ID. An assignment ID references its full report and recovery links.
 These references survive submission, recovery, resubmission, and closure.
 
+Recovery handoffs add path counts and the first reported check and unfinished
+step, each with a 512-byte text and source preview and total item counts. Full
+path lists and reports use `assignment show` pages and do not repeat in `prime`.
+The same 64 KiB task-context budget includes these previews. See
+[recovery handoffs](recovery-handoffs.md) for snapshot and attribution semantics.
+
 `current_task` pins the caller's latest assigned task even after it finishes.
 `active_task` describes only an assignment that has not ended. Each task reports
 the latest assignment's ID, generation, recorded session state, and commit
@@ -76,13 +82,13 @@ Measurements from the fixture on NixOS, September 15, 2026:
 
 | Measurement | Bytes |
 | --- | ---: |
-| Full task and assignment documents combined | 1,194,845 |
-| Complete JSON CLI `prime` output | 12,939 |
-| Complete human CLI `prime` output | 15,407 |
-| One bootstrap transcript frame | 4,365 |
-| One serialized MCP-context transcript frame | 31,768 |
-| Raw transcript including four copies of each frame and current activity | 144,651 |
-| Serialized CLI pages needed to drain that transcript at 4,096 bytes per page | 171,068 |
+| Full task and assignment documents combined | 1,194,980 |
+| Complete JSON CLI `prime` output | 12,940 |
+| Complete human CLI `prime` output | 15,408 |
+| One bootstrap transcript frame | 4,805 |
+| One serialized MCP-context transcript frame | 31,770 |
+| Raw transcript including four copies of each frame and current activity | 146,419 |
+| Serialized CLI pages needed to drain that transcript at 4,096 bytes per page | 172,844 |
 | Serialized CLI tail response reaching the same current activity | 4,710 |
 
 Draining the transcript took 36 pages; the tail reached the current activity in

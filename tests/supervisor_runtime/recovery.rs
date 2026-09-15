@@ -153,6 +153,22 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         "interrupted implementation",
     );
     fs::write(source.join("untracked.txt"), "preserve dirty work\n").unwrap();
+    fs::write(source.join("staged.txt"), "preserve staged artifact\n").unwrap();
+    let source_repo = Repository::open(&source).unwrap();
+    let mut index = source_repo.index().unwrap();
+    index.add_path(Path::new("staged.txt")).unwrap();
+    index.write().unwrap();
+    fs::write(source.join("committed.txt"), "preserve unstaged edits\n")
+        .unwrap();
+    let source_index = fs::read(source_repo.path().join("index")).unwrap();
+    let evidence = fixture.run_agent_json(
+        &["send", "planner", "Validation: artifact contents checked; full suite blocked. Remaining: port files, validate, commit, and submit.", "--json"],
+        &old_environment,
+    );
+    let report = serde_json::json!({
+        "validation_evidence": [{"text": "Artifact contents checked; full suite blocked.", "source": format!("message {}", evidence["data"]["message_id"].as_str().unwrap())}],
+        "unfinished_steps": [{"text": "Port files, validate, commit, and submit.", "source": format!("message {}", evidence["data"]["message_id"].as_str().unwrap())}]
+    }).to_string();
     let recovery_args = [
         "task",
         "recover",
@@ -160,6 +176,8 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         assignment,
         "--reason",
         "Provider exited before submission.",
+        "--report",
+        &report,
         "--operation-id",
         "co-01ARZ3NDEKTSV4RRFFQ69G5FB9",
         "--json",
@@ -200,6 +218,42 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
     assert_eq!(reopened["next_action"], "spawn_continuation");
     let full_source =
         super::context::read_detail(&fixture, "assignment", assignment);
+    let handoff = &full_source["recovery_handoffs"][0];
+    assert_eq!(
+        handoff["reported"],
+        serde_json::from_str::<Value>(&report).unwrap()
+    );
+    assert_eq!(handoff["mechanical"]["head_commit"], source_head);
+    assert_eq!(
+        handoff["mechanical"]["staged_paths"][0]["path"],
+        "staged.txt"
+    );
+    assert_eq!(
+        handoff["mechanical"]["unstaged_paths"][0]["path"],
+        "committed.txt"
+    );
+    assert_eq!(
+        handoff["mechanical"]["untracked_paths"][0]["path"],
+        "untracked.txt"
+    );
+    assert_eq!(
+        handoff["mechanical"]["dirty_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(handoff["mechanical"]["complete"], true);
+    assert_eq!(recovered["data"]["handoff"]["staged_paths"], 1);
+    let mut human_command = fixture.command();
+    human_command.args(["assignment", "show", assignment, "--limit", "65536"]);
+    let human = run(human_command);
+    assert!(human.status.success(), "{human:?}");
+    assert!(human.stderr.is_empty());
+    let human_page: Value = serde_json::from_slice(&human.stdout).unwrap();
+    let human_document: Value =
+        serde_json::from_str(human_page["text"].as_str().unwrap()).unwrap();
+    assert_eq!(human_document, full_source);
     assert_eq!(
         full_source["recoveries"][0],
         recovered["data"]
@@ -238,9 +292,26 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
     assert_eq!(late.status.code(), Some(6), "{late:?}");
     let next =
         fixture.run_json(&["spawn", "builder", "--task", task_id, "--json"]);
-    let (_next_capture, next_environment, continuation) =
+    let (next_capture, next_environment, continuation) =
         captured_job(&fixture, &next);
     assert_ne!(source, continuation);
+    let launch = fs::read(&next_capture).unwrap();
+    let args: Vec<_> = launch
+        .split(|byte| *byte == 0)
+        .filter_map(|part| part.strip_prefix(b"arg:"))
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect();
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"])
+    );
+    assert!(
+        args.windows(2).any(|pair| pair[0] == "--cd"
+            && pair[1] == continuation.to_str().unwrap())
+    );
+    assert!(!args.iter().any(
+        |arg| arg == "--add-dir" || arg.contains(source.to_str().unwrap())
+    ));
     let prime = fixture.run_agent_json(&["prime", "--json"], &next_environment);
     assert_eq!(
         prime["data"]["recoveries"][0]["continuation_assignment_id"],
@@ -264,6 +335,43 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         full_continuation["recoveries"][0]["assignment_id"],
         assignment
     );
+    assert_eq!(full_continuation["recovery_handoffs"][0], *handoff);
+    assert_eq!(
+        prime["data"]["recoveries"][0]["handoff"],
+        recovered["data"]["handoff"]
+    );
+    let mut client =
+        mcp::McpClient::start(fixture.agent_command(&next_environment));
+    client.initialize();
+    let mut page = client.call(
+        "assignment_show",
+        serde_json::json!({"assignment_id":assignment,"limit":256}),
+    );
+    let mut document = String::new();
+    loop {
+        assert_eq!(page["result"]["isError"], false);
+        let data = &page["result"]["structuredContent"]["data"];
+        document.push_str(data["text"].as_str().unwrap());
+        if data["eof"] == true {
+            break;
+        }
+        // Each new bridge authenticates the continuation, with no source credentials.
+        drop(client);
+        client =
+            mcp::McpClient::start(fixture.agent_command(&next_environment));
+        client.initialize();
+        page = client.call("assignment_show", serde_json::json!({"assignment_id":assignment,"limit":256,"after":data["next_cursor"],"revision":data["revision"]}));
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(&document).unwrap()["recovery_handoffs"]
+            [0],
+        *handoff
+    );
+    let denied = client.call("logs", serde_json::json!({"agent":spawn["data"]["agent"]["name"],"after":0,"limit":4096,"session_id":null,"tail":false}));
+    assert_eq!(
+        denied["result"]["structuredContent"]["error"]["code"],
+        "permission_denied"
+    );
     assert_eq!(
         prime["data"]["commit_handoffs"].as_array().unwrap().len(),
         1
@@ -276,7 +384,7 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         prime["data"]["commit_handoffs"][0]["workspace_path"],
         continuation.to_str().unwrap()
     );
-    for name in ["committed.txt", "untracked.txt"] {
+    for name in ["committed.txt", "staged.txt", "untracked.txt"] {
         commit_file(
             &continuation,
             Path::new(name),
@@ -324,18 +432,22 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
     );
     assert_eq!(
         fs::read_to_string(fixture.project.join("committed.txt")).unwrap(),
-        "preserve the commit\n"
+        "preserve unstaged edits\n"
     );
     assert_eq!(
         fs::read_to_string(fixture.project.join("untracked.txt")).unwrap(),
         "preserve dirty work\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.project.join("staged.txt")).unwrap(),
+        "preserve staged artifact\n"
     );
     fixture.run_json(&[
         "task",
         "close",
         task_id,
         "--summary",
-        "Validated both recovered files after integration.",
+        "Validated all three recovered files after integration.",
         "--json",
     ]);
     assert_eq!(
@@ -343,6 +455,27 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         dependent["data"]["task"]["id"]
     );
     assert_eq!(fixture.run_json(&recovery_args), recovered);
+    let after_closure = super::context::read_detail(
+        &fixture,
+        "assignment",
+        next["data"]["assignment_id"].as_str().unwrap(),
+    );
+    assert_eq!(after_closure["recovery_handoffs"][0], *handoff);
+    let mut changed_args = recovery_args.to_vec();
+    changed_args[7] = "{\"validation_evidence\":[],\"unfinished_steps\":[]}";
+    rejected(&fixture, &changed_args, "different request");
+    assert_eq!(
+        fs::read(source_repo.path().join("index")).unwrap(),
+        source_index
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("staged.txt")).unwrap(),
+        "preserve staged artifact\n"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("committed.txt")).unwrap(),
+        "preserve unstaged edits\n"
+    );
     assert_eq!(
         Repository::open(&source)
             .unwrap()

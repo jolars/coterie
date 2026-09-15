@@ -321,7 +321,7 @@ Scientific relevance and task scope remain agent responsibilities.
   feed remains a lifecycle feed, not a substitute for current task context.
   Compact context, revision-checked full details, and transcript tails passed
   the fixture and `task check`. See the [bounds and measurements](docs/context-inspection.md).
-- [ ] **Medium: Make recovery handoffs self-contained.** Expose the preserved
+- [x] **Medium: Make recovery handoffs self-contained.** Expose the preserved
   path and base commit, dirty, staged, and untracked paths, prior validation
   evidence, and unfinished steps with references to their sources. Distinguish
   agent-reported checks and next steps from recorded mechanical state. Test a
@@ -329,6 +329,9 @@ Scientific relevance and task scope remain agent responsibilities.
   worktree, and continuation through integration, validation, and task closure.
   Verify that the source files and index survive unchanged and that the
   continuation receives no writable ownership of the preserved workspace.
+  Recovery snapshots and sourced reports passed staged-artifact continuation,
+  schema upgrades, crash tests, and `task check`. See the
+  [handoff guide](docs/recovery-handoffs.md).
 - [ ] **Medium: Reduce client-side protocol bookkeeping.** Add client support
   for separate progress and inbox cursors, page draining, acknowledgement of
   handled messages, and mutation retries. Progress must never acknowledge

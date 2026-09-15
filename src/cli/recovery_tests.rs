@@ -39,6 +39,37 @@ fn example() -> crate::protocol::RecoverySummary {
         base_commit: Some("a".repeat(40)),
         reason: "Provider exited before submission.".into(),
         continuation_assignment_id: None,
+        handoff: Some(Box::new(handoff_example().brief())),
+    }
+}
+
+fn handoff_example() -> crate::protocol::recovery::RecoveryHandoff {
+    use crate::protocol::recovery::*;
+    let staged = RecoveryPath {
+        path: "result.json".into(),
+        path_bytes: b"result.json".to_vec(),
+    };
+    RecoveryHandoff {
+        operation_id: "co-01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+        source_assignment_id: "ca-01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+        recorded_at: 1_789_430_400,
+        reported_by: None,
+        mechanical: RecoverySnapshot {
+            head_commit: "a".repeat(40), complete: true, operation_in_progress: false,
+            dirty_paths: vec![staged.clone()], staged_paths: vec![staged],
+            unstaged_paths: vec![], untracked_paths: vec![], conflicted_paths: vec![],
+            unreadable_paths: vec![], hidden_index_paths: vec![],
+        },
+        reported: RecoveryReport {
+            validation_evidence: vec![ReportedEvidence {
+                text: "python3 validate.py passed in the source worktree; full suite blocked by Nix daemon access.".into(),
+                source: "message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW".into(),
+            }],
+            unfinished_steps: vec![ReportedEvidence {
+                text: "Port result.json, rerun validation, and request a coordinator commit before submission.".into(),
+                source: "message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW".into(),
+            }],
+        },
     }
 }
 
@@ -46,6 +77,10 @@ fn schema() -> Schema {
     generated_schema_for::<
         MutationSuccessEnvelope<'static, crate::protocol::RecoverySummary>,
     >()
+}
+
+fn report_schema() -> Schema {
+    generated_schema_for::<crate::protocol::recovery::RecoveryReport>()
 }
 
 #[test]
@@ -59,6 +94,30 @@ fn recovery_output_matches_generated_schema_example_and_human_contract() {
     )
     .unwrap();
     assert_eq!(serde_json::to_value(schema()).unwrap(), expected);
+    let report_contract: Value = serde_json::from_slice(
+        &std::fs::read(root.join("schemas/recovery-report-v1.schema.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(report_schema()).unwrap(),
+        report_contract
+    );
+    for (path, generated) in [
+        (
+            "examples/recovery-report.json",
+            serde_json::to_value(handoff_example().reported).unwrap(),
+        ),
+        (
+            "examples/recovery-handoff.json",
+            serde_json::to_value(handoff_example()).unwrap(),
+        ),
+    ] {
+        let expected: Value =
+            serde_json::from_slice(&std::fs::read(root.join(path)).unwrap())
+                .unwrap();
+        assert_eq!(generated, expected);
+    }
     let expected: Value = serde_json::from_str(
         &std::fs::read_to_string(root.join("examples/recover.json")).unwrap(),
     )
@@ -101,6 +160,30 @@ fn regenerate_recovery_contract() {
         format!("{}\n", serde_json::to_string_pretty(&schema()).unwrap()),
     )
     .unwrap();
+    std::fs::write(
+        root.join("schemas/recovery-report-v1.schema.json"),
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&report_schema()).unwrap()
+        ),
+    )
+    .unwrap();
+    for (path, value) in [
+        (
+            "examples/recovery-report.json",
+            serde_json::to_value(handoff_example().reported).unwrap(),
+        ),
+        (
+            "examples/recovery-handoff.json",
+            serde_json::to_value(handoff_example()).unwrap(),
+        ),
+    ] {
+        std::fs::write(
+            root.join(path),
+            format!("{}\n", serde_json::to_string_pretty(&value).unwrap()),
+        )
+        .unwrap();
+    }
     let output = MutationSuccessEnvelope {
         schema_version: SchemaVersion,
         operation_id: "co-01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),

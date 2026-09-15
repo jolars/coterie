@@ -116,6 +116,7 @@ pub(crate) struct RecoveryBrief {
     pub(crate) base_commit: Option<String>,
     pub(crate) reason: TextPreview,
     pub(crate) continuation_assignment_id: Option<AssignmentId>,
+    pub(crate) handoff: Option<Box<super::recovery::RecoveryHandoffBrief>>,
 }
 
 /// The bounded section of prime; identity and run configuration metadata are separate.
@@ -155,6 +156,7 @@ pub(crate) struct AssignmentDetail {
     pub(crate) assignment: crate::state::AssignmentRecord,
     pub(crate) workspace: Option<WorkspaceDetail>,
     pub(crate) recoveries: Vec<super::RecoverySummary>,
+    pub(crate) recovery_handoffs: Vec<super::recovery::RecoveryHandoff>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]

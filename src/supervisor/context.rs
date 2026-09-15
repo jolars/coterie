@@ -217,6 +217,7 @@ fn brief(
             base_commit: r.base_commit,
             reason: TextPreview::new(&r.reason),
             continuation_assignment_id: r.continuation_assignment_id,
+            handoff: r.handoff,
         }),
     ))
 }
@@ -272,18 +273,29 @@ pub(super) fn assignment_show(
         result_commit: w.result_commit,
         target_commit: w.target_commit,
     });
-    let recoveries = recoveries
+    let recoveries: Vec<_> = recoveries
         .into_iter()
         .filter(|r| {
             r.assignment_id == assignment_id
                 || r.continuation_assignment_id == Some(assignment_id)
         })
         .collect();
+    let recovery_handoffs = store
+        .transaction(|r| {
+            recoveries
+                .iter()
+                .filter_map(|source| {
+                    r.recovery_handoff(run_id, source.assignment_id).transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(rpc_state_failure)?;
     document_page(
         &AssignmentDetail {
             assignment,
             workspace,
             recoveries,
+            recovery_handoffs,
         },
         after,
         limit,

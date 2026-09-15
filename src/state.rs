@@ -125,6 +125,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "integration_strategy",
         sql: include_str!("state/migrations/0016_integration_strategy.sql"),
     },
+    Migration {
+        version: 17,
+        name: "recovery_handoffs",
+        sql: include_str!("state/migrations/0017_recovery_handoffs.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -4050,6 +4055,7 @@ mod tests {
             "messages",
             "operations",
             "projects",
+            "recovery_handoffs",
             "runs",
             "run_shutdowns",
             "session_controls",
@@ -5463,6 +5469,9 @@ mod tests {
             if prior_count >= 8 {
                 connection.execute("UPDATE operations SET result_json = json_set(result_json, '$.run_id', ?1, '$.generation', 2) WHERE id = ?2", rusqlite::params![RUN_ID, OPERATION_ID]).unwrap();
             }
+            if prior_count >= 16 {
+                connection.execute_batch(MIGRATIONS[15].sql).unwrap();
+            }
             connection.execute(
                 "INSERT INTO claims (id, run_id, task_id, agent_id, operation_id, state, claimed_at, released_at) \
                  VALUES (1, ?1, ?2, ?3, ?4, 'released', 10, 12)",
@@ -5505,11 +5514,43 @@ mod tests {
                     .execute_batch(MIGRATIONS[12].sql)
                     .expect("the prior runtime saved its idle shutdown policy");
             }
+            let legacy_recovery = json!({
+                "task_id": TASK_ID, "assignment_id": ASSIGNMENT_ID,
+                "session_id": SESSION_ID, "project_id": PROJECT_ID,
+                "generation": 2, "workspace_path": "/tmp/workspace",
+                "workspace_path_bytes": b"/tmp/workspace".to_vec(),
+                "base_commit": "a".repeat(40), "reason": "Historical recovery.",
+                "continuation_assignment_id": null,
+            });
+            let legacy_payload =
+                json!({"schema_version": 1, "data": legacy_recovery})
+                    .to_string();
+            connection.execute(
+                "INSERT INTO events (id, run_id, sequence, event_type, actor, subject, task_id, payload_json, summary, created_at) VALUES (?1, ?2, 1, 'task.recovered', 'operator', ?3, ?3, ?4, 'Historical recovery.', 12)",
+                rusqlite::params![crate::id::EventId::generate(), RUN_ID, TASK_ID, legacy_payload],
+            ).unwrap();
             drop(connection);
 
             let store =
                 Store::open(&database.0).expect("the database should upgrade");
             let mut store = store;
+            let historical_recovery = store
+                .transaction(|r| {
+                    assert!(
+                        r.recovery_handoff(
+                            RUN_ID.parse().unwrap(),
+                            ASSIGNMENT_ID.parse().unwrap()
+                        )?
+                        .is_none()
+                    );
+                    Ok(r.task_recoveries(RUN_ID.parse().unwrap())?.remove(0))
+                })
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(historical_recovery).unwrap(),
+                legacy_recovery
+            );
+            assert_eq!(store.connection.query_row("SELECT payload_json FROM events WHERE event_type = 'task.recovered'", [], |row| row.get::<_, String>(0)).unwrap(), legacy_payload);
             assert!(
                 store
                     .transaction(|repositories| repositories
@@ -5660,6 +5701,18 @@ mod tests {
                     .unwrap()
             );
             assert_eq!(plan.generation, generation);
+            assert_eq!(
+                store
+                    .connection
+                    .query_row(
+                        "SELECT count(*) FROM recovery_handoffs",
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(store.connection.query_row("SELECT count(*) FROM sqlite_schema WHERE type = 'trigger' AND name LIKE 'recovery_handoffs_immutable_%'", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
             assert_eq!(plan.run_id.to_string(), RUN_ID);
             for statement in [
                 "UPDATE workspaces SET generation = 3",

@@ -235,10 +235,12 @@ fn crash_matrix_covers_all_declared_boundaries() {
     let mut declared = std::collections::BTreeSet::new();
     for source in [
         include_str!("../state.rs"),
+        include_str!("../state/recovery.rs"),
         include_str!("../supervisor.rs"),
         include_str!("session.rs"),
         include_str!("projects.rs"),
         include_str!("idle.rs"),
+        include_str!("recovery.rs"),
         include_str!("../providers.rs"),
         include_str!("../project.rs"),
         include_str!("../private_fs.rs"),
@@ -266,6 +268,8 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "spawn",
         "finish",
         "resubmit",
+        "recover-assignment",
+        "continue-assignment",
         "integrate",
         "merge",
         "rebase",

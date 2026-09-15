@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecoveryReport",
+  "type": "object",
+  "properties": {
+    "unfinished_steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReportedEvidence"
+      }
+    },
+    "validation_evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReportedEvidence"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "validation_evidence",
+    "unfinished_steps"
+  ],
+  "$defs": {
+    "ReportedEvidence": {
+      "description": "A reporter's statement and reference, not a check executed by Coterie.",
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "text",
+        "source"
+      ]
+    }
+  }
+}

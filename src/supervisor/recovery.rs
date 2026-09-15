@@ -12,6 +12,7 @@ pub(super) fn recover_task<P: Provider, B: WorkspaceBackend>(
     operation_id: OperationId,
     assignment_id: AssignmentId,
     reason: String,
+    report: Option<crate::protocol::recovery::RecoveryReport>,
     fingerprint: Option<&str>,
 ) -> Result<RpcResponse, RpcFailure> {
     require_current_caller(store, run_id, caller)?;
@@ -19,18 +20,36 @@ pub(super) fn recover_task<P: Provider, B: WorkspaceBackend>(
     if reason.trim().is_empty() {
         return Err(invalid_argument("recovery requires a nonempty --reason"));
     }
+    if report.as_ref().is_some_and(|report| {
+        report
+            .validation_evidence
+            .iter()
+            .chain(&report.unfinished_steps)
+            .any(|entry| {
+                entry.text.trim().is_empty() || entry.source.trim().is_empty()
+            })
+    }) {
+        return Err(invalid_argument(
+            "every reported check and unfinished step requires nonempty text and a source reference",
+        ));
+    }
+    let mut request = json!({"assignment_id": assignment_id, "reason": reason});
+    if let Some(report) = &report {
+        request["report"] = serde_json::to_value(report)
+            .map_err(|error| rpc_state_failure(error.into()))?;
+    }
     let mutation = Mutation {
         id: operation_id,
         run_id,
         kind: "task.recover".to_owned(),
         actor_agent_id: caller.agent_id(),
-        request: json!({"assignment_id": assignment_id, "reason": reason}),
+        request,
         created_at: rpc_timestamp()?,
     };
     let existing = store
         .transaction(|r| r.operation(operation_id))
         .map_err(rpc_state_failure)?;
-    if existing.is_none() {
+    let handoff = if existing.is_none() {
         let (assignment, _) = store
             .transaction(|r| r.recovery_preflight(run_id, assignment_id))
             .map_err(rpc_state_failure)?;
@@ -50,24 +69,36 @@ pub(super) fn recover_task<P: Provider, B: WorkspaceBackend>(
                 "the provider cannot verify process inactivity; preserve the workspace and inspect `coterie doctor` before retrying `coterie task recover`",
             ));
         }
-        if workspaces
+        crate::fault::point("recovery.handoff.inspect.before");
+        let mechanical = workspaces
             .observe_source(store, assignment.scope())
             .map_err(|error| {
                 let mut failure = rpc_workspace_failure(error);
                 failure.message.push_str("; preserve the source and inspect `coterie doctor` before retrying `coterie task recover`");
                 failure
-            })?
-            != ExternalResourceState::Observed
-        {
-            return Err(conflict(
-                "recovery source ownership is uncertain; preserve the worktree and inspect `coterie doctor`",
-            ));
-        }
-    }
+            })?;
+        crate::fault::point("recovery.handoff.inspect.after");
+        Some(crate::protocol::recovery::RecoveryHandoff {
+            operation_id,
+            source_assignment_id: assignment_id,
+            recorded_at: mutation.created_at,
+            reported_by: caller.agent_id(),
+            mechanical,
+            reported: report.unwrap_or_default(),
+        })
+    } else {
+        None
+    };
     let outcome = store
         .mutate_with_fingerprint(&mutation, fingerprint, |r| {
-            let recovery =
-                r.recover_assignment(&mutation, assignment_id, &reason)?;
+            let recovery = r.recover_assignment(
+                &mutation,
+                assignment_id,
+                &reason,
+                handoff
+                    .as_ref()
+                    .expect("only a new operation executes retirement"),
+            )?;
             Ok(RpcResponse::TaskRecovered {
                 operation_id,
                 recovery,

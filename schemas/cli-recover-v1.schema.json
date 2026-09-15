@@ -20,6 +20,10 @@
     "data"
   ],
   "$defs": {
+    "AgentId": {
+      "type": "string",
+      "pattern": "^cg-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
     "AssignmentId": {
       "type": "string",
       "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -28,6 +32,21 @@
       "type": "integer",
       "const": 1
     },
+    "EvidencePreview": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/TextPreview"
+        },
+        "text": {
+          "$ref": "#/$defs/TextPreview"
+        }
+      },
+      "required": [
+        "text",
+        "source"
+      ]
+    },
     "OperationId": {
       "type": "string",
       "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -35,6 +54,126 @@
     "ProjectId": {
       "type": "string",
       "pattern": "^cp-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "RecoveryHandoffBrief": {
+      "description": "Full details are retrieved with the source assignment ID, not repeated in prime.",
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "conflicted_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "dirty_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "head_commit": {
+          "type": "string"
+        },
+        "hidden_index_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "operation_id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "operation_in_progress": {
+          "type": "boolean"
+        },
+        "recorded_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reported_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_assignment_id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "staged_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unfinished_step": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unfinished_steps_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unreadable_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unstaged_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "untracked_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "validation_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation_evidence_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "operation_id",
+        "source_assignment_id",
+        "recorded_at",
+        "reported_by",
+        "head_commit",
+        "complete",
+        "operation_in_progress",
+        "dirty_paths",
+        "staged_paths",
+        "unstaged_paths",
+        "untracked_paths",
+        "conflicted_paths",
+        "unreadable_paths",
+        "hidden_index_paths",
+        "validation_evidence_count",
+        "unfinished_steps_count",
+        "validation_evidence",
+        "unfinished_step"
+      ]
     },
     "RecoverySummary": {
       "description": "Preserved source context and the explicit link to a later assignment.",
@@ -62,6 +201,17 @@
         "generation": {
           "type": "integer",
           "format": "int64"
+        },
+        "handoff": {
+          "description": "Absent for recoveries recorded before handoff snapshots were supported.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryHandoffBrief"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "project_id": {
           "$ref": "#/$defs/ProjectId"
@@ -109,6 +259,28 @@
     "TaskId": {
       "type": "string",
       "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TextPreview": {
+      "description": "A lossless prefix, explicitly distinguished from the complete stored text.",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "total_bytes",
+        "truncated"
+      ]
     }
   }
 }

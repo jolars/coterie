@@ -553,7 +553,7 @@ them with `cargo test regenerate_resubmit_contract -- --ignored`.
 
 ```console
 coterie task recover --assignment <assignment-id> --reason <explanation>
-  [--operation-id <co-ULID>]
+  [--report <JSON>] [--operation-id <co-ULID>]
 ```
 
 Retire an interrupted Git worktree assignment before submission. Requires the
@@ -574,9 +574,33 @@ untracked files, commits, and references remain intact. Late observations and
 output from the retired session are fenced. Recovery does not authorize
 cleanup or further writes to the source worktree.
 
+Recovery also records an immutable Git snapshot without writing or refreshing
+the source index. `handoff` contains counts, HEAD, the observation time, the
+recovering reporter, and compact report previews. `assignment show` on the
+source or continuation returns complete `recovery_handoffs`, including dirty,
+staged, unstaged, untracked, conflicted, unreadable, and hidden-index paths.
+Each path has display text and native bytes. Ignored files are excluded;
+`complete: false` identifies unreadable paths or index visibility flags that
+limit the observation. The snapshot describes recovery time, not current Git
+state. Historical recoveries have no handoff snapshot.
+
+The optional `report` has `validation_evidence` and `unfinished_steps` arrays
+of `{ "text": "...", "source": "..." }`. Both strings must be nonempty.
+Identify validation commands, working directories, selected policies, outcomes,
+and blocked checks in the text. Reference the original message ID, transcript
+session and byte cursor, report, or artifact in `source`. See the
+[report example](../examples/recovery-report.json) and
+[typed input schema](../schemas/recovery-report-v1.schema.json).
+These are reported statements and references supplied by the recovering caller;
+Coterie does not verify their claims, resolve the references, or execute them.
+An absent report means evidence is unknown. It does not establish successful
+validation or an empty remaining workload. Report access uses ordinary
+`task:read` visibility and does not grant access to another agent's inbox or logs.
+
 Use ordinary `spawn` with a worktree role for the reopened task. The new
 assignment receives a fresh worktree and an immutable `assignment.continued`
-link to the retired source. Inspect `prime`, port useful changes from the
+link to the retired source. Inspect `prime` and the full handoff with
+`assignment show <source-id>`, port useful changes from the
 preserved path, validate, commit, and finish normally. Files are not copied
 automatically. Dependencies remain blocked until the continued task is
 integrated, validated, and closed. Repeated recovery retains the entire chain.
@@ -592,7 +616,8 @@ refuses new recovery mutations.
 
 JSON data contains `task_id`, `assignment_id`, `session_id`, `project_id`,
 `generation`, `workspace_path`, `workspace_path_bytes`, `base_commit`, `reason`,
-and `continuation_assignment_id`. The last field is null at retirement;
+`continuation_assignment_id`, and `handoff` (absent for historical recoveries).
+The continuation field is null at retirement;
 `prime` reports the subsequent assignment once spawned. The display path may
 replace invalid UTF-8; the byte array retains the exact native path. The typed
 [schema](../schemas/cli-recover-v1.schema.json) and
@@ -606,7 +631,13 @@ coterie assignment show <assignment-id> [--after <byte-offset>]
   [--revision <hash>] [--limit <1..65536>] [--json]
 ```
 
-Read a complete assignment report, workspace identity, and recovery links.
+Read a complete assignment report, workspace identity, recovery links, and
+`recovery_handoffs`. Each handoff separates `mechanical` observations from
+`reported` evidence and unfinished steps, with the operation ID, source
+assignment, reporter, and recording time. Its `recoveries` entry retains the
+source's full preserved path and base commit. Retries and later task transitions
+do not change the recorded handoff. See the
+[handoff guide](recovery-handoffs.md).
 Pagination, revision checks, authority, and diagnostics follow
 [`task show`](#coterie-task-show). Use the source or continuation assignment ID
 from `prime.recoveries` to inspect the corresponding preserved history.

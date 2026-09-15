@@ -65,13 +65,13 @@ agent_tools! {
     TaskShow("task_show", "Read a full task document, including description, result, and assignment references. Concatenate text pages before decoding JSON. Continue with after=next_cursor and the same revision; restart at zero on conflict. Requires task:read.", true) {
         task_id: TaskId, after: Option<u64>, limit: Option<u32>, revision: Option<String>
     } => RpcRequest::TaskShow { task_id, after: after.unwrap_or(0), limit: limit.unwrap_or(16384), revision },
-    AssignmentShow("assignment_show", "Read a full assignment report, workspace identity, and recovery provenance as JSON document pages. Continue with after=next_cursor and the same revision. Requires task:read.", true) {
+    AssignmentShow("assignment_show", "Read a full assignment report, workspace identity, and recovery handoffs as JSON document pages. Handoffs separate recorded Git snapshots from reported checks and unfinished steps with source references; absent reports remain unknown. Continue with after=next_cursor and the same revision. Requires task:read.", true) {
         assignment_id: AssignmentId, after: Option<u64>, limit: Option<u32>, revision: Option<String>
     } => RpcRequest::AssignmentShow { assignment_id, after: after.unwrap_or(0), limit: limit.unwrap_or(16384), revision },
     TaskReady("task_ready", "List tasks ready for assignment.", true) {} => RpcRequest::TaskReady,
-    TaskRecover("task_recover", "Retire an exited agent's unfinished assignment and preserve its work for continuation. Requires task:recover. Reuse operation_id on retry.", false) {
-        operation_id: OperationId, assignment_id: AssignmentId, reason: String
-    } => RpcRequest::TaskRecover { operation_id, assignment_id, reason },
+    TaskRecover("task_recover", "Retire an exited agent's unfinished assignment, snapshot preserved Git state, and record a recovery handoff. Supply reported validation_evidence and unfinished_steps with text and source references in report; omitted evidence remains unknown. Full handoffs are available through assignment_show. Requires task:recover. Reuse operation_id and identical arguments on retry.", false) {
+        operation_id: OperationId, assignment_id: AssignmentId, reason: String, report: Option<crate::protocol::recovery::RecoveryReport>
+    } => RpcRequest::TaskRecover { operation_id, assignment_id, reason, report },
     TaskResubmit("task_resubmit", "Supersede an unintegrated Git submission after validating and committing its correction. Requires task:resubmit. Reuse operation_id on retry.", false) {
         operation_id: OperationId, submission: crate::state::resubmit::Resubmission
     } => RpcRequest::TaskResubmit { operation_id, submission },

@@ -1,0 +1,14 @@
+{
+  "unfinished_steps": [
+    {
+      "source": "message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      "text": "Port result.json, rerun validation, and request a coordinator commit before submission."
+    }
+  ],
+  "validation_evidence": [
+    {
+      "source": "message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+      "text": "python3 validate.py passed in the source worktree; full suite blocked by Nix daemon access."
+    }
+  ]
+}

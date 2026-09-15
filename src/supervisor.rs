@@ -966,6 +966,7 @@ fn public_request(
                         operation_id,
                         assignment_id: arguments.assignment,
                         reason: arguments.reason,
+                        report: arguments.report,
                     },
                     Some(operation_id),
                     false,
@@ -2782,8 +2783,18 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
     .collect::<String>();
     let mut request = request;
     match &mut request {
-        RpcRequest::TaskRecover { reason, .. } => {
+        RpcRequest::TaskRecover { reason, report, .. } => {
             *reason = crate::redaction::text(reason);
+            if let Some(report) = report {
+                for entry in report
+                    .validation_evidence
+                    .iter_mut()
+                    .chain(&mut report.unfinished_steps)
+                {
+                    entry.text = crate::redaction::text(&entry.text);
+                    entry.source = crate::redaction::text(&entry.source);
+                }
+            }
         }
         RpcRequest::TaskResubmit { submission, .. } => {
             submission.summary = crate::redaction::text(&submission.summary);
@@ -2952,6 +2963,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             operation_id,
             assignment_id,
             reason,
+            report,
         } => recovery::recover_task(
             store,
             sessions,
@@ -2961,6 +2973,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             operation_id,
             assignment_id,
             reason,
+            report,
             Some(&request_fingerprint),
         ),
         RpcRequest::TaskResubmit {
@@ -5624,10 +5637,14 @@ fn bootstrap_instruction(
         bootstrap.push_str(
             "\nCall `progress` initially with after=null, limit=50, and wait_seconds=0, then with after=<progress_cursor>, limit=50, and wait_seconds=5. Save each next_cursor and drain pages while has_more is true, even when changes is empty. Inspect bounded current tasks with `prime`; fetch full descriptions and results with `task_show`, and full reports or recovery provenance with `assignment_show`. Detail continuations retain revision and next_cursor. For recent raw activity use `logs` with tail=true and limit=4096 when authorized; full transcripts remain available from after=0.",
         );
+        bootstrap.push_str("\nFor a recovery continuation, read assignment_show on the source assignment ID in prime.recoveries. Its recovery_handoffs separate the recorded Git snapshot from reported validation_evidence and unfinished_steps with source references. Missing reports or historical snapshots mean unknown. Preserve the source files and index; port selected changes into your own fresh worktree, then validate and submit through the normal commit handoff.");
     } else {
         bootstrap.push_str(
             "\nYour role lacks task:read, so progress polling is unavailable. Use `prime` for current orchestration context and report any monitoring blocker to the user or an authorized coordinator.",
         );
+    }
+    if allowed("task", "recover") {
+        bootstrap.push_str("\nWhen using task_recover, supply report with validation_evidence and unfinished_steps arrays of {text, source} from available messages, logs, or artifacts. Report blocked checks explicitly. Coterie records this context without executing it or treating reported checks as verified acceptance.");
     }
     bootstrap.push_str(
         "\nOn each coordination cycle, including after an empty or timed-out progress wait, call `inbox` with after=<inbox_cursor> (start at 0). Keep its next_cursor separate from the progress cursor. Acknowledge messages with `inbox_acknowledge` and through=<inbox_cursor> only after handling every message through that cursor. Progress does not read or acknowledge messages. Also check the inbox at startup, task boundaries, and before finishing.",

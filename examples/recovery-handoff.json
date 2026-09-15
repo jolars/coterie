@@ -1,0 +1,66 @@
+{
+  "mechanical": {
+    "complete": true,
+    "conflicted_paths": [],
+    "dirty_paths": [
+      {
+        "path": "result.json",
+        "path_bytes": [
+          114,
+          101,
+          115,
+          117,
+          108,
+          116,
+          46,
+          106,
+          115,
+          111,
+          110
+        ]
+      }
+    ],
+    "head_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "hidden_index_paths": [],
+    "operation_in_progress": false,
+    "staged_paths": [
+      {
+        "path": "result.json",
+        "path_bytes": [
+          114,
+          101,
+          115,
+          117,
+          108,
+          116,
+          46,
+          106,
+          115,
+          111,
+          110
+        ]
+      }
+    ],
+    "unreadable_paths": [],
+    "unstaged_paths": [],
+    "untracked_paths": []
+  },
+  "operation_id": "co-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "recorded_at": 1789430400,
+  "reported": {
+    "unfinished_steps": [
+      {
+        "source": "message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "text": "Port result.json, rerun validation, and request a coordinator commit before submission."
+      }
+    ],
+    "validation_evidence": [
+      {
+        "source": "message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "text": "python3 validate.py passed in the source worktree; full suite blocked by Nix daemon access."
+      }
+    ]
+  },
+  "reported_by": null,
+  "source_assignment_id": "ca-01ARZ3NDEKTSV4RRFFQ69G5FAV"
+}

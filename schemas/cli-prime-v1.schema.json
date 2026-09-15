@@ -232,6 +232,21 @@
         "permission_profile"
       ]
     },
+    "EvidencePreview": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/TextPreview"
+        },
+        "text": {
+          "$ref": "#/$defs/TextPreview"
+        }
+      },
+      "required": [
+        "text",
+        "source"
+      ]
+    },
     "FilesystemPolicy": {
       "description": "Filesystem authority granted to a provider process.",
       "type": "string",
@@ -274,6 +289,10 @@
         "validate_and_close",
         "none"
       ]
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
     },
     "PermissionProfile": {
       "description": "Provider sandbox policy referenced by a role.",
@@ -449,6 +468,16 @@
           "type": "integer",
           "format": "int64"
         },
+        "handoff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveryHandoffBrief"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "reason": {
           "$ref": "#/$defs/TextPreview"
         },
@@ -470,7 +499,128 @@
         "workspace_path",
         "base_commit",
         "reason",
-        "continuation_assignment_id"
+        "continuation_assignment_id",
+        "handoff"
+      ]
+    },
+    "RecoveryHandoffBrief": {
+      "description": "Full details are retrieved with the source assignment ID, not repeated in prime.",
+      "type": "object",
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "conflicted_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "dirty_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "head_commit": {
+          "type": "string"
+        },
+        "hidden_index_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "operation_id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "operation_in_progress": {
+          "type": "boolean"
+        },
+        "recorded_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reported_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_assignment_id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "staged_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unfinished_step": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unfinished_steps_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unreadable_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "unstaged_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "untracked_paths": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "validation_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EvidencePreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation_evidence_count": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "operation_id",
+        "source_assignment_id",
+        "recorded_at",
+        "reported_by",
+        "head_commit",
+        "complete",
+        "operation_in_progress",
+        "dirty_paths",
+        "staged_paths",
+        "unstaged_paths",
+        "untracked_paths",
+        "conflicted_paths",
+        "unreadable_paths",
+        "hidden_index_paths",
+        "validation_evidence_count",
+        "unfinished_steps_count",
+        "validation_evidence",
+        "unfinished_step"
       ]
     },
     "RunId": {

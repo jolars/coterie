@@ -1,5 +1,7 @@
 //! Assignment workspace side effects and durable reconciliation.
 
+mod recovery;
+
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
@@ -44,6 +46,17 @@ pub(crate) trait WorkspaceBackend {
         workspace: &WorkspaceRecord,
         project: &ProjectRecord,
     ) -> Result<ExternalResourceState, WorkspaceBackendError>;
+
+    fn recovery_snapshot(
+        &self,
+        _workspace: &WorkspaceRecord,
+        _project: &ProjectRecord,
+    ) -> Result<
+        crate::protocol::recovery::RecoverySnapshot,
+        WorkspaceBackendError,
+    > {
+        Err(WorkspaceBackendError::RecoveryObservationUnavailable)
+    }
 
     fn result_commit(
         &self,
@@ -332,9 +345,10 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         &self,
         store: &mut Store,
         scope: AssignmentScope,
-    ) -> Result<ExternalResourceState, WorkspaceError> {
+    ) -> Result<crate::protocol::recovery::RecoverySnapshot, WorkspaceError>
+    {
         let (workspace, project) = workspace_records(store, scope)?;
-        Ok(self.backend.observe(&workspace, &project)?)
+        Ok(self.backend.recovery_snapshot(&workspace, &project)?)
     }
 
     /// Captures a read-only, immutable plan for one guarded integration.
@@ -933,6 +947,16 @@ struct IntegrationInputs {
 }
 
 impl WorkspaceBackend for GitWorkspace {
+    fn recovery_snapshot(
+        &self,
+        workspace: &WorkspaceRecord,
+        project: &ProjectRecord,
+    ) -> Result<
+        crate::protocol::recovery::RecoverySnapshot,
+        WorkspaceBackendError,
+    > {
+        self.inspect_recovery(workspace, project)
+    }
     fn validate_resubmission(
         &self,
         workspace: &WorkspaceRecord,
@@ -2346,6 +2370,10 @@ pub(crate) mod fake {
 /// A workspace adapter could not perform an external operation safely.
 #[derive(Debug, Error)]
 pub(crate) enum WorkspaceBackendError {
+    #[error(
+        "this workspace backend cannot inspect a preserved recovery source"
+    )]
+    RecoveryObservationUnavailable,
     #[error("cannot resubmit workspace `{assignment_id}`: {reason}")]
     InvalidResubmission {
         assignment_id: AssignmentId,
@@ -2507,7 +2535,7 @@ pub(crate) enum WorkspaceError {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 
@@ -2795,6 +2823,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn recovery_snapshot_preserves_index_and_native_paths_and_reports_hidden_entries()
+     {
+        let fixture = GitFixture::new();
+        let (backend, workspace) = fixture.materialized_workspace();
+        let repository = Repository::open(&workspace.path).unwrap();
+        let path = PathBuf::from(std::ffi::OsString::from_vec(
+            b"staged-\xff".to_vec(),
+        ));
+        fs::write(workspace.path.join(&path), "staged\n").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(&path).unwrap();
+        index.write().unwrap();
+        fs::write(workspace.path.join(&path), "unstaged\n").unwrap();
+        fs::create_dir(workspace.path.join("nested")).unwrap();
+        fs::write(workspace.path.join("nested/untracked"), "new\n").unwrap();
+        for flag in ["visible", "assume_unchanged", "skip_worktree"] {
+            let mut entry = index.get_path(Path::new("README.md"), 0).unwrap();
+            if flag != "visible" {
+                entry.flags &= !git2::IndexEntryFlag::VALID.bits();
+                if flag == "assume_unchanged" {
+                    entry.flags |= git2::IndexEntryFlag::VALID.bits();
+                } else {
+                    entry.flags_extended |=
+                        git2::IndexEntryExtendedFlag::SKIP_WORKTREE.bits();
+                }
+                index.add(&entry).unwrap();
+                index.write().unwrap();
+                fs::write(workspace.path.join("README.md"), "hidden\n")
+                    .unwrap();
+            }
+            let before = fs::read(repository.path().join("index")).unwrap();
+            let snapshot = backend
+                .recovery_snapshot(&workspace, &fixture.project)
+                .unwrap();
+            assert_eq!(snapshot.head_commit, fixture.base);
+            assert_eq!(snapshot.complete, flag == "visible");
+            assert_eq!(
+                snapshot.hidden_index_paths.len(),
+                usize::from(flag != "visible")
+            );
+            assert_eq!(
+                snapshot.staged_paths[0].path_bytes,
+                path.as_os_str().as_bytes()
+            );
+            assert_eq!(
+                snapshot.unstaged_paths[0].path_bytes,
+                path.as_os_str().as_bytes()
+            );
+            assert_eq!(snapshot.untracked_paths[0].path, "nested/untracked");
+            assert_eq!(
+                fs::read(repository.path().join("index")).unwrap(),
+                before
+            );
+            assert_eq!(
+                fs::read_to_string(workspace.path.join(&path)).unwrap(),
+                "unstaged\n"
+            );
+        }
+        let parent = workspace.path.parent().unwrap();
+        let moved = parent.with_extension("moved");
+        fs::rename(parent, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, parent).unwrap();
+        assert!(
+            backend
+                .recovery_snapshot(&workspace, &fixture.project)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn recovery_snapshot_labels_unreadable_paths_and_conflicts() {
+        let fixture = GitFixture::new();
+        let (backend, workspace) = fixture.materialized_workspace();
+        let directory = workspace.path.join("pending");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("result.txt"), "unfinished\n").unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o444))
+            .unwrap();
+        let observed = backend.recovery_snapshot(&workspace, &fixture.project);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .unwrap();
+        let snapshot = observed.unwrap();
+        assert!(!snapshot.complete);
+        assert_eq!(snapshot.unreadable_paths[0].path, "pending/result.txt");
+        let repository = Repository::open(&workspace.path).unwrap();
+        let mut index = repository.index().unwrap();
+        let mut entry = index.get_path(Path::new("README.md"), 0).unwrap();
+        index.remove_path(Path::new("README.md")).unwrap();
+        entry.flags = (entry.flags & !0x3000) | 0x1000;
+        index.add(&entry).unwrap();
+        index.write().unwrap();
+        let before = fs::read(repository.path().join("index")).unwrap();
+        let snapshot = backend
+            .recovery_snapshot(&workspace, &fixture.project)
+            .unwrap();
+        assert_eq!(snapshot.conflicted_paths[0].path, "README.md");
+        assert_eq!(fs::read(repository.path().join("index")).unwrap(), before);
     }
 
     #[test]

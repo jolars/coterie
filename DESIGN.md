@@ -784,6 +784,40 @@ Repeated interruptions retain each recovery and continuation link. Dependencies
 remain blocked until the same task's continued result is integrated, validated,
 and explicitly closed. Submitted work uses `task resubmit` instead.
 
+Recovery records a self-contained handoff. Before the retirement transaction,
+the workspace backend verifies source ownership and reads HEAD and the Git
+status without refreshing or writing the index. The snapshot lists dirty,
+staged, unstaged, untracked, conflicted, and unreadable paths, plus index paths
+whose assume-unchanged or skip-worktree flags prevent complete inspection.
+Paths retain their native bytes. Dirty paths are the union of observed changes;
+ignored files are excluded. Hidden or unreadable paths make completeness
+explicitly unknown. The snapshot is an observation at recovery, not a claim
+that the preserved worktree cannot subsequently change.
+
+`task recover --report JSON` optionally supplies `validation_evidence` and
+`unfinished_steps`, each an array of `{ "text": "...", "source": "..." }`.
+Sources identify the original message, transcript session and byte cursor,
+report, or artifact. The recovering operator or authorized agent selects this
+context and is recorded as its reporter. Coterie stores those statements as
+reported evidence, never as mechanically verified checks or executable actions.
+An omitted or empty report means no evidence was supplied; it does not mean
+validation passed or no work remains. This operation shares only the supplied
+report under ordinary task visibility; it grants no access to another agent's
+inbox or transcript. Agents with recovery authority obtain needed evidence
+through their existing read authority or ask its owner to report it.
+
+Migration 17 adds immutable recovery handoff documents. Retirement, the handoff,
+and the operation result commit atomically; retries replay the original snapshot
+and report. Historical recoveries have no snapshot and are labeled unavailable,
+without inventing earlier Git observations. `prime` and recovery responses show
+bounded counts and report previews with the recovery operation ID and source
+assignment reference. `assignment show` for the source or its continuation
+returns the complete snapshot and report through revision-checked document pages,
+including after integration and closure. These are inspection data and grant no
+writable ownership of the preserved source. The continuation must inspect and
+port selected changes into its fresh workspace, validate there, submit, and
+obtain explicit integration and validated closure.
+
 An incorrect unintegrated Git submission can be superseded explicitly with
 `coterie task resubmit --assignment ID --expected-result OLD --result NEW
 --summary TEXT --reason TEXT`. The operator or an agent with `task:resubmit`

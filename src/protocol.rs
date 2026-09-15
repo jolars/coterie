@@ -2,6 +2,7 @@
 
 pub(crate) mod context;
 pub(crate) mod progress;
+pub(crate) mod recovery;
 
 use std::io;
 
@@ -17,7 +18,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 11;
+pub(crate) const PROTOCOL_VERSION: u16 = 12;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -140,6 +141,8 @@ pub(crate) enum RpcRequest {
         operation_id: OperationId,
         assignment_id: AssignmentId,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<recovery::RecoveryReport>,
     },
     TaskResubmit {
         operation_id: OperationId,
@@ -489,6 +492,9 @@ pub(crate) struct RecoverySummary {
     pub(crate) base_commit: Option<String>,
     pub(crate) reason: String,
     pub(crate) continuation_assignment_id: Option<AssignmentId>,
+    /// Absent for recoveries recorded before handoff snapshots were supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) handoff: Option<Box<recovery::RecoveryHandoffBrief>>,
 }
 
 /// Exact identities recorded by one explicit guarded integration.
@@ -679,7 +685,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 11,
+                    "protocol_version": 12,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -793,7 +799,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 11,
+                    "protocol_version": 12,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

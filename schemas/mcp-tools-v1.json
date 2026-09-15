@@ -281,7 +281,7 @@
         "idempotentHint": true,
         "readOnlyHint": true
       },
-      "description": "Read a full assignment report, workspace identity, and recovery provenance as JSON document pages. Continue with after=next_cursor and the same revision. Requires task:read.",
+      "description": "Read a full assignment report, workspace identity, and recovery handoffs as JSON document pages. Handoffs separate recorded Git snapshots from reported checks and unfinished steps with source references; absent reports remain unknown. Continue with after=next_cursor and the same revision. Requires task:read.",
       "inputSchema": {
         "$defs": {
           "AssignmentId": {
@@ -347,7 +347,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Retire an exited agent's unfinished assignment and preserve its work for continuation. Requires task:recover. Reuse operation_id on retry.",
+      "description": "Retire an exited agent's unfinished assignment, snapshot preserved Git state, and record a recovery handoff. Supply reported validation_evidence and unfinished_steps with text and source references in report; omitted evidence remains unknown. Full handoffs are available through assignment_show. Requires task:recover. Reuse operation_id and identical arguments on retry.",
       "inputSchema": {
         "$defs": {
           "AssignmentId": {
@@ -357,6 +357,45 @@
           "OperationId": {
             "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
             "type": "string"
+          },
+          "RecoveryReport": {
+            "additionalProperties": false,
+            "properties": {
+              "unfinished_steps": {
+                "items": {
+                  "$ref": "#/$defs/ReportedEvidence"
+                },
+                "type": "array"
+              },
+              "validation_evidence": {
+                "items": {
+                  "$ref": "#/$defs/ReportedEvidence"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "validation_evidence",
+              "unfinished_steps"
+            ],
+            "type": "object"
+          },
+          "ReportedEvidence": {
+            "additionalProperties": false,
+            "description": "A reporter's statement and reference, not a check executed by Coterie.",
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "source"
+            ],
+            "type": "object"
           }
         },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -370,6 +409,16 @@
           },
           "reason": {
             "type": "string"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/RecoveryReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
