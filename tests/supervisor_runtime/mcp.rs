@@ -7,6 +7,9 @@ use std::sync::mpsc::{Receiver, channel};
 #[path = "commit_handoff.rs"]
 mod commit_handoff;
 
+#[path = "validation_environment.rs"]
+mod validation_environment;
+
 struct McpClient {
     child: Child,
     input: Option<ChildStdin>,

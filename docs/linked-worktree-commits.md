@@ -21,7 +21,9 @@ policy, report a blocker to the operator before starting implementation.
    resolved filesystem, network, and approval policy. This describes the
    workflow; it does not claim a successful filesystem probe.
 2. The worker edits and validates its contribution. It records the actual
-   validation commands, results, and any blocked checks.
+   validation commands, results, and any blocked checks. Diagnose
+   [validation environment access](validation-environments.md) separately from
+   Git metadata permissions.
 3. The worker sends a durable commit request to an authorized recipient. Include
    the assignment ID, base commit, intended paths, proposed commit message, and
    validation evidence. Stop editing while the request is pending. The recipient

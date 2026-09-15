@@ -1225,7 +1225,7 @@ fn codex_bootstrap(
         .expect("permission profiles serialize as JSON");
     let server = mcp::server_name(specification.scope);
     let instruction = format!(
-        "Coterie MCP server: {server}. {} Selected permission profile: {profile}. Coterie executable: {executable:?}. Use non-login shell tools to preserve the inherited toolchain PATH. If the Coterie tools are missing or inaccessible, report the server name and error to the operator; do not bypass the sandbox or change permissions. Never print tokens or the complete environment.\n{}",
+        "Coterie MCP server: {server}. {} Selected permission profile: {profile}. Coterie executable: {executable:?}. Use non-login shell tools to preserve the inherited toolchain PATH. Diagnose validation environment access separately from Git permissions: record each command, working directory, selected policy, and whether it passed, failed, or blocked, with its diagnostic. PATH alone does not establish a full development environment; use the repository's documented entry command in the assigned workspace when needed. Nix daemon denial and `.devenv` write denial are separate blockers; do not widen permissions or bypass required checks. Report blocked validation to an authorized coordinator through durable messages. If the Coterie tools are missing or inaccessible, report the server name and error to the operator; do not bypass the sandbox or change permissions. Never print tokens or the complete environment.\n{}",
         crate::mcp::INSTRUCTIONS,
         specification.bootstrap_instruction
     );
@@ -3290,6 +3290,16 @@ mod tests {
         assert!(bootstrap.contains("missing or inaccessible"));
         assert!(bootstrap.contains("do not bypass the sandbox"));
         assert!(bootstrap.contains("Never print tokens"));
+        for expected in [
+            "validation environment access separately from Git permissions",
+            "command, working directory, selected policy",
+            "passed, failed, or blocked",
+            "Nix daemon",
+            ".devenv",
+            "do not widen permissions",
+        ] {
+            assert!(bootstrap.contains(expected), "missing {expected}");
+        }
 
         let mut filtered = Command::new("unused");
         filtered.env_clear();

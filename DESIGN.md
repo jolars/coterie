@@ -951,6 +951,22 @@ assigned workspace using the repository's documented development command.
 The adapter does not inherit arbitrary `NIX_*`, `CARGO_*`, or shell startup
 variables to recreate a development shell.
 
+Bootstrap directs agents to diagnose validation environment access separately
+from Git permissions. Validation evidence identifies the command, working
+directory, selected policy, and whether each step passed, failed, or was blocked,
+with the actual diagnostic. An inherited executable path does not prove a full
+development environment. Agents use the repository's documented environment
+entry in their assigned workspace when required. Nix daemon access and writes
+to `.devenv` are separate probes: a writable workspace may permit local state
+but deny daemon connections or state paths resolving outside that workspace.
+No environment failure grants authority to widen permissions, reuse a primary
+checkout's writable state, or bypass required checks. An authorized coordinator
+may perform blocked validation under their own existing policy and record its
+scope and outcome through ordinary durable messages. Coterie does not execute
+validation requests or infer that blocked checks passed. NixOS regression tests
+are opt-in and pin the build, provider and environment versions, commands, paths,
+and effective policy; ordinary CI does not require NixOS or model access.
+
 For a job agent, `COTERIE_PROJECT_ROOT` and the process working directory
 identify the task's target project or isolated worktree. For the lead, they
 initially identify the primary project. `coterie prime` always reports every

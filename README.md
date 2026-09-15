@@ -221,6 +221,8 @@ binaries and a shell installer to the GitHub release.
   recovery evidence, and concurrent stress testing.
 - [`docs/destructive-operations.md`](docs/destructive-operations.md) maps
   destructive operations to their ownership, inactivity, and recovery guards.
+- [`docs/validation-environments.md`](docs/validation-environments.md) explains
+  workspace validation, Nix and devenv access, and opt-in NixOS regression tests.
 
 ## License
 

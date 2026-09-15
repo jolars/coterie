@@ -300,12 +300,15 @@ Scientific relevance and task scope remain agent responsibilities.
   The explicit coordinator handoff passed with Codex 0.153.4 on NixOS, including
   normal submission and recovery through validated closure. See the
   [reproduction and acceptance evidence](docs/linked-worktree-commits.md).
-- [ ] **High: Diagnose validation environment access separately from Git
+- [x] **High: Diagnose validation environment access separately from Git
   permissions.** Reproduce Nix daemon access and `.devenv` write failures in
   assigned workspaces, recording the command and selected policy. Report which
   validation steps succeed or are blocked and document supported environment
   entry without automatically widening permissions. Add opt-in NixOS regression
-  coverage for reproduced failures.
+  coverage for reproduced failures. The assigned-worktree regression passed on
+  NixOS with Codex 0.153.4, with independent daemon and external `.devenv` state
+  denials and successful validation using a prepared interpreter. See the
+  [environment guide and recorded evidence](docs/validation-environments.md).
 - [ ] **High: Bound repeated context inspection.** Provide compact task and
   assignment summaries in `prime`, with stable references for fetching full
   descriptions and reports. Keep current task context, recovery provenance,

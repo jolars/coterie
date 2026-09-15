@@ -894,6 +894,13 @@ shell discovery; they grant no authority. Other toolchain inputs, including
 arbitrary `NIX_*` or `CARGO_*` variables, remain excluded. Enter a development
 environment explicitly from the assigned workspace when its build requires it.
 
+Bootstrap distinguishes validation environment access from Git permissions.
+Record each validation command, working directory, selected policy, outcome,
+and diagnostic. Nix daemon denial and `.devenv` write denial are separate
+blockers; an inherited PATH or a successful Git handoff does not prove that
+checks passed. See [validation environments](validation-environments.md) for
+supported entry, coordinator reporting, and the opt-in NixOS regression.
+
 Provider bindings may use any valid configured name. Foreground startup, control,
 and exit observations validate that name against the saved interactive role,
 along with foreground process ownership and the current session generation.

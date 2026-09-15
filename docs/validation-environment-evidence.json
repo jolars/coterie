@@ -1,0 +1,218 @@
+{
+  "recorded_on": "2026-09-15",
+  "coterie_version": "0.1.0",
+  "coterie_executable_sha256": "c6f2eb933bc733b85503cac2f3518c87d7e0da05c39b43f96f067cfd2c86ac53",
+  "build_environment": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "0"
+  },
+  "platform": "NixOS 26.11, Linux 6.18.49",
+  "codex_version": "0.153.4",
+  "nix_version": "2.34.8",
+  "devenv_version": "2.2.2",
+  "test": "mcp::validation_environment::installed_codex_nixos_validation_environment_access",
+  "test_result": "passed",
+  "test_duration_seconds": 118.63,
+  "assignment_id": "ca-01M2JH1WFQW17FC25H17ZJ7PHV",
+  "worker_policy": {
+    "filesystem": "workspace-write",
+    "network": "deny",
+    "approvals": "never"
+  },
+  "operator_control": {
+    "observations": {
+      "devenv_local": {
+        "argv": [
+          "devenv",
+          "--offline",
+          "--no-tui",
+          "shell",
+          "--",
+          "python3",
+          "validate.py"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/project/local",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"validated\": true, \"python\": \"/nix/store/3n4qphl9s728sz8frmpqqrv9b1m87g68-python3-3.14.7/bin/python3\"}\n"
+      },
+      "devenv_shared": {
+        "argv": [
+          "devenv",
+          "--offline",
+          "--no-tui",
+          "shell",
+          "--",
+          "python3",
+          "validate.py"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/project/shared",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"validated\": true, \"python\": \"/nix/store/3n4qphl9s728sz8frmpqqrv9b1m87g68-python3-3.14.7/bin/python3\"}\n"
+      },
+      "inherited_validation": {
+        "argv": [
+          "python3",
+          "validate.py"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/project/local",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"validated\": true, \"python\": \"/run/current-system/sw/bin/python3\"}\n"
+      },
+      "local_state": {
+        "argv": [
+          "python3",
+          "-c",
+          "from pathlib import Path; p = Path('.devenv'); p.mkdir(exist_ok=True); (p / 'access-probe').write_text('validation state probe\\n')"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/project/local",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ""
+      },
+      "nix_daemon": {
+        "argv": [
+          "nix",
+          "--extra-experimental-features",
+          "nix-command",
+          "store",
+          "info",
+          "--store",
+          "daemon",
+          "--json"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/project/local",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"trusted\":true,\"url\":\"daemon\",\"version\":\"2.34.8\"}\n"
+      },
+      "nix_eval": {
+        "argv": [
+          "nix",
+          "--extra-experimental-features",
+          "nix-command",
+          "eval",
+          "--offline",
+          "--expr",
+          "1 + 1"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/project/local",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "2\n"
+      },
+      "shared_state": {
+        "argv": [
+          "python3",
+          "-c",
+          "from pathlib import Path; p = Path('.devenv'); p.mkdir(exist_ok=True); (p / 'access-probe').write_text('validation state probe\\n')"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/project/shared",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ""
+      }
+    },
+    "workspace": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/project"
+  },
+  "worker": {
+    "observations": {
+      "devenv_local": {
+        "argv": [
+          "devenv",
+          "--offline",
+          "--no-tui",
+          "shell",
+          "--",
+          "python3",
+          "validate.py"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local",
+        "exit_code": 1,
+        "stderr": "\u2716 Evaluating shell in 138ms (failed)\n  \u001b[31m\u00d7\u001b[0m Failed to get shell attribute: \n  \u001b[31m \u001b[0m \u2026 while evaluating a branch condition\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/bootstrapLib.nix:422:9\u001b[0m:\n  \u001b[31m \u001b[0m    421|         in\n  \u001b[31m \u001b[0m    422|         if allPrioritizedModules == [ ] then\n  \u001b[31m \u001b[0m       |         \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m    423|           baseProject\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 from call site\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/bootstrapLib.nix:52:24\u001b[0m:\n  \u001b[31m \u001b[0m     51|     let\n  \u001b[31m \u001b[0m     52|       inherit (inputs) nixpkgs;\n  \u001b[31m \u001b[0m       |                        \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m     53|       lib = nixpkgs.lib;\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 while calling \u001b[35;1manonymous lambda\u001b[0m\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/resolve-lock.nix:124:50\u001b[0m:\n  \u001b[31m \u001b[0m    123|\n  \u001b[31m \u001b[0m    124|           inputs = builtins.mapAttrs (inputName: inputSpec: allNodes.${resolveInput inputSpec}) (\n  \u001b[31m \u001b[0m       |                                                  \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m    125|             node.inputs or { }\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 from call site\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/resolve-lock.nix:124:61\u001b[0m:\n  \u001b[31m \u001b[0m    123|\n  \u001b[31m \u001b[0m    124|           inputs = builtins.mapAttrs (inputName: inputSpec: allNodes.${resolveInput inputSpec}) (\n  \u001b[31m \u001b[0m       |                                                             \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m    125|             node.inputs or { }\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 while calling \u001b[35;1manonymous lambda\u001b[0m\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/resolve-lock.nix:49:12\u001b[0m:\n  \u001b[31m \u001b[0m     48|     (\n  \u001b[31m \u001b[0m     49|       key: node:\n  \u001b[31m \u001b[0m       |            \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m     50|         let\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 in the condition of the assert statement\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/resolve-lock.nix:166:11\u001b[0m:\n  \u001b[31m \u001b[0m    165|         if node.flake or true && key != lockFile.root then\n  \u001b[31m \u001b[0m    166|           assert builtins.isFunction flake.outputs;\n  \u001b[31m \u001b[0m       |           \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m    167|           result\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 while calling the '\u001b[35;1misFunction\u001b[0m' builtin\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/resolve-lock.nix:166:18\u001b[0m:\n  \u001b[31m \u001b[0m    165|         if node.flake or true && key != lockFile.root then\n  \u001b[31m \u001b[0m    166|           assert builtins.isFunction flake.outputs;\n  \u001b[31m \u001b[0m       |                  \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m    167|           result\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 while calling the '\u001b[35;1mimport\u001b[0m' builtin\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/resolve-lock.nix:129:58\u001b[0m:\n  \u001b[31m \u001b[0m    128|           # Only import flake.nix for non-root nodes (root doesn't need it)\n  \u001b[31m \u001b[0m    129|           flake = if key == lockFile.root then null else import (outPath + \"/flake.nix\");\n  \u001b[31m \u001b[0m       |                                                          \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m    130|\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 while realising the context of a path\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u2026 while calling the '\u001b[35;1mfetchTree\u001b[0m' builtin\n  \u001b[31m \u001b[0m   \u001b[34;1mat \u001b[35;1m/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local/.devenv/bootstrap/resolve-lock.nix:84:19\u001b[0m:\n  \u001b[31m \u001b[0m     83|                 fetchedSource =\n  \u001b[31m \u001b[0m     84|                   builtins.fetchTree (node.info or { } // removeAttrs resolvedLocked [ \"dir\" ]);\n  \u001b[31m \u001b[0m       |                   \u001b[31;1m^\u001b[0m\n  \u001b[31m \u001b[0m     85|               in\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m\n  \u001b[31m \u001b[0m \u001b[31;1merror:\u001b[0m cannot \u001b[35;1mconnect\u001b[0m to socket at '\u001b[35;1m/nix/var/nix/daemon-socket/socket\u001b[0m': \u001b[35;1mOperation not permitted\u001b[0m\n\n",
+        "stdout": ""
+      },
+      "devenv_shared": {
+        "argv": [
+          "devenv",
+          "--offline",
+          "--no-tui",
+          "shell",
+          "--",
+          "python3",
+          "validate.py"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/shared",
+        "exit_code": 1,
+        "stderr": "  \u001b[31m\u00d7\u001b[0m Failed to open file /run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/shared/.devenv/imports.txt: Read-only file system (os error 30)\n\n",
+        "stdout": ""
+      },
+      "inherited_validation": {
+        "argv": [
+          "python3",
+          "validate.py"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "{\"validated\": true, \"python\": \"/nix/store/3n4qphl9s728sz8frmpqqrv9b1m87g68-python3-3.14.7/bin/python3\"}\n"
+      },
+      "local_state": {
+        "argv": [
+          "python3",
+          "-c",
+          "from pathlib import Path; p = Path('.devenv'); p.mkdir(exist_ok=True); (p / 'access-probe').write_text('validation state probe\\n')"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": ""
+      },
+      "nix_daemon": {
+        "argv": [
+          "nix",
+          "--extra-experimental-features",
+          "nix-command",
+          "store",
+          "info",
+          "--store",
+          "daemon",
+          "--json"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local",
+        "exit_code": 1,
+        "stderr": "error: cannot connect to socket at '/nix/var/nix/daemon-socket/socket': Operation not permitted\n",
+        "stdout": "{\"url\":\"daemon\"}\n"
+      },
+      "nix_eval": {
+        "argv": [
+          "nix",
+          "--extra-experimental-features",
+          "nix-command",
+          "eval",
+          "--offline",
+          "--expr",
+          "1 + 1"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/local",
+        "exit_code": 0,
+        "stderr": "",
+        "stdout": "2\n"
+      },
+      "shared_state": {
+        "argv": [
+          "python3",
+          "-c",
+          "from pathlib import Path; p = Path('.devenv'); p.mkdir(exist_ok=True); (p / 'access-probe').write_text('validation state probe\\n')"
+        ],
+        "cwd": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV/shared",
+        "exit_code": 1,
+        "stderr": "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    from pathlib import Path; p = Path('.devenv'); p.mkdir(exist_ok=True); (p / 'access-probe').write_text('validation state probe\\n')\n                                                                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/nix/store/3n4qphl9s728sz8frmpqqrv9b1m87g68-python3-3.14.7/lib/python3.14/pathlib/__init__.py\", line 809, in write_text\n    with self.open(mode='w', encoding=encoding, errors=errors, newline=newline) as f:\n         ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/nix/store/3n4qphl9s728sz8frmpqqrv9b1m87g68-python3-3.14.7/lib/python3.14/pathlib/__init__.py\", line 771, in open\n    return io.open(self, mode, buffering, encoding, errors, newline)\n           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nOSError: [Errno 30] Read-only file system: '.devenv/access-probe'\n",
+        "stdout": ""
+      }
+    },
+    "workspace": "/run/user/1000/ct-592087-01M2JH17N2JBATPMZDMH79MTP1/state/coterie/runs/cr-01M2JH1T4NN7PM0TPBM2D85FGQ/workspaces/cp-01M2JH1T4N91JN40XDHD0QPG0J/ca-01M2JH1WFQW17FC25H17ZJ7PHV"
+  }
+}
