@@ -22,10 +22,37 @@
         "idempotentHint": true,
         "readOnlyHint": true
       },
-      "description": "Read current orchestration context, capabilities, tasks, assignment, and commit_handoffs. Establish an authorized coordinator for worktree commits before editing. Call at startup.",
+      "description": "Read bounded current tasks, assignment summaries, recovery references, and commit_handoffs. Drain has_more using next_task as after_task; current_task stays pinned. Fetch full text with task_show and assignment_show. Establish an authorized coordinator for worktree commits before editing. Call at startup.",
       "inputSchema": {
+        "$defs": {
+          "TaskId": {
+            "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "additionalProperties": false,
+        "properties": {
+          "after_task": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/TaskId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
         "title": "Prime",
         "type": "object"
       },
@@ -196,6 +223,108 @@
         "type": "object"
       },
       "name": "task_create"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read a full task document, including description, result, and assignment references. Concatenate text pages before decoding JSON. Continue with after=next_cursor and the same revision; restart at zero on conflict. Requires task:read.",
+      "inputSchema": {
+        "$defs": {
+          "TaskId": {
+            "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task_id": {
+            "$ref": "#/$defs/TaskId"
+          }
+        },
+        "required": [
+          "task_id"
+        ],
+        "title": "TaskShow",
+        "type": "object"
+      },
+      "name": "task_show"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "readOnlyHint": true
+      },
+      "description": "Read a full assignment report, workspace identity, and recovery provenance as JSON document pages. Continue with after=next_cursor and the same revision. Requires task:read.",
+      "inputSchema": {
+        "$defs": {
+          "AssignmentId": {
+            "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "after": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "assignment_id": {
+            "$ref": "#/$defs/AssignmentId"
+          },
+          "limit": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "assignment_id"
+        ],
+        "title": "AssignmentShow",
+        "type": "object"
+      },
+      "name": "assignment_show"
     },
     {
       "annotations": {
@@ -611,7 +740,7 @@
         "idempotentHint": true,
         "readOnlyHint": true
       },
-      "description": "Read a bounded page of an authorized agent's provider transcript.",
+      "description": "Read an authorized raw provider transcript. Set tail=true with after=0 to reach recent activity directly. Preserve session_id and next_cursor for subsequent reads with tail=false. Full transcripts remain available from after=0.",
       "inputSchema": {
         "$defs": {
           "SessionId": {
@@ -643,6 +772,12 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "tail": {
+            "type": [
+              "boolean",
+              "null"
             ]
           }
         },

@@ -1,5 +1,6 @@
 //! Versioned local RPC framing and ownership handshakes.
 
+pub(crate) mod context;
 pub(crate) mod progress;
 
 use std::io;
@@ -16,7 +17,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 10;
+pub(crate) const PROTOCOL_VERSION: u16 = 11;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -98,7 +99,22 @@ pub(crate) enum RpcRequest {
     Status,
     Doctor,
     Whoami,
-    Prime,
+    Prime {
+        after_task: Option<TaskId>,
+        limit: u16,
+    },
+    TaskShow {
+        task_id: TaskId,
+        after: u64,
+        limit: u32,
+        revision: Option<String>,
+    },
+    AssignmentShow {
+        assignment_id: AssignmentId,
+        after: u64,
+        limit: u32,
+        revision: Option<String>,
+    },
     Progress {
         after: Option<String>,
         limit: u16,
@@ -169,6 +185,8 @@ pub(crate) enum RpcRequest {
         after: u64,
         limit: u32,
         session_id: Option<SessionId>,
+        #[serde(default)]
+        tail: bool,
     },
     Events {
         after: u64,
@@ -279,15 +297,12 @@ pub(crate) enum RpcResponse {
         agent: Option<AgentSummary>,
     },
     Prime {
-        identity: CallerSummary,
-        projects: Vec<ProjectSummary>,
-        peers: Vec<AgentSummary>,
-        tasks: Vec<TaskSummary>,
-        ready_tasks: Vec<TaskSummary>,
-        active_task: Option<Box<TaskSummary>>,
-        recoveries: Vec<RecoverySummary>,
-        commit_handoffs: Vec<CommitHandoff>,
-        commands: Vec<String>,
+        #[serde(flatten)]
+        page: context::PrimePage,
+    },
+    Detail {
+        #[serde(flatten)]
+        page: context::DetailPage,
     },
     Progress {
         #[serde(flatten)]
@@ -353,13 +368,8 @@ pub(crate) enum RpcResponse {
         acknowledged_count: u64,
     },
     Logs {
-        agent: AgentSummary,
-        session_id: SessionId,
-        transcript: String,
-        next_cursor: u64,
-        eof: bool,
-        terminal: bool,
-        incomplete_tail: bool,
+        #[serde(flatten)]
+        page: context::LogsPage,
     },
     Events {
         events: Vec<EventSummary>,
@@ -372,7 +382,16 @@ pub(crate) enum RpcResponse {
 }
 
 /// Whether a response describes the local operator or an authenticated agent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CallerChannel {
     Operator,
@@ -380,7 +399,9 @@ pub(crate) enum CallerChannel {
 }
 
 /// Caller identity included in dynamic bootstrap context.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub(crate) struct CallerSummary {
     pub(crate) run_id: RunId,
     pub(crate) channel: CallerChannel,
@@ -388,7 +409,9 @@ pub(crate) struct CallerSummary {
 }
 
 /// A run-local agent name and its durable identity.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub(crate) struct AgentSummary {
     pub(crate) id: AgentId,
     pub(crate) name: String,
@@ -397,7 +420,9 @@ pub(crate) struct AgentSummary {
 }
 
 /// An attached project visible to the caller.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub(crate) struct ProjectSummary {
     pub(crate) id: ProjectId,
     pub(crate) alias: String,
@@ -654,7 +679,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 10,
+                    "protocol_version": 11,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -768,7 +793,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 10,
+                    "protocol_version": 11,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

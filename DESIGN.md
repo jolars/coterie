@@ -1155,6 +1155,52 @@ reproduces the same commit IDs from the saved plan and original commits. Origina
 contribution commits remain recoverable through their owned reference even when
 rebasing gives the integrated commits new IDs.
 
+### Bounded current context and full details
+
+`prime [--after-task ID] [--limit 1..50]` returns compact task and assignment
+context, defaulting to 20 tasks ordered by stable task ID. `next_task` and
+`has_more` support continued inspection. This is a current view, so callers
+refresh from the beginning after transitions. The caller's latest assigned task
+is pinned in `current_task` on every page, including after submission, failure,
+recovery, and closure. `active_task` identifies only an active assignment.
+Ready-task IDs refer to the displayed page. Neither provider exit nor a compact
+summary establishes acceptance.
+
+Task titles, descriptions, result summaries, and assignment reports use UTF-8
+previews with original byte counts and explicit truncation. Dependency previews
+include omitted counts. Assignment context reports recorded session state,
+generation, integration state, and mechanical next steps, preserving uncertainty
+about provider activity. Recovery previews retain source and continuation IDs,
+base commit, preserved path, and reason, with full details available by source
+assignment ID. Long histories and reports never repeat in ordinary context.
+The serialized compact task section is capped at 64 KiB by shortening the page;
+identity, project, peer, command, and active commit-handoff metadata are separate
+and scale with the run configuration. The bounds and measured complete response
+sizes are documented in `docs/context-inspection.md`.
+
+`task show ID` and `assignment show ID` (MCP `task_show` and `assignment_show`)
+return full stored detail documents through UTF-8 byte pages, defaulting to
+16 KiB and accepting `--limit 1..65536`. These reads require operator authority
+or `task:read`, use the existing run-wide task visibility, and reauthenticate on
+every request. Task details include full descriptions and results and references
+to every assignment. Assignment details include the full report, workspace
+identity, and recovery provenance. IDs remain valid after transitions. A page
+returns `text`, `next_cursor`, `total_bytes`, `eof`, and a SHA-256 `revision` of
+the complete JSON document. Continuations require that revision and refuse a
+changed document; restart at zero to read the new version. Concatenate page text
+before decoding JSON. These reads introduce no authority or persistent schema.
+
+`logs --tail --limit N` (MCP `logs` with `tail: true`) reads the most recent
+bounded raw transcript bytes without draining startup context. It returns the
+starting byte offset, total bytes, and whether the first line is partial, along
+with the ordinary session and next cursor. Tail selection applies only to the
+first read when following; subsequent reads use the returned cursor and session.
+It does not infer semantic activity or discard bootstrap, serialized context,
+unknown frames, or incomplete final frames. Ordinary `logs --after 0` retains
+full transcript access. Inspection measurements count repeated bootstrap and
+serialized context as transcript bytes and report both raw and serialized page
+sizes; they do not claim a provider token-cost measurement.
+
 ### Compact progress inspection
 
 `coterie progress [--after <cursor>] [--limit <1..100>] [--wait <0..5>]`

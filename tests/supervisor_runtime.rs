@@ -21,6 +21,9 @@ mod closure_override;
 #[path = "supervisor_runtime/recovery.rs"]
 mod recovery;
 
+#[path = "supervisor_runtime/context.rs"]
+mod context;
+
 #[path = "supervisor_runtime/workspace_reuse.rs"]
 mod workspace_reuse;
 
@@ -2215,6 +2218,9 @@ fn foreground_lead_completes_the_codex_worker_loop_through_validation() {
     });
     let submitted = submitted.expect("prime should return the submitted task");
     assert_eq!(submitted["status"], "submitted");
+    assert_eq!(submitted["assignment"]["result_commit"], result_commit);
+    let detail = context::read_detail(&fixture, "task", &task_id);
+    let submitted = &detail["task"];
     assert_eq!(submitted["result"]["status"], "completed");
     assert_eq!(submitted["result"]["summary"], "Implemented and tested.");
     assert_eq!(submitted["result"]["result_commit"], result_commit);
@@ -3423,7 +3429,7 @@ fn restart_marks_a_vanished_codex_worker_lost() {
         .as_str()
         .expect("spawn should return a session ID")
         .to_owned();
-    let tasks_before =
+    let mut tasks_before =
         fixture.run_json(&["prime", "--json"])["data"]["tasks"].clone();
     assert!(
         tasks_before
@@ -3520,6 +3526,14 @@ fn restart_marks_a_vanished_codex_worker_lost() {
 
     let tasks_after =
         fixture.run_json(&["prime", "--json"])["data"]["tasks"].clone();
+    let interrupted = tasks_before
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|task| task["id"] == task_id)
+        .unwrap();
+    interrupted["assignment"]["session_state"] = serde_json::json!("lost");
+    interrupted["next_action"] = serde_json::json!("inspect_provider");
     assert_eq!(tasks_after, tasks_before);
     let transcript_after =
         fixture.run_json(&["logs", "worker-1", "--json"])["data"]["transcript"]

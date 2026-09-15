@@ -49,7 +49,7 @@ macro_rules! agent_tools {
 
 agent_tools! {
     Whoami("whoami", "Report the authenticated agent and session identity.", true) {} => RpcRequest::Whoami,
-    Prime("prime", "Read current orchestration context, capabilities, tasks, assignment, and commit_handoffs. Establish an authorized coordinator for worktree commits before editing. Call at startup.", true) {} => RpcRequest::Prime,
+    Prime("prime", "Read bounded current tasks, assignment summaries, recovery references, and commit_handoffs. Drain has_more using next_task as after_task; current_task stays pinned. Fetch full text with task_show and assignment_show. Establish an authorized coordinator for worktree commits before editing. Call at startup.", true) { after_task: Option<TaskId>, limit: Option<u16> } => RpcRequest::Prime { after_task, limit: limit.unwrap_or(20) },
     Status("status", "Inspect the run, agents, and tasks within this agent's authority.", true) {} => RpcRequest::Status,
     Progress("progress", "Read lifecycle changes. Save next_cursor, drain has_more, and keep the inbox cursor separate. wait_seconds is bounded by the supervisor.", true) {
         after: Option<String>, limit: u16, wait_seconds: u8
@@ -62,6 +62,12 @@ agent_tools! {
         operation_id: OperationId, title: String, description: String,
         project: String, group: Option<String>, dependencies: Vec<TaskId>
     } => RpcRequest::TaskCreate { operation_id, title, description, project, group, dependencies },
+    TaskShow("task_show", "Read a full task document, including description, result, and assignment references. Concatenate text pages before decoding JSON. Continue with after=next_cursor and the same revision; restart at zero on conflict. Requires task:read.", true) {
+        task_id: TaskId, after: Option<u64>, limit: Option<u32>, revision: Option<String>
+    } => RpcRequest::TaskShow { task_id, after: after.unwrap_or(0), limit: limit.unwrap_or(16384), revision },
+    AssignmentShow("assignment_show", "Read a full assignment report, workspace identity, and recovery provenance as JSON document pages. Continue with after=next_cursor and the same revision. Requires task:read.", true) {
+        assignment_id: AssignmentId, after: Option<u64>, limit: Option<u32>, revision: Option<String>
+    } => RpcRequest::AssignmentShow { assignment_id, after: after.unwrap_or(0), limit: limit.unwrap_or(16384), revision },
     TaskReady("task_ready", "List tasks ready for assignment.", true) {} => RpcRequest::TaskReady,
     TaskRecover("task_recover", "Retire an exited agent's unfinished assignment and preserve its work for continuation. Requires task:recover. Reuse operation_id on retry.", false) {
         operation_id: OperationId, assignment_id: AssignmentId, reason: String
@@ -90,9 +96,9 @@ agent_tools! {
     InboxAcknowledge("inbox_acknowledge", "Acknowledge messages only after handling every message through the inbox cursor. Reuse operation_id on retry.", false) {
         operation_id: OperationId, through: u64
     } => RpcRequest::InboxAcknowledge { operation_id, through },
-    Logs("logs", "Read a bounded page of an authorized agent's provider transcript.", true) {
-        agent: String, after: u64, limit: u32, session_id: Option<crate::id::SessionId>
-    } => RpcRequest::Logs { agent, after, limit, session_id },
+    Logs("logs", "Read an authorized raw provider transcript. Set tail=true with after=0 to reach recent activity directly. Preserve session_id and next_cursor for subsequent reads with tail=false. Full transcripts remain available from after=0.", true) {
+        agent: String, after: u64, limit: u32, session_id: Option<crate::id::SessionId>, tail: Option<bool>
+    } => RpcRequest::Logs { agent, after, limit, session_id, tail: tail.unwrap_or(false) },
     Events("events", "Read a bounded page of run events within the agent's authority.", true) {
         after: u64, limit: u16
     } => RpcRequest::Events { after, limit },

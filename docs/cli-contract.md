@@ -44,7 +44,7 @@ and drain pages while `has_more` is true, including empty pages. On each cycle,
 including after a timeout, read `inbox --after <inbox_cursor> --json` using its
 separate cursor (initially 0), handle the messages, then acknowledge the handled
 cursor with `inbox ack`. Progress does not read or acknowledge messages. Inspect
-current tasks and result details with `prime`; provider exit and submission are
+current tasks with `prime` and full result details with `task show`; provider exit and submission are
 not task acceptance. Integrate with `workspace:integrate` and close with
 `task:close` only after their respective review and validation conditions pass.
 
@@ -272,12 +272,32 @@ for an agent, return its durable identity. Both callers may use this command.
 ### `coterie prime`
 
 ```console
-coterie prime
+coterie prime [--after-task <task-id>] [--limit <1..50>] [--json]
 ```
 
-Reconstruct the caller's identity, project, peers, tasks, ready work, active
-assignment, and authorized command list. Agents use this durable context after
-a fresh session or context compaction.
+Reconstruct identity, projects, peers, compact tasks and assignment summaries,
+ready task IDs, and authorized commands. The default task limit is 20. Continue
+with `--after-task` set to `next_task` while `has_more` is true. `current_task`
+pins the caller's latest assigned task on every page, including after submission,
+failure, and closure; `active_task` is null once the caller's assignment ends.
+Refresh from the beginning after transitions. `ready_tasks` contains IDs from the
+displayed task page, not a complete run-wide ready queue.
+
+Text previews contain `text`, `total_bytes`, and `truncated`. Full details remain
+available through `task show` and `assignment show` using each summary's ID.
+`unresolved_dependencies` contains up to eight IDs, with `omitted_dependencies`
+counting the rest; task details include the complete unresolved list.
+`next_action` identifies a recorded prerequisite such as `wait_for_dependencies`,
+`inspect_provider`, `spawn_continuation`, `review_and_integrate`, or
+`validate_and_close`. It does not verify process liveness, grant permission,
+judge a report, or replace explicit acceptance. Consult the capability list,
+assignment session state, recovery reference, and commit handoff as appropriate.
+
+The compact task section has a 64 KiB serialized JSON budget; the page shortens
+before exceeding it. Run identity, projects, peers, command guidance, and active
+commit handoffs are separate metadata. See the [bounds and measurement
+fixture](context-inspection.md), [typed response schema](../schemas/cli-prime-v1.schema.json),
+and [example](../examples/prime.json).
 
 `commit_handoffs` lists active writable worktree assignments requiring a
 coordinator commit. Each entry contains `assignment_id`, `agent_id`, `task_id`,
@@ -300,9 +320,12 @@ additional authority. Never make the common Git directory writable to workers.
 See [the commit handoff guide](linked-worktree-commits.md) for reproduction and
 recovery details. Existing exit codes and submission guards are unchanged.
 
-`recoveries` lists preserved interrupted assignments and their continuation
-links. Each entry uses the fields described by `task recover` below. A
-continuation inspects its source and ports useful changes into its own worktree.
+`recoveries` contains the latest source for each displayed task and the pinned
+current task. It retains source and continuation IDs, session and generation,
+base commit, and previews of the preserved path and reason. Fetch exact native
+path bytes and the complete reason with `assignment show <source-id>`. Follow
+assignment references for earlier recoveries. A continuation inspects its source
+and ports useful changes into its own worktree.
 
 ### `coterie progress`
 
@@ -420,6 +443,39 @@ visible in `doctor` and events. Recovery reacquires all attached leases before
 resuming work. Shutdown retires secondary indexes before the primary index and
 then releases the leases. A partial shutdown preserves the primary recovery
 entrypoint and any newer run's index.
+
+### `coterie task show`
+
+```console
+coterie task show <task-id> [--after <byte-offset>] [--revision <hash>]
+  [--limit <1..65536>] [--json]
+coterie assignment show <assignment-id> [--after <byte-offset>]
+  [--revision <hash>] [--limit <1..65536>] [--json]
+```
+
+Read full stored detail documents with operator authority or `task:read`.
+Task details contain the unabridged task and every assignment ID. Assignment
+details contain the full report, workspace identity with native path bytes,
+and recovery links involving that assignment. These are recorded facts and
+agent reports, not fresh filesystem or validation probes.
+
+Pages default to 16 KiB of UTF-8 document text and extend by at most three bytes
+to keep a character whole. Concatenate `text` values before decoding the JSON
+document. To continue, pass `next_cursor` as `--after` and retain `revision`.
+`total_bytes` measures the full document and `eof` identifies its last page.
+The SHA-256 revision prevents mixing documents changed by a transition or
+resubmission: a mismatch returns `conflict` (exit 5), requiring a fresh read at
+zero without the old revision. Missing revisions for nonzero cursors, invalid
+bounds, and offsets outside the document or inside a character return
+`invalid_argument` (exit 2). Missing IDs return `not_found` (exit 4), and missing
+authority returns `permission_denied` (exit 6). Reconnects reauthenticate every
+read; stale credentials remain rejected.
+
+MCP names these tools `task_show` and `assignment_show`, using `task_id` or
+`assignment_id`, `after`, `revision`, and `limit`. Both CLI views expose the
+same page fields. Generated contracts cover the [page envelope](../schemas/cli-detail-v1.schema.json),
+[task document](../schemas/task-detail-v1.schema.json), and
+[assignment document](../schemas/assignment-detail-v1.schema.json).
 
 ### `coterie task create`
 
@@ -542,6 +598,18 @@ replace invalid UTF-8; the byte array retains the exact native path. The typed
 [schema](../schemas/cli-recover-v1.schema.json) and
 [example](../examples/recover.json) are checked by tests. Regenerate them with
 `cargo test regenerate_recovery_contract -- --ignored`.
+
+### `coterie assignment show`
+
+```console
+coterie assignment show <assignment-id> [--after <byte-offset>]
+  [--revision <hash>] [--limit <1..65536>] [--json]
+```
+
+Read a complete assignment report, workspace identity, and recovery links.
+Pagination, revision checks, authority, and diagnostics follow
+[`task show`](#coterie-task-show). Use the source or continuation assignment ID
+from `prime.recoveries` to inspect the corresponding preserved history.
 
 ### `coterie spawn`
 
@@ -704,21 +772,31 @@ durable acknowledgement point backward. The operator has no agent inbox.
 
 ```console
 coterie logs <agent-id-or-name> [--session <session-id>] [--after <byte-offset>]
-  [--limit <1..65536>] [--follow]
+  [--tail] [--limit <1..65536>] [--follow]
 ```
 
 Read the latest provider transcript visible to the caller. The operator may
 inspect any agent. An agent may inspect itself and any role allowed by its
 `logs:*` capabilities. Reads return at most 65,536 bytes by default, plus up to three bytes to keep a
 UTF-8 character whole, with a
-`next_cursor` byte offset, `session_id`, `eof`, `terminal`, and `incomplete_tail`.
+`start_cursor` and `next_cursor` byte offsets, `total_bytes`, `session_id`, `eof`,
+`terminal`, `partial_head`, and `incomplete_tail`.
 Resume using both the returned session and cursor to avoid switching to a newer
 session. A cursor beyond the file length is refused, including after truncation.
 Incomplete final JSONL frames remain visible as transcript data and do not imply
 success. Invalid UTF-8 is displayed with replacement characters; cursors always
 count stored bytes.
 
-`--follow` pins the first returned session and emits pages until its terminal
+Use `logs <agent> --tail --limit 4096` to reach recent raw activity without
+draining earlier bootstrap or serialized context. `--tail` conflicts with
+`--after`; MCP uses `tail: true` with `after: 0`. `partial_head` explicitly marks
+a first line that starts mid-frame. Tail mode seeks to the end of the same
+checked file and changes no stored bytes. It reports recent output, not semantic
+activity. Full transcripts remain available with `--after 0`. The
+[logs schema](../schemas/cli-logs-v1.schema.json) is generated from the typed view.
+
+`--follow` applies tail selection only to the first read, pins the returned
+session, and emits subsequent cursor pages until its terminal
 observation and end of file. A terminal page may contain no new bytes. A missing
 transcript at offset zero represents no captured output; `doctor` distinguishes
 missing background output from inherited foreground terminal streams.

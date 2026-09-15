@@ -42,6 +42,25 @@ impl TranscriptStore {
         after: u64,
         limit: u32,
     ) -> Result<TranscriptPage, TranscriptError> {
+        self.read_page(session_id, after, limit, false)
+    }
+
+    /// Seeks directly to recent bytes while retaining the original transcript.
+    pub(crate) fn read_tail(
+        &self,
+        session_id: SessionId,
+        limit: u32,
+    ) -> Result<TranscriptPage, TranscriptError> {
+        self.read_page(session_id, 0, limit, true)
+    }
+
+    fn read_page(
+        &self,
+        session_id: SessionId,
+        mut after: u64,
+        limit: u32,
+        tail: bool,
+    ) -> Result<TranscriptPage, TranscriptError> {
         crate::private_fs::check_directory(&self.run_state_directory)?;
         if !(1..=65536).contains(&limit) {
             return Err(std::io::Error::new(
@@ -69,6 +88,9 @@ impl TranscriptStore {
             {
                 return Ok(TranscriptPage {
                     bytes: Vec::new(),
+                    start_cursor: 0,
+                    total_bytes: 0,
+                    partial_head: false,
                     next_cursor: 0,
                     eof: true,
                     incomplete_tail: false,
@@ -77,13 +99,41 @@ impl TranscriptStore {
             Err(error) => return Err(error.into()),
         };
         let length = file.metadata()?.len();
+        if tail {
+            after = length.saturating_sub(u64::from(limit));
+            // Include the leading byte when the tail starts inside a UTF-8 character.
+            for _ in 0..3 {
+                if after == 0 || after == length {
+                    break;
+                }
+                file.seek(SeekFrom::Start(after))?;
+                let mut byte = [0];
+                file.read_exact(&mut byte)?;
+                if byte[0] & 0xc0 != 0x80 {
+                    break;
+                }
+                after -= 1;
+            }
+        }
         if after > length {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "transcript cursor exceeds file length; the transcript may have been truncated").into());
         }
+        let partial_head = if after > 0 {
+            file.seek(SeekFrom::Start(after - 1))?;
+            let mut previous = [0];
+            file.read_exact(&mut previous)?;
+            previous[0] != b'\n'
+        } else {
+            false
+        };
         file.seek(SeekFrom::Start(after))?;
         let mut bytes = Vec::new();
         Read::by_ref(&mut file)
-            .take(u64::from(limit).min(length - after))
+            .take(if tail {
+                length - after
+            } else {
+                u64::from(limit).min(length - after)
+            })
             .read_to_end(&mut bytes)?;
         // A byte limit may bisect a UTF-8 character. Read at most its three
         // remaining bytes so concatenating ordinary text pages remains lossless.
@@ -111,6 +161,9 @@ impl TranscriptStore {
         }
         Ok(TranscriptPage {
             bytes,
+            start_cursor: after,
+            total_bytes: length,
+            partial_head,
             next_cursor,
             eof: next_cursor == length,
             incomplete_tail: last[0] != b'\n',
@@ -153,6 +206,9 @@ impl TranscriptStore {
 
 pub(crate) struct TranscriptPage {
     pub(crate) bytes: Vec<u8>,
+    pub(crate) start_cursor: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) partial_head: bool,
     pub(crate) next_cursor: u64,
     pub(crate) eof: bool,
     pub(crate) incomplete_tail: bool,
@@ -167,6 +223,54 @@ mod tests {
     use crate::id::{RunId, SessionId};
 
     const SESSION_ID: &str = "cs-01ARZ3NDEKTSV4RRFFQ69G5FAY";
+
+    #[test]
+    fn recent_activity_skips_repeated_context_and_preserves_full_transcripts() {
+        let directory = TestDirectory::new();
+        let store = TranscriptStore::new(&directory.0);
+        let session = SESSION_ID.parse().unwrap();
+        let bootstrap =
+            b"{\"bootstrap\":\"repeated instructions\"}\n".repeat(4000);
+        let context =
+            b"{\"prime\":\"serialized task descriptions and reports\"}\n"
+                .repeat(4000);
+        store.append(session, &bootstrap).unwrap();
+        store.append(session, &context).unwrap();
+        let activity =
+            "{\"activity\":\"validating café 🦀\"}\n{\"incomplete\":";
+        store.append(session, activity.as_bytes()).unwrap();
+        let original =
+            fs::read(directory.0.join(TranscriptStore::relative_path(session)))
+                .unwrap();
+        for limit in 1..=activity.len() as u32 + 4 {
+            let tail = store.read_tail(session, limit).unwrap();
+            assert_eq!(tail.total_bytes as usize, original.len());
+            assert!(tail.bytes.len() <= limit as usize + 3);
+            assert_eq!(&original[tail.start_cursor as usize..], tail.bytes);
+            assert!(std::str::from_utf8(&tail.bytes).is_ok());
+            assert!(tail.eof && tail.incomplete_tail);
+        }
+        let tail = store.read_tail(session, activity.len() as u32).unwrap();
+        assert!(!tail.partial_head);
+        assert_eq!(tail.bytes, activity.as_bytes());
+        let mut full = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = store.read(session, cursor, 65536).unwrap();
+            full.extend(page.bytes);
+            cursor = page.next_cursor;
+            if page.eof {
+                break;
+            }
+        }
+        assert_eq!(full, original);
+        let path = directory.0.join(TranscriptStore::relative_path(session));
+        let preserved = directory.0.join("preserved");
+        fs::rename(&path, &preserved).unwrap();
+        std::os::unix::fs::symlink(&preserved, &path).unwrap();
+        assert!(store.read_tail(session, 100).is_err());
+        assert_eq!(fs::read(preserved).unwrap(), original);
+    }
 
     #[test]
     fn provider_output_is_appended_to_a_file_outside_sqlite() {

@@ -228,13 +228,12 @@ async fn call_tool(
         .map_err(|message| (-32602, message))?;
     match client.request(request).await {
         Ok(mut response) => {
-            if let crate::protocol::RpcResponse::Prime { commands, .. } =
-                &mut response
+            if let crate::protocol::RpcResponse::Prime { page } = &mut response
             {
-                for command in commands.iter_mut() {
+                for command in page.commands.iter_mut() {
                     *command = command.replace(' ', "_");
                 }
-                commands.extend([
+                page.commands.extend([
                     "inbox_acknowledge".to_owned(),
                     "new_operation_id".to_owned(),
                 ]);

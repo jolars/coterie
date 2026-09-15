@@ -1,9 +1,10 @@
 use super::*;
 
-const JOB: &str = r#"
+pub(super) const JOB: &str = r#"
 if [ -z "${COTERIE_TASK_ID-}" ]; then exit 0; fi
 capture="$COTERIE_SOCKET.$COTERIE_AGENT_ID"
 {
+  for argument in "$@"; do printf 'arg:%s\0' "$argument"; done
   for variable in COTERIE_PROJECT_ROOT COTERIE_PROJECT_ID COTERIE_PRIMARY_PROJECT_ROOT COTERIE_RUN_ID COTERIE_AGENT_ID COTERIE_SESSION_ID COTERIE_ROLE COTERIE_SOCKET COTERIE_TOKEN COTERIE_TASK_ID COTERIE_BIN; do
     eval "value=\${$variable}"
     printf 'env:%s=%s\0' "$variable" "$value"
@@ -13,12 +14,13 @@ mv "$capture.pending" "$capture"
 printf '{"type":"thread.started","thread_id":"recovery-job"}\n'
 while [ ! -e "$capture.exit" ]; do
   if [ ! -e "/proc/$PPID" ]; then exit 0; fi
+  if [ -e "$capture.output" ]; then cat "$capture.output"; rm "$capture.output"; fi
   sleep 0.02
 done
 exit 23
 "#;
 
-fn captured_job(
+pub(super) fn captured_job(
     fixture: &TestEnvironment,
     spawn: &Value,
 ) -> (PathBuf, Vec<(String, String)>, PathBuf) {
@@ -177,7 +179,38 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
     });
     let doctor = fixture.run_json(&["doctor", "--json"]);
     assert!(doctor.to_string().contains("task recover"));
+    let exited = fixture.run_json(&["prime", "--json"]);
+    let blocked = exited["data"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == task_id)
+        .unwrap();
+    assert_eq!(blocked["status"], "in_progress");
+    assert_eq!(blocked["assignment"]["session_state"], "exited");
+    assert_eq!(blocked["next_action"], "inspect_provider");
     let recovered = fixture.run_json(&recovery_args);
+    let context = fixture.run_json(&["prime", "--json"]);
+    let reopened = context["data"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == task_id)
+        .unwrap();
+    assert_eq!(reopened["next_action"], "spawn_continuation");
+    let full_source =
+        super::context::read_detail(&fixture, "assignment", assignment);
+    assert_eq!(
+        full_source["recoveries"][0],
+        recovered["data"]
+            .as_object()
+            .map(|data| {
+                let mut source = data.clone();
+                source.remove("operation_id");
+                serde_json::Value::Object(source)
+            })
+            .unwrap()
+    );
     assert_eq!(
         fixture.run_json(&["prime", "--json"])["data"]["commit_handoffs"],
         serde_json::json!([])
@@ -214,6 +247,23 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         next["data"]["assignment_id"]
     );
     assert_eq!(prime["data"]["active_task"]["id"], task_id);
+    assert_eq!(
+        prime["data"]["current_task"]["assignment"]["id"],
+        next["data"]["assignment_id"]
+    );
+    assert_eq!(
+        prime["data"]["recoveries"][0]["workspace_path"]["text"],
+        source.to_str().unwrap()
+    );
+    let full_continuation = super::context::read_detail(
+        &fixture,
+        "assignment",
+        next["data"]["assignment_id"].as_str().unwrap(),
+    );
+    assert_eq!(
+        full_continuation["recoveries"][0]["assignment_id"],
+        assignment
+    );
     assert_eq!(
         prime["data"]["commit_handoffs"].as_array().unwrap().len(),
         1

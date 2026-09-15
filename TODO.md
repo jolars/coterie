@@ -309,7 +309,7 @@ Scientific relevance and task scope remain agent responsibilities.
   NixOS with Codex 0.153.4, with independent daemon and external `.devenv` state
   denials and successful validation using a prepared interpreter. See the
   [environment guide and recorded evidence](docs/validation-environments.md).
-- [ ] **High: Bound repeated context inspection.** Provide compact task and
+- [x] **High: Bound repeated context inspection.** Provide compact task and
   assignment summaries in `prime`, with stable references for fetching full
   descriptions and reports. Keep current task context, recovery provenance,
   and actionable blockers visible after transitions and reconnects. Measure
@@ -319,6 +319,8 @@ Scientific relevance and task scope remain agent responsibilities.
   provide a concise route to current activity while retaining full transcripts.
   Test human and JSON views and full-detail retrieval. The bounded `progress`
   feed remains a lifecycle feed, not a substitute for current task context.
+  Compact context, revision-checked full details, and transcript tails passed
+  the fixture and `task check`. See the [bounds and measurements](docs/context-inspection.md).
 - [ ] **Medium: Make recovery handoffs self-contained.** Expose the preserved
   path and base commit, dirty, staged, and untracked paths, prior validation
   evidence, and unfinished steps with references to their sources. Distinguish

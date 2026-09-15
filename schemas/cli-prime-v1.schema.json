@@ -1,0 +1,597 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI success response v1",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/PrimePage"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data"
+  ],
+  "$defs": {
+    "AgentId": {
+      "type": "string",
+      "pattern": "^cg-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "AgentSummary": {
+      "description": "A run-local agent name and its durable identity.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role",
+        "state"
+      ]
+    },
+    "ApprovalPolicy": {
+      "description": "How a provider process may request operator approval.",
+      "type": "string",
+      "enum": [
+        "interactive",
+        "never"
+      ]
+    },
+    "AssignmentBrief": {
+      "description": "The ID is the stable reference accepted by `assignment show` / `assignment_show`.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "base_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "result_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LifecycleState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextPreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "agent_id",
+        "session_id",
+        "generation",
+        "state",
+        "session_state",
+        "summary",
+        "base_commit",
+        "result_commit",
+        "target_commit"
+      ]
+    },
+    "AssignmentId": {
+      "type": "string",
+      "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "CallerChannel": {
+      "description": "Whether a response describes the local operator or an authenticated agent.",
+      "type": "string",
+      "enum": [
+        "operator",
+        "agent"
+      ]
+    },
+    "CallerSummary": {
+      "description": "Caller identity included in dynamic bootstrap context.",
+      "type": "object",
+      "properties": {
+        "agent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "channel": {
+          "$ref": "#/$defs/CallerChannel"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "run_id",
+        "channel",
+        "agent"
+      ]
+    },
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "CommitHandoff": {
+      "description": "Active worktree context for a commit through separately authorized access.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "assignment_id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "base_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "owned_reference": {
+          "type": "string"
+        },
+        "permission_profile": {
+          "$ref": "#/$defs/PermissionProfile"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "workspace_path": {
+          "type": "string"
+        },
+        "workspace_path_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "assignment_id",
+        "agent_id",
+        "task_id",
+        "generation",
+        "workspace_path",
+        "workspace_path_bytes",
+        "owned_reference",
+        "base_commit",
+        "provider",
+        "permission_profile"
+      ]
+    },
+    "FilesystemPolicy": {
+      "description": "Filesystem authority granted to a provider process.",
+      "type": "string",
+      "enum": [
+        "project-write",
+        "workspace-write",
+        "read-only"
+      ]
+    },
+    "LifecycleState": {
+      "description": "The process-level state of one provider session.",
+      "type": "string",
+      "enum": [
+        "starting",
+        "running",
+        "exited",
+        "lost",
+        "unknown",
+        "quarantined"
+      ]
+    },
+    "NetworkPolicy": {
+      "description": "Network authority granted to a provider process.",
+      "type": "string",
+      "enum": [
+        "provider-default",
+        "deny"
+      ]
+    },
+    "NextAction": {
+      "description": "A recorded prerequisite, never an agent-quality judgment or live process probe.",
+      "type": "string",
+      "enum": [
+        "ready",
+        "wait_for_dependencies",
+        "continue_assignment",
+        "inspect_provider",
+        "spawn_continuation",
+        "review_and_integrate",
+        "validate_and_close",
+        "none"
+      ]
+    },
+    "PermissionProfile": {
+      "description": "Provider sandbox policy referenced by a role.",
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "$ref": "#/$defs/ApprovalPolicy"
+        },
+        "filesystem": {
+          "$ref": "#/$defs/FilesystemPolicy"
+        },
+        "network": {
+          "$ref": "#/$defs/NetworkPolicy"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "filesystem",
+        "network",
+        "approvals"
+      ]
+    },
+    "PrimePage": {
+      "description": "The bounded section of prime; identity and run configuration metadata are separate.",
+      "type": "object",
+      "properties": {
+        "active_task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskBrief"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "commit_handoffs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommitHandoff"
+          }
+        },
+        "current_task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskBrief"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "identity": {
+          "$ref": "#/$defs/CallerSummary"
+        },
+        "next_task": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "peers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentSummary"
+          }
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProjectSummary"
+          }
+        },
+        "ready_tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          }
+        },
+        "recoveries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RecoveryBrief"
+          }
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskBrief"
+          }
+        }
+      },
+      "required": [
+        "identity",
+        "projects",
+        "peers",
+        "tasks",
+        "ready_tasks",
+        "active_task",
+        "current_task",
+        "recoveries",
+        "next_task",
+        "has_more",
+        "commit_handoffs",
+        "commands"
+      ]
+    },
+    "ProjectId": {
+      "type": "string",
+      "pattern": "^cp-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "ProjectSummary": {
+      "description": "An attached project visible to the caller.",
+      "type": "object",
+      "properties": {
+        "access": {
+          "type": "string"
+        },
+        "alias": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "alias",
+        "root",
+        "access"
+      ]
+    },
+    "RecoveryBrief": {
+      "description": "Full native paths and reasons can be fetched using the source assignment ID.",
+      "type": "object",
+      "properties": {
+        "assignment_id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "base_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "continuation_assignment_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssignmentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reason": {
+          "$ref": "#/$defs/TextPreview"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "workspace_path": {
+          "$ref": "#/$defs/TextPreview"
+        }
+      },
+      "required": [
+        "task_id",
+        "assignment_id",
+        "session_id",
+        "generation",
+        "workspace_path",
+        "base_commit",
+        "reason",
+        "continuation_assignment_id"
+      ]
+    },
+    "RunId": {
+      "type": "string",
+      "pattern": "^cr-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "SessionId": {
+      "type": "string",
+      "pattern": "^cs-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskBrief": {
+      "description": "The ID is the stable reference accepted by `task show` / `task_show`.",
+      "type": "object",
+      "properties": {
+        "assignment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssignmentBrief"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "$ref": "#/$defs/TextPreview"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "next_action": {
+          "$ref": "#/$defs/NextAction"
+        },
+        "omitted_dependencies": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "project": {
+          "$ref": "#/$defs/TextPreview"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TextPreview"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/TaskStatus"
+        },
+        "title": {
+          "$ref": "#/$defs/TextPreview"
+        },
+        "unresolved_dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "project",
+        "title",
+        "description",
+        "status",
+        "ready",
+        "unresolved_dependencies",
+        "omitted_dependencies",
+        "result",
+        "assignment",
+        "next_action"
+      ]
+    },
+    "TaskId": {
+      "type": "string",
+      "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskStatus": {
+      "description": "A task's durable lifecycle state.",
+      "type": "string",
+      "enum": [
+        "open",
+        "in_progress",
+        "submitted",
+        "closed",
+        "canceled"
+      ]
+    },
+    "TextPreview": {
+      "description": "A lossless prefix, explicitly distinguished from the complete stored text.",
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "total_bytes",
+        "truncated"
+      ]
+    }
+  }
+}

@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI success response v1",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/LogsPage"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data"
+  ],
+  "$defs": {
+    "AgentId": {
+      "type": "string",
+      "pattern": "^cg-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "AgentSummary": {
+      "description": "A run-local agent name and its durable identity.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "role",
+        "state"
+      ]
+    },
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "LogsPage": {
+      "type": "object",
+      "properties": {
+        "agent": {
+          "$ref": "#/$defs/AgentSummary"
+        },
+        "eof": {
+          "type": "boolean"
+        },
+        "incomplete_tail": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "partial_head": {
+          "type": "boolean"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "start_cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "transcript": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "session_id",
+        "transcript",
+        "start_cursor",
+        "total_bytes",
+        "partial_head",
+        "next_cursor",
+        "eof",
+        "terminal",
+        "incomplete_tail"
+      ]
+    },
+    "SessionId": {
+      "type": "string",
+      "pattern": "^cs-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    }
+  }
+}

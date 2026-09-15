@@ -1,6 +1,7 @@
 //! SQLite migrations, transactions, operations, messages, and events.
 
 mod configuration;
+mod context;
 mod diagnostics;
 mod foreground;
 mod progress;
@@ -672,7 +673,7 @@ pub(crate) struct ClaimRecord {
 }
 
 /// The durable association between a task, agent, and eventual workspace.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, schemars::JsonSchema)]
 pub(crate) struct AssignmentRecord {
     pub(crate) id: AssignmentId,
     pub(crate) run_id: RunId,

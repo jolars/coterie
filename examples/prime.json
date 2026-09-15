@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "data": {
+    "identity": {
+      "run_id": "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "channel": "operator",
+      "agent": null
+    },
+    "projects": [
+      {
+        "id": "cp-01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        "alias": "primary",
+        "root": "/project",
+        "access": "read_write"
+      }
+    ],
+    "peers": [],
+    "tasks": [
+      {
+        "id": "ct-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "project_id": "cp-01ARZ3NDEKTSV4RRFFQ69G5FAX",
+        "project": {
+          "text": "primary",
+          "total_bytes": 7,
+          "truncated": false
+        },
+        "title": {
+          "text": "Validate the parser",
+          "total_bytes": 19,
+          "truncated": false
+        },
+        "description": {
+          "text": "Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptance criteria. Acceptan",
+          "total_bytes": 840,
+          "truncated": true
+        },
+        "status": "open",
+        "ready": true,
+        "unresolved_dependencies": [],
+        "omitted_dependencies": 0,
+        "result": null,
+        "assignment": null,
+        "next_action": "ready"
+      }
+    ],
+    "ready_tasks": [
+      "ct-01ARZ3NDEKTSV4RRFFQ69G5FAW"
+    ],
+    "active_task": null,
+    "current_task": null,
+    "recoveries": [],
+    "next_task": "ct-01ARZ3NDEKTSV4RRFFQ69G5FAW",
+    "has_more": false,
+    "commit_handoffs": [],
+    "commands": [
+      "prime",
+      "task show",
+      "assignment show",
+      "logs"
+    ]
+  }
+}

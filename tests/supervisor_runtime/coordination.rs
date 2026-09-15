@@ -214,7 +214,7 @@ fn coordinator_polls_multiple_completions_through_validated_closure() {
                     .find(|task| task["id"] == *task_id)
                     .unwrap();
                 assert_eq!(task["status"], "submitted");
-                assert_eq!(task["result"]["result_commit"], *result);
+                assert_eq!(task["assignment"]["result_commit"], *result);
                 // The scripted coordinator reviews the exact submitted tree before acknowledging.
                 let repository = Repository::open(workspace).unwrap();
                 let commit =

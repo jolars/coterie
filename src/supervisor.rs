@@ -2,6 +2,7 @@
 
 mod closure_override;
 mod commit_handoff;
+mod context;
 mod doctor;
 mod idle;
 mod progress;
@@ -380,19 +381,26 @@ async fn follow_output(
             }
             (
                 RpcRequest::Logs {
-                    after, session_id, ..
+                    after,
+                    session_id,
+                    tail,
+                    ..
                 },
                 RpcResponse::Logs {
-                    session_id: observed,
-                    next_cursor,
-                    eof,
-                    terminal,
-                    transcript,
-                    ..
+                    page:
+                        crate::protocol::context::LogsPage {
+                            session_id: observed,
+                            next_cursor,
+                            eof,
+                            terminal,
+                            transcript,
+                            ..
+                        },
                 },
             ) => {
                 *after = *next_cursor;
                 *session_id = Some(*observed);
+                *tail = false;
                 (transcript.is_empty(), *eof && *terminal, *eof)
             }
             _ => {
@@ -472,6 +480,7 @@ fn stopped_stream_page(
             after,
             limit,
             session_id,
+            tail,
         } => logs(
             &mut store,
             &root,
@@ -481,6 +490,7 @@ fn stopped_stream_page(
             *after,
             *limit,
             *session_id,
+            *tail,
         )
         .map(Some)
         .map_err(Into::into),
@@ -885,7 +895,26 @@ fn public_request(
         CliCommand::Status => (RpcRequest::Status, None, false),
         CliCommand::Doctor => unreachable!("doctor is dispatched locally"),
         CliCommand::Whoami => (RpcRequest::Whoami, None, false),
-        CliCommand::Prime => (RpcRequest::Prime, None, false),
+        CliCommand::Prime(arguments) => (
+            RpcRequest::Prime {
+                after_task: arguments.after_task,
+                limit: arguments.limit,
+            },
+            None,
+            false,
+        ),
+        CliCommand::Assignment(arguments) => match arguments.command {
+            crate::cli::AssignmentCommand::Show(arguments) => (
+                RpcRequest::AssignmentShow {
+                    assignment_id: arguments.assignment,
+                    after: arguments.page.after,
+                    limit: arguments.page.limit,
+                    revision: arguments.page.revision,
+                },
+                None,
+                false,
+            ),
+        },
         CliCommand::Progress(arguments) => (
             RpcRequest::Progress {
                 after: arguments.after,
@@ -917,6 +946,16 @@ fn public_request(
                 )
             }
             TaskCommand::Ready => (RpcRequest::TaskReady, None, false),
+            TaskCommand::Show(arguments) => (
+                RpcRequest::TaskShow {
+                    task_id: arguments.task,
+                    after: arguments.page.after,
+                    limit: arguments.page.limit,
+                    revision: arguments.page.revision,
+                },
+                None,
+                false,
+            ),
             TaskCommand::Recover(arguments) => {
                 let operation_id = arguments
                     .mutation
@@ -1081,6 +1120,7 @@ fn public_request(
                 after: arguments.after,
                 limit: arguments.limit,
                 session_id: arguments.session,
+                tail: arguments.tail,
             },
             None,
             false,
@@ -2845,7 +2885,37 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
         )),
         RpcRequest::Status => status(store, run_id, caller),
         RpcRequest::Whoami => whoami(store, run_id, caller),
-        RpcRequest::Prime => prime(store, run_id, caller),
+        RpcRequest::Prime { after_task, limit } => {
+            context::prime(store, run_id, caller, after_task, limit)
+        }
+        RpcRequest::TaskShow {
+            task_id,
+            after,
+            limit,
+            revision,
+        } => context::task_show(
+            store,
+            run_id,
+            caller,
+            task_id,
+            after,
+            limit,
+            revision.as_deref(),
+        ),
+        RpcRequest::AssignmentShow {
+            assignment_id,
+            after,
+            limit,
+            revision,
+        } => context::assignment_show(
+            store,
+            run_id,
+            caller,
+            assignment_id,
+            after,
+            limit,
+            revision.as_deref(),
+        ),
         RpcRequest::Progress {
             after,
             limit,
@@ -2989,6 +3059,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             after,
             limit,
             session_id,
+            tail,
         } => logs(
             store,
             paths.run_state_directory,
@@ -2998,6 +3069,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             after,
             limit,
             session_id,
+            tail,
         ),
         RpcRequest::Events { after, limit } => {
             events(store, run_id, caller, after, limit)
@@ -3739,64 +3811,6 @@ fn whoami(
         run_id,
         channel: identity.channel,
         agent: identity.agent,
-    })
-}
-
-fn prime(
-    store: &mut Store,
-    run_id: RunId,
-    caller: &AuthenticatedCaller,
-) -> Result<RpcResponse, RpcFailure> {
-    let identity = caller_summary(store, run_id, caller)?;
-    let (projects, agents, tasks, ready, active_task) = store
-        .transaction(|repositories| {
-            let active_task = match caller.agent_id() {
-                Some(agent_id) => repositories
-                    .active_assignment_for_agent(run_id, agent_id)?
-                    .and_then(|assignment| {
-                        repositories.task(assignment.task_id).transpose()
-                    })
-                    .transpose()?,
-                None => None,
-            };
-            Ok((
-                repositories.projects(run_id)?,
-                repositories.agents(run_id)?,
-                repositories.tasks(run_id)?,
-                repositories.ready_tasks(run_id)?,
-                active_task,
-            ))
-        })
-        .map_err(rpc_state_failure)?;
-    let project_map = project_aliases(&projects);
-    let peers = summarize_agents(
-        &agents,
-        &store
-            .configuration(run_id)
-            .map_err(rpc_state_failure)?
-            .archetype
-            .lead,
-    )
-    .into_iter()
-    .filter(|agent| Some(agent.id) != caller.agent_id())
-    .collect();
-    let ready_tasks = summarize_tasks(store, &project_map, ready)?;
-    let tasks = summarize_tasks(store, &project_map, tasks)?;
-    let active_task = active_task
-        .map(|task| summarize_task(store, &project_map, task))
-        .transpose()?;
-    Ok(RpcResponse::Prime {
-        identity,
-        projects: projects.into_iter().map(project_summary).collect(),
-        peers,
-        tasks,
-        ready_tasks,
-        active_task: active_task.map(Box::new),
-        recoveries: store
-            .transaction(|r| r.task_recoveries(run_id))
-            .map_err(rpc_state_failure)?,
-        commit_handoffs: commit_handoff::summaries(store, run_id)?,
-        commands: available_commands(store, run_id, caller)?,
     })
 }
 
@@ -5091,7 +5105,13 @@ fn logs(
     after: u64,
     limit: u32,
     session_id: Option<SessionId>,
+    tail: bool,
 ) -> Result<RpcResponse, RpcFailure> {
+    if tail && after != 0 {
+        return Err(invalid_argument(
+            "tail cannot be combined with a nonzero transcript cursor",
+        ));
+    }
     let agent = resolve_agent(store, run_id, agent_name)?;
     if caller.agent_id() != Some(agent.id) {
         require_capability(store, run_id, caller, "logs", &agent.role)?;
@@ -5114,24 +5134,34 @@ fn logs(
             "stored transcript path does not match its session",
         ));
     }
-    let mut page = TranscriptStore::new(run_state_directory)
-        .read(session.id, after, limit)
-        .map_err(|error| invalid_argument(error.to_string()))?;
+    let transcripts = TranscriptStore::new(run_state_directory);
+    let mut page = if tail {
+        transcripts.read_tail(session.id, limit)
+    } else {
+        transcripts.read(session.id, after, limit)
+    }
+    .map_err(|error| invalid_argument(error.to_string()))?;
     if !session.state.is_terminal()
         && let Err(error) = std::str::from_utf8(&page.bytes)
         && error.error_len().is_none()
     {
         page.bytes.truncate(error.valid_up_to());
-        page.next_cursor = after + page.bytes.len() as u64;
+        page.next_cursor = page.start_cursor + page.bytes.len() as u64;
+        page.eof = page.next_cursor == page.total_bytes;
     }
     Ok(RpcResponse::Logs {
-        agent,
-        session_id: session.id,
-        transcript: String::from_utf8_lossy(&page.bytes).into_owned(),
-        next_cursor: page.next_cursor,
-        eof: page.eof,
-        terminal: session.state.is_terminal(),
-        incomplete_tail: page.incomplete_tail,
+        page: crate::protocol::context::LogsPage {
+            agent,
+            session_id: session.id,
+            transcript: String::from_utf8_lossy(&page.bytes).into_owned(),
+            start_cursor: page.start_cursor,
+            total_bytes: page.total_bytes,
+            partial_head: page.partial_head,
+            next_cursor: page.next_cursor,
+            eof: page.eof,
+            terminal: session.state.is_terminal(),
+            incomplete_tail: page.incomplete_tail,
+        },
     })
 }
 
@@ -5422,6 +5452,8 @@ fn available_commands(
             "project attach",
             "task create",
             "task ready",
+            "task show",
+            "assignment show",
             "task close",
             "spawn",
             "workspace integrate",
@@ -5441,6 +5473,8 @@ fn available_commands(
         )?;
         for (namespace, action, command) in [
             ("task", "read", "progress"),
+            ("task", "read", "task show"),
+            ("task", "read", "assignment show"),
             ("project", "attach", "project attach"),
             ("task", "create", "task create"),
             ("task", "close", "task close"),
@@ -5588,7 +5622,7 @@ fn bootstrap_instruction(
     );
     if allowed("task", "read") {
         bootstrap.push_str(
-            "\nCall `progress` initially with after=null, limit=50, and wait_seconds=0, then with after=<progress_cursor>, limit=50, and wait_seconds=5. Save each next_cursor and drain pages while has_more is true, even when changes is empty. Inspect current tasks and submitted results with `prime`.",
+            "\nCall `progress` initially with after=null, limit=50, and wait_seconds=0, then with after=<progress_cursor>, limit=50, and wait_seconds=5. Save each next_cursor and drain pages while has_more is true, even when changes is empty. Inspect bounded current tasks with `prime`; fetch full descriptions and results with `task_show`, and full reports or recovery provenance with `assignment_show`. Detail continuations retain revision and next_cursor. For recent raw activity use `logs` with tail=true and limit=4096 when authorized; full transcripts remain available from after=0.",
         );
     } else {
         bootstrap.push_str(
@@ -9014,16 +9048,16 @@ while :; do :; done
             }) if agent.name == "worker-1"
         ));
         assert!(matches!(
-            agent.request(RpcRequest::Prime).await,
-            Ok(RpcResponse::Prime {
+            agent.request(RpcRequest::Prime { after_task: None, limit: 20 }).await,
+            Ok(RpcResponse::Prime { page: crate::protocol::context::PrimePage {
                 identity: crate::protocol::CallerSummary {
                     channel: crate::protocol::CallerChannel::Agent,
                     ..
                 },
-                active_task: Some(ref task),
+                context: crate::protocol::context::TaskContext { active_task: Some(ref task), .. },
                 ref commands,
                 ..
-            }) if task.id == task_id && commands.iter().any(|command| command == "finish")
+            } }) if task.id == task_id && commands.iter().any(|command| command == "finish")
         ));
         assert!(matches!(
             agent
@@ -9265,11 +9299,14 @@ while :; do :; done
                 if tasks.len() == 1 && tasks[0].id == downstream_id
         ));
         let primed_tasks = match reconnected
-            .request(RpcRequest::Prime)
+            .request(RpcRequest::Prime {
+                after_task: None,
+                limit: 20,
+            })
             .await
             .expect("prime should reconstruct the closed task result")
         {
-            RpcResponse::Prime { tasks, .. } => tasks,
+            RpcResponse::Prime { page } => page.context.tasks,
             response => panic!("unexpected prime response: {response:?}"),
         };
         let closed_task = primed_tasks
@@ -9277,8 +9314,22 @@ while :; do :; done
             .find(|task| task.id == task_id)
             .expect("prime should retain the closed task");
         assert_eq!(closed_task.status, TaskStatus::Closed);
+        let detail = reconnected
+            .request(RpcRequest::TaskShow {
+                task_id,
+                after: 0,
+                limit: 65536,
+                revision: None,
+            })
+            .await
+            .unwrap();
+        let RpcResponse::Detail { page } = detail else {
+            panic!("expected full task detail")
+        };
+        assert!(page.eof);
+        let full: serde_json::Value = serde_json::from_str(&page.text).unwrap();
         assert_eq!(
-            closed_task.result,
+            Some(full["task"]["result"].clone()),
             Some(serde_json::json!({
                 "assignment_result": {
                     "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

@@ -6,6 +6,9 @@ pub(crate) mod config;
 mod progress_tests;
 
 #[cfg(test)]
+mod context_tests;
+
+#[cfg(test)]
 mod resubmit_tests;
 
 #[cfg(test)]
@@ -64,14 +67,16 @@ pub(crate) enum Command {
     Doctor,
     /// Report the authenticated caller's identity.
     Whoami,
-    /// Reconstruct orchestration context, including active commit handoffs.
-    Prime,
+    /// Read bounded current task and assignment context; use `task show` for full details.
+    Prime(PrimeArguments),
     /// Inspect compact lifecycle changes; task submission and provider exit are separate.
     Progress(ProgressArguments),
     /// Attach projects to the active run or list its projects.
     Project(ProjectArguments),
     /// Create, inspect, or close durable tasks.
     Task(TaskArguments),
+    /// Retrieve a full assignment report and recovery provenance.
+    Assignment(AssignmentArguments),
     /// Launch one configured role for a ready task.
     Spawn(SpawnArguments),
     /// Inspect or integrate assignment workspaces.
@@ -145,6 +150,8 @@ pub(crate) struct TaskArguments {
 /// One task-graph action.
 #[derive(Debug, Subcommand)]
 pub(crate) enum TaskCommand {
+    /// Read full task details as revision-checked JSON document pages.
+    Show(TaskShowArguments),
     /// Create a task in an attached project.
     Create(TaskCreateArguments),
     /// List tasks that can be claimed now.
@@ -164,6 +171,55 @@ pub(crate) enum TaskCommand {
     /// worktree role for the reopened task, inspect its recovery context with
     /// prime, and port useful changes into the fresh continuation worktree.
     Recover(TaskRecoverArguments),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PrimeArguments {
+    /// Continue the task page after this stable task ID.
+    #[arg(long)]
+    pub(crate) after_task: Option<crate::id::TaskId>,
+    /// Maximum tasks on the page; the caller's current task is always included separately.
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u16).range(1..=50))]
+    pub(crate) limit: u16,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct DetailArguments {
+    /// Resume at this UTF-8 byte offset; concatenate text before decoding JSON.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) after: u64,
+    /// Maximum document bytes per page, plus up to three bytes to finish a character.
+    #[arg(long, default_value_t = 16384, value_parser = clap::value_parser!(u32).range(1..=65536))]
+    pub(crate) limit: u32,
+    /// Revision from the first page, required whenever --after is nonzero.
+    #[arg(long)]
+    pub(crate) revision: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct TaskShowArguments {
+    pub(crate) task: crate::id::TaskId,
+    #[command(flatten)]
+    pub(crate) page: DetailArguments,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AssignmentArguments {
+    #[command(subcommand)]
+    pub(crate) command: AssignmentCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum AssignmentCommand {
+    /// Read the full report, workspace identity, and recovery sources as JSON document pages.
+    Show(AssignmentShowArguments),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct AssignmentShowArguments {
+    pub(crate) assignment: crate::id::AssignmentId,
+    #[command(flatten)]
+    pub(crate) page: DetailArguments,
 }
 
 #[derive(Debug, Args)]
@@ -358,6 +414,9 @@ pub(crate) struct LogsArguments {
     /// Resume at this byte offset in the transcript.
     #[arg(long, default_value_t = 0)]
     pub(crate) after: u64,
+    /// Start with recent raw activity, skipping earlier bootstrap and context bytes.
+    #[arg(long, conflicts_with = "after")]
+    pub(crate) tail: bool,
     /// Bound the number of transcript bytes returned per page.
     #[arg(long, default_value_t = 65536, value_parser = clap::value_parser!(u32).range(1..=65536))]
     pub(crate) limit: u32,

@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI success response v1",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/DetailPage"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data"
+  ],
+  "$defs": {
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "DetailPage": {
+      "description": "Concatenate text from one revision before decoding the complete JSON document.",
+      "type": "object",
+      "properties": {
+        "eof": {
+          "type": "boolean"
+        },
+        "next_cursor": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "revision": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "text",
+        "revision",
+        "next_cursor",
+        "total_bytes",
+        "eof"
+      ]
+    }
+  }
+}

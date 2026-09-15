@@ -10,7 +10,7 @@ mod commit_handoff;
 #[path = "validation_environment.rs"]
 mod validation_environment;
 
-struct McpClient {
+pub(super) struct McpClient {
     child: Child,
     input: Option<ChildStdin>,
     responses: Receiver<Value>,
@@ -18,7 +18,7 @@ struct McpClient {
 }
 
 impl McpClient {
-    fn start(mut command: Command) -> Self {
+    pub(super) fn start(mut command: Command) -> Self {
         command.arg("__mcp");
         Self::start_raw(command)
     }
@@ -76,7 +76,7 @@ impl McpClient {
         }
     }
 
-    fn initialize(&mut self) {
+    pub(super) fn initialize(&mut self) {
         let response = self.request("initialize", json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"coterie-test","version":"1"}}));
         assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
         self.send(
@@ -84,7 +84,7 @@ impl McpClient {
         );
     }
 
-    fn call(&mut self, name: &str, arguments: Value) -> Value {
+    pub(super) fn call(&mut self, name: &str, arguments: Value) -> Value {
         self.request("tools/call", json!({"name":name,"arguments":arguments}))
     }
 }
@@ -110,6 +110,92 @@ fn live_lead(fixture: &TestEnvironment) -> (Child, Vec<(String, String)>) {
         .unwrap();
     wait_until("the MCP fixture's live lead", || capture.exists());
     (child, captured_environment(&capture))
+}
+
+#[test]
+fn full_context_details_require_read_capability_and_reauthenticate_after_reconnect()
+ {
+    for allowed in [false, true] {
+        let fixture = TestEnvironment::new();
+        let config = include_str!("../../examples/config/global.toml").replace(
+            "\"spawn:builder\", \"send:*\", \"task:*\", \"logs:*\"",
+            if allowed {
+                "\"task:read\""
+            } else {
+                "\"send:*\""
+            },
+        );
+        write_global(&fixture, &config);
+        let (mut foreground, environment) = live_lead(&fixture);
+        let description =
+            "Full MCP context with Unicode λ and \"quotes\".\n".repeat(1200);
+        let task = fixture.run_json(&[
+            "task",
+            "create",
+            "MCP detail",
+            "--description",
+            &description,
+            "--json",
+        ]);
+        let id = task["data"]["task"]["id"].as_str().unwrap();
+        let mut client = McpClient::start(fixture.agent_command(&environment));
+        client.initialize();
+        let first =
+            client.call("task_show", json!({"task_id":id,"limit":4096}));
+        if allowed {
+            assert_eq!(first["result"]["isError"], false);
+            let mut data = first["result"]["structuredContent"]["data"].clone();
+            let revision = data["revision"].as_str().unwrap().to_owned();
+            let mut text = data["text"].as_str().unwrap().to_owned();
+            drop(client);
+            client = McpClient::start(fixture.agent_command(&environment));
+            client.initialize();
+            while data["eof"] == false {
+                let page = client.call("task_show", json!({"task_id":id,"after":data["next_cursor"],"revision":revision,"limit":4096}));
+                assert_eq!(page["result"]["isError"], false);
+                let textual: Value = serde_json::from_str(
+                    page["result"]["content"][0]["text"].as_str().unwrap(),
+                )
+                .unwrap();
+                assert_eq!(textual, page["result"]["structuredContent"]);
+                data = textual["data"].clone();
+                text.push_str(data["text"].as_str().unwrap());
+            }
+            assert_eq!(
+                serde_json::from_str::<Value>(&text).unwrap()["task"]["description"],
+                description
+            );
+            let missing = client.call(
+                "assignment_show",
+                json!({"assignment_id":"ca-01ARZ3NDEKTSV4RRFFQ69G5FAW"}),
+            );
+            assert_eq!(
+                missing["result"]["structuredContent"]["error"]["code"],
+                "not_found"
+            );
+        } else {
+            assert_eq!(
+                first["result"]["structuredContent"]["error"]["code"],
+                "permission_denied"
+            );
+            let denied = client.call(
+                "assignment_show",
+                json!({"assignment_id":"ca-01ARZ3NDEKTSV4RRFFQ69G5FAW"}),
+            );
+            assert_eq!(
+                denied["result"]["structuredContent"]["error"]["code"],
+                "permission_denied"
+            );
+        }
+        foreground.stdin.take();
+        assert!(foreground.wait().unwrap().success());
+        let stale = client.call("task_show", json!({"task_id":id}));
+        assert_eq!(
+            stale["result"]["structuredContent"]["error"]["code"],
+            "unauthenticated"
+        );
+        fixture.run_json(&["stop", "--json"]);
+    }
 }
 
 #[test]

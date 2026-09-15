@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AssignmentDetail",
+  "description": "The unabridged document referenced by an assignment or recovery source.",
+  "type": "object",
+  "properties": {
+    "assignment": {
+      "$ref": "#/$defs/AssignmentRecord"
+    },
+    "recoveries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RecoverySummary"
+      }
+    },
+    "workspace": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/WorkspaceDetail"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "assignment",
+    "workspace",
+    "recoveries"
+  ],
+  "$defs": {
+    "AgentId": {
+      "type": "string",
+      "pattern": "^cg-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "AssignmentId": {
+      "type": "string",
+      "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "AssignmentRecord": {
+      "description": "The durable association between a task, agent, and eventual workspace.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "claim_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "completed_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "created_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "generation": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "id",
+        "run_id",
+        "task_id",
+        "agent_id",
+        "session_id",
+        "claim_id",
+        "generation",
+        "state",
+        "summary",
+        "created_at",
+        "completed_at"
+      ]
+    },
+    "ProjectId": {
+      "type": "string",
+      "pattern": "^cp-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "RecoverySummary": {
+      "description": "Preserved source context and the explicit link to a later assignment.",
+      "type": "object",
+      "properties": {
+        "assignment_id": {
+          "$ref": "#/$defs/AssignmentId"
+        },
+        "base_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "continuation_assignment_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AssignmentId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generation": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "workspace_path": {
+          "type": "string"
+        },
+        "workspace_path_bytes": {
+          "description": "Exact native path bytes, including paths that are not UTF-8.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "assignment_id",
+        "session_id",
+        "project_id",
+        "generation",
+        "workspace_path",
+        "workspace_path_bytes",
+        "base_commit",
+        "reason",
+        "continuation_assignment_id"
+      ]
+    },
+    "RunId": {
+      "type": "string",
+      "pattern": "^cr-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "SessionId": {
+      "type": "string",
+      "pattern": "^cs-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskId": {
+      "type": "string",
+      "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "WorkspaceDetail": {
+      "type": "object",
+      "properties": {
+        "base_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "path_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "result_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_commit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "project_id",
+        "kind",
+        "path",
+        "path_bytes",
+        "base_commit",
+        "result_commit",
+        "target_commit"
+      ]
+    }
+  }
+}

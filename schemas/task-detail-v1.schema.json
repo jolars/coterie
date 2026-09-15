@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TaskDetail",
+  "description": "The unabridged document referenced by a compact task.",
+  "type": "object",
+  "properties": {
+    "assignments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AssignmentId"
+      }
+    },
+    "task": {
+      "$ref": "#/$defs/TaskSummary"
+    }
+  },
+  "required": [
+    "task",
+    "assignments"
+  ],
+  "$defs": {
+    "AssignmentId": {
+      "type": "string",
+      "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "ProjectId": {
+      "type": "string",
+      "pattern": "^cp-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskId": {
+      "type": "string",
+      "pattern": "^ct-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskStatus": {
+      "description": "A task's durable lifecycle state.",
+      "type": "string",
+      "enum": [
+        "open",
+        "in_progress",
+        "submitted",
+        "closed",
+        "canceled"
+      ]
+    },
+    "TaskSummary": {
+      "description": "A task's command-facing representation.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "project": {
+          "type": "string"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "result": true,
+        "status": {
+          "$ref": "#/$defs/TaskStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "unresolved_dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TaskId"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "project",
+        "title",
+        "description",
+        "status",
+        "ready",
+        "unresolved_dependencies",
+        "result"
+      ]
+    }
+  }
+}
