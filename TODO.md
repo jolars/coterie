@@ -364,6 +364,44 @@ These observations come from the September 15, 2026
   and JSON log views, credential redaction, and any supported adapter change.
   Keep real-provider coverage opt-in.
 
+### Diplodocus workflow follow-ups
+
+These observations come from the September 15, 2026 Diplodocus Milestone 3 run
+`cr-01M2JD7PN7SYP6ZCRJ5EQA6ZNY`: three implementation assignments and an
+independent review reached validated closure. Pin the Coterie build, provider
+version, and effective policy when reproducing these observations; they do not
+establish behavior across other builds or policies.
+
+- [ ] **Medium: Make review-only task acceptance explicit.** A clean review
+  submitted its unchanged base commit, but `task close` required a no-op
+  `workspace integrate` first. Specify and test the supported path from an
+  unchanged submission through validation and accepted closure. Document the
+  no-op integration requirement, or define an explicit no-change result
+  contract in `DESIGN.md` before changing closure rules. Preserve explicit
+  acceptance, generation checks, and dependency release only after closure.
+  Cover a target that advances during review and verify that accepting the
+  review cannot move its HEAD or overwrite work.
+- [ ] **Medium: Diagnose build-artifact disk pressure across worktrees.**
+  Separate Rust build caches exhausted available disk space during parallel
+  work. Measure per-assignment artifact usage, expose actionable low-space
+  diagnostics, and define scoped cleanup of explicitly selected disposable
+  artifacts from completed, inactive assignments. Specify cleanup ownership
+  and authority in `DESIGN.md` before implementation. Preserve source changes,
+  indexes, submissions, and artifacts still used by running processes. Test
+  low-space failures, symlink boundaries, concurrent use, and interrupted or
+  repeated cleanup without deleting unrelated files or caches.
+- [ ] **Medium: Extend validation coverage to declared environment inputs.**
+  The lead could discover the configured Python/R kernels, while the reviewer
+  lacked `JUPYTER_PATH`. Extend the existing
+  [validation-environment regression](docs/validation-environments.md) with a
+  check that needs an additional declared environment input. Distinguish
+  intentional provider filtering, missing prerequisites, and sandbox denials;
+  verify the documented workspace environment-entry or coordinator-validation
+  handoff with exact commit and command evidence. Do not infer full environment
+  inheritance from a preserved `PATH`, pass the entire ambient environment, or
+  widen permissions automatically. Keep real-provider coverage opt-in and
+  retain the completed Nix daemon and `.devenv` access coverage.
+
 ### M7 gate
 
 - [ ] The full design criterion succeeds end to end, including the two-project
