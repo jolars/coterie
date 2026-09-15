@@ -280,6 +280,62 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   in `0.x` until a separate compatibility review establishes the `1.0`
   contract.
 
+### Research workflow follow-ups
+
+These items come from the September 15, 2026
+[normreg-multi field report](docs/field-report-normreg-multi.md). Address the
+high-priority items first. The observations concern one run; pin the Coterie
+build, provider version, and effective policy in reproductions before attributing
+a cause. Specify new interfaces or authority in `DESIGN.md` before implementation.
+Scientific relevance and task scope remain agent responsibilities.
+
+- [ ] **High: Make the linked-worktree commit path usable under the selected
+  policy.** Reproduce edit, validate, stage, commit, and submit with actual
+  provider-launched workers in a real linked worktree, including a recovery
+  continuation. Diagnose an unsupported commit path before work begins, and
+  provide scoped commit support or an explicit coordinator-commit handoff.
+  Test that the primary checkout, sibling worktrees, shared references, and
+  repository configuration remain protected; broad write access to the Git
+  common directory is not an acceptable fix. Keep real-provider tests opt-in.
+- [ ] **High: Diagnose validation environment access separately from Git
+  permissions.** Reproduce Nix daemon access and `.devenv` write failures in
+  assigned workspaces, recording the command and selected policy. Report which
+  validation steps succeed or are blocked and document supported environment
+  entry without automatically widening permissions. Add opt-in NixOS regression
+  coverage for reproduced failures.
+- [ ] **High: Bound repeated context inspection.** Provide compact task and
+  assignment summaries in `prime`, with stable references for fetching full
+  descriptions and reports. Keep current task context, recovery provenance,
+  and actionable blockers visible after transitions and reconnects. Measure
+  serialized response sizes on a fixture with long reports and several
+  completed tasks, and enforce documented size bounds. Include repeated
+  bootstrap and serialized context in transcript-inspection measurements;
+  provide a concise route to current activity while retaining full transcripts.
+  Test human and JSON views and full-detail retrieval. The bounded `progress`
+  feed remains a lifecycle feed, not a substitute for current task context.
+- [ ] **Medium: Make recovery handoffs self-contained.** Expose the preserved
+  path and base commit, dirty, staged, and untracked paths, prior validation
+  evidence, and unfinished steps with references to their sources. Distinguish
+  agent-reported checks and next steps from recorded mechanical state. Test a
+  worker exit with unsubmitted staged artifacts, recovery into a fresh
+  worktree, and continuation through integration, validation, and task closure.
+  Verify that the source files and index survive unchanged and that the
+  continuation receives no writable ownership of the preserved workspace.
+- [ ] **Medium: Reduce client-side protocol bookkeeping.** Add client support
+  for separate progress and inbox cursors, page draining, acknowledgement of
+  handled messages, and mutation retries. Progress must never acknowledge
+  messages; uncertain retries must retain the original operation ID and
+  identical arguments. Test empty pages with `has_more`, reconnects, partial
+  message handling, and uncertain mutation outcomes before shortening
+  agent-facing instructions. Preserve explicit task acceptance and generation
+  checks.
+- [ ] **Medium: Document and test MCP bridge rediscovery after reconnect.**
+  Exercise a stale tool identifier followed by discovery of the current bridge
+  and `prime`, verifying the same run and agent identity with current session
+  authentication. Document the recovery steps and test that stale credentials
+  remain rejected. Distinguish restored tool access from automatic foreground
+  wake-up, which requires separate provider capability evidence.
+
 ### M7 gate
 
 - [ ] The full design criterion succeeds end to end, including the two-project
@@ -290,6 +346,13 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 
 ## Future work to scope
 
+- [ ] Scope an optional transfer helper for the
+  [research recovery handoff](docs/field-report-normreg-multi.md#3-recovery-preserved-work-but-required-a-manual-handoff).
+  Require an explicit selection of changes, identify conflicts before applying
+  them to the continuation's fresh workspace, and preserve the source files,
+  index, and ownership. Define the behavior in `DESIGN.md` before implementation,
+  with tests for conflicting changes, partial selection, and interrupted or
+  repeated transfers.
 - [ ] Design exclusive resource reservations for performance measurements: allow
   parallel implementation while serializing benchmark windows across Coterie
   runs on the same machine. Agents request and release reservations; Rust
