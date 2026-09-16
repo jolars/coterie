@@ -3643,6 +3643,66 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_integration_keeps_generation_and_target_motion_guards() {
+        for strategy in [
+            super::IntegrationStrategy::Rebase,
+            super::IntegrationStrategy::Merge,
+        ] {
+            let fixture = GitFixture::new();
+            let (mut backend, mut workspace) = fixture.materialized_workspace();
+            workspace.result_commit = workspace.base_commit.clone();
+            let plan = backend
+                .prepare_integration(&workspace, &fixture.project, 11, strategy)
+                .unwrap();
+            for stale in [
+                super::IntegrationPlan {
+                    run_id: RunId::generate(),
+                    ..plan.clone()
+                },
+                super::IntegrationPlan {
+                    generation: plan.generation + 1,
+                    ..plan.clone()
+                },
+            ] {
+                assert!(matches!(
+                    backend.integrate(&workspace, &fixture.project, &stale),
+                    Err(WorkspaceBackendError::IntegrationPlanMismatch { .. })
+                ));
+                assert_eq!(
+                    head_commit(&fixture.project.canonical_path),
+                    fixture.base
+                );
+            }
+            let new_target = commit_file(
+                &fixture.project.canonical_path,
+                "README.md",
+                "newer implementation\n",
+                "advance after preflight",
+            );
+            assert!(matches!(
+                backend.integrate(&workspace, &fixture.project, &plan),
+                Err(WorkspaceBackendError::UnexpectedTargetTip {
+                    expected,
+                    actual,
+                    ..
+                }) if expected == fixture.base && actual == new_target
+            ));
+            assert_eq!(
+                head_commit(&fixture.project.canonical_path),
+                new_target
+            );
+            assert_eq!(head_commit(&workspace.path), fixture.base);
+            assert_eq!(
+                fs::read_to_string(
+                    fixture.project.canonical_path.join("README.md")
+                )
+                .unwrap(),
+                "newer implementation\n"
+            );
+        }
+    }
+
+    #[test]
     fn guarded_integration_refuses_a_dirty_target_without_changing_it() {
         let fixture = GitFixture::new();
         let (backend, mut workspace) = fixture.materialized_workspace();
