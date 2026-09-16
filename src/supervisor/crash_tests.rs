@@ -211,6 +211,57 @@ fn crash_matrix_foreground_exit() {
 }
 
 #[test]
+fn foreground_exit_barrier_waits_for_process_absence() {
+    let fixture = Directory::new();
+    let executable = fixture.0.join("codex");
+    fs::write(&executable, PROCESS_PROVIDER).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+        .unwrap();
+    let scope = SessionScope {
+        run_id: RUN.parse().unwrap(),
+        agent_id: AgentId::generate(),
+        session_id: SessionId::generate(),
+        generation: 0,
+    };
+    let mut process = Command::new(&executable)
+        .arg("fixture")
+        .env("COTERIE_SESSION_ID", scope.session_id.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_file(&fixture.0.join("codex.launches"));
+    let provider_id = format!("process:{}", process.id());
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|threads| {
+        threads.spawn(|| {
+            started_tx.send(()).unwrap();
+            wait_for_foreground_process_absence(&provider_id, scope);
+            finished_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let live = finished_rx.recv_timeout(Duration::from_millis(100));
+        fs::write(fixture.0.join("codex.release"), "").unwrap();
+        wait_for_file(&fixture.0.join("codex.exited"));
+        let unreaped = finished_rx.recv_timeout(Duration::from_millis(100));
+        // The exit marker is insufficient: the adapter still sees an unreaped
+        // child. Reap it even if the barrier incorrectly returns early.
+        process.wait().unwrap();
+        assert!(matches!(
+            live,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(matches!(
+            unreaped,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+}
+
+#[test]
 fn crash_matrix_foreground_notification() {
     matrix("foreground-notification");
 }
@@ -716,6 +767,32 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
         });
     } else {
         let now = unix_timestamp().unwrap();
+        if case == "foreground-exit" {
+            // A crash before wait() leaves the released provider exiting
+            // asynchronously. Compare recovery passes only after the adapter
+            // can prove the same external state for both of them.
+            let sessions = fixture
+                .store
+                .transaction(|r| r.sessions(RUN.parse().unwrap()))
+                .unwrap();
+            for session in sessions
+                .into_iter()
+                .filter(|session| !session.state.is_terminal())
+            {
+                wait_for_foreground_process_absence(
+                    session
+                        .provider_session_id
+                        .as_deref()
+                        .expect("the exit fixture recorded startup"),
+                    SessionScope {
+                        run_id: session.run_id,
+                        agent_id: session.agent_id,
+                        session_id: session.id,
+                        generation: session.generation,
+                    },
+                );
+            }
+        }
         let mut foreground_sessions = AgentSessionSupervisor::new(
             crate::providers::CodexProvider::new([root
                 .join("codex")
@@ -1048,6 +1125,24 @@ fn process_child(root: PathBuf, mode: &str, case: &str) {
                 .count(),
             1
         );
+    }
+}
+
+fn wait_for_foreground_process_absence(provider_id: &str, scope: SessionScope) {
+    let provider = crate::providers::CodexProvider::new(["codex"]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if matches!(
+            provider.recover(provider_id, scope).unwrap(),
+            crate::providers::ProviderRecovery::Lost
+        ) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for foreground fixture {provider_id} to disappear"
+        );
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 

@@ -43,6 +43,13 @@ coordination files, and the provider's ledgers must also remain unchanged on
 the next recovery pass. Explicit command attempts retain their attempt
 accounting; polling an unchanged reconciliation result creates no new attempt.
 
+The foreground-exit scenario waits for the provider adapter to prove process
+absence before comparing recovery passes. A crash before the wrapper's wait
+can leave the released provider exiting asynchronously; comparing during that
+transition would mistake new evidence for a reconciliation side effect. A
+regression keeps a real fixture process alive and then unreaped to verify that
+neither its exit marker nor elapsed time satisfies this barrier.
+
 A recoverable state can require operator attention. For example, a crash during
 checkout can leave an index lock or a dirty target, and a crash between socket
 binding and permission changes can leave a socket that fails the private-mode
