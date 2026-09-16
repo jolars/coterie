@@ -15,6 +15,35 @@ pub(crate) mod injection {
 
     thread_local! {
         static PLAN: RefCell<Option<Plan>> = const { RefCell::new(None) };
+        static ACTION: RefCell<Option<Action>> = const { RefCell::new(None) };
+    }
+
+    struct Action {
+        name: &'static str,
+        callback: Box<dyn FnOnce()>,
+    }
+
+    pub(crate) struct ActionGuard;
+
+    impl Drop for ActionGuard {
+        fn drop(&mut self) {
+            ACTION.with_borrow_mut(|action| *action = None);
+        }
+    }
+
+    /// Changes a test-owned resource at an exact side-effect boundary.
+    pub(crate) fn on_point(
+        name: &'static str,
+        callback: impl FnOnce() + 'static,
+    ) -> ActionGuard {
+        ACTION.with_borrow_mut(|action| {
+            assert!(action.is_none());
+            *action = Some(Action {
+                name,
+                callback: Box::new(callback),
+            });
+        });
+        ActionGuard
     }
 
     struct Plan {
@@ -65,6 +94,16 @@ pub(crate) mod injection {
     }
 
     pub(super) fn point(name: &'static str) {
+        let action = ACTION.with_borrow_mut(|action| {
+            if action.as_ref().is_some_and(|action| action.name == name) {
+                action.take()
+            } else {
+                None
+            }
+        });
+        if let Some(action) = action {
+            (action.callback)();
+        }
         PLAN.with_borrow_mut(|plan| {
             let Some(plan) = plan else { return };
             if plan.ignore == Some(name) {

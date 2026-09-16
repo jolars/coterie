@@ -123,8 +123,10 @@ even though a fresh repository handle observed the original HEAD and no new
 commit there. The test therefore verifies both object readability and HEAD,
 rather than treating a returned ID as evidence of a successful commit. The
 positive control proves those same checks observe a successful commit outside
-the sandbox. This does not alter Coterie's integration path, which writes its
-prepared commit through the object database API.
+the sandbox. Coterie's integration path writes its prepared commit through the
+object database API and independently verifies publication. The
+[Git publication audit](git-publication.md) isolates the library error, tracks
+the upstream fix, and documents failed-write recovery coverage.
 
 The complete opt-in acceptance test passed in 268.51 seconds with three actual
 provider-launched workers. The normal contribution and recovered continuation

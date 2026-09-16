@@ -367,13 +367,17 @@ Scientific relevance and task scope remain agent responsibilities.
 These observations come from the September 15, 2026
 [linked-worktree reproduction](docs/linked-worktree-commits.md#recorded-reproduction).
 
-- [ ] **High: Verify Git commit publication after write failures.** Isolate
+- [x] **High: Verify Git commit publication after write failures.** Isolate
   libgit2 1.9.7 returning a commit ID after an object-write failure while a fresh
   repository handle observes the original HEAD. Add a regression that checks
   object readability and reference advancement, audit Coterie's Git write paths
   before recording observed success, and verify recovery and idempotent retries
   after failed writes. Track the upstream error-propagation fix and evaluate a
   dependency update without treating a returned ID as proof of publication.
+  The isolated 1.9.7 reproduction, fresh-handle publication checks, failed-write
+  recovery and retry coverage, and `task check` passed (537 tests). The
+  [write-path audit](docs/git-publication.md) tracks the upstream fix and the
+  decision to retain the current dependency until a fixed release is available.
 - [ ] **Medium: Diagnose missing Codex code-tool transcript entries.** Reproduce
   shell commands invoked through Codex's code tool being absent from
   `exec --json` command-execution events on 0.153.4. Compare emitted events with

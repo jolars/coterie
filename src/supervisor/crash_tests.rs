@@ -12,6 +12,9 @@ mod resubmit_tests;
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
 
+#[path = "git_publication_tests.rs"]
+mod git_publication_tests;
+
 const CHILD: &str = "supervisor::crash_tests::crash_child";
 const RUN: &str = "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const PROJECT: &str = "cp-01ARZ3NDEKTSV4RRFFQ69G5FAW";

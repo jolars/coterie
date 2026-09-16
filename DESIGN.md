@@ -1225,6 +1225,15 @@ reproduces the same commit IDs from the saved plan and original commits. Origina
 contribution commits remain recoverable through their owned reference even when
 rebasing gives the integrated commits new IDs.
 
+Git write return values alone do not establish observed success. Newly written
+integration objects must be readable through a fresh repository handle with
+their expected type and content hash. Before recording integration, a fresh
+handle must observe the planned target branch and exact resulting commit, its
+readable tree, and a clean index and working tree. Reconciliation applies the
+same checks after interrupted publication. Failed writes preserve durable
+intent and recoverable files; an ambiguous partial checkout remains unknown
+until the operator repairs it. See the [publication audit](docs/git-publication.md).
+
 ### Bounded current context and full details
 
 `prime [--after-task ID] [--limit 1..50]` returns compact task and assignment

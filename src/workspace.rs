@@ -704,7 +704,12 @@ impl GitWorkspace {
             || worktree_repository
                 .head()
                 .ok()
-                .and_then(|head| head.name().ok().map(str::to_owned))
+                .and_then(|head| {
+                    head.peel_to_commit()
+                        .and_then(|commit| commit.tree())
+                        .ok()?;
+                    head.name().ok().map(str::to_owned)
+                })
                 .as_deref()
                 != Some(workspace_reference(workspace).as_str())
         {
@@ -1349,14 +1354,7 @@ impl WorkspaceBackend for GitWorkspace {
             });
         }
         if actual_target == candidate.target_commit {
-            require_clean_repository(
-                &target,
-                &project.canonical_path,
-                WorkspaceBackendError::DirtyTarget {
-                    project_id: project.id,
-                    path: project.canonical_path.clone(),
-                },
-            )?;
+            candidate.verify_publication(project, plan)?;
             return Ok(candidate.record(workspace, project, plan));
         }
         if actual_target != expected_target {
@@ -1437,14 +1435,7 @@ impl WorkspaceBackend for GitWorkspace {
                 }
             })?;
         crate::fault::point("integration.reference.after");
-        require_clean_repository(
-            &target,
-            &project.canonical_path,
-            WorkspaceBackendError::DirtyTarget {
-                project_id: project.id,
-                path: project.canonical_path.clone(),
-            },
-        )?;
+        candidate.verify_publication(project, plan)?;
         Ok(candidate.record(workspace, project, plan))
     }
 }
@@ -1456,6 +1447,61 @@ struct IntegrationCandidate {
 }
 
 impl IntegrationCandidate {
+    fn verify_publication(
+        &self,
+        project: &ProjectRecord,
+        plan: &IntegrationPlan,
+    ) -> Result<(), WorkspaceBackendError> {
+        // The writer's cached objects and returned IDs do not prove publication.
+        let repository = GitWorkspace::source_repository(project)?;
+        let head =
+            repository
+                .head()
+                .map_err(|source| WorkspaceBackendError::Git {
+                    action: "observe the published integration reference",
+                    path: project.canonical_path.clone(),
+                    source,
+                })?;
+        let reference = head.name().map_err(|_| {
+            WorkspaceBackendError::AmbiguousTarget {
+                project_id: project.id,
+            }
+        })?;
+        if !head.is_branch() || reference != plan.target_reference {
+            return Err(WorkspaceBackendError::UnexpectedTargetReference {
+                project_id: project.id,
+                expected: plan.target_reference.clone(),
+                actual: reference.to_owned(),
+            });
+        }
+        let actual = head_oid(
+            &repository,
+            "read the published integration commit",
+            &project.canonical_path,
+        )?;
+        if actual != self.target_commit {
+            return Err(WorkspaceBackendError::UnexpectedTargetTip {
+                project_id: project.id,
+                expected: self.target_commit.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+        verify_published_object(
+            &repository,
+            self.target_commit,
+            ObjectType::Commit,
+        )?;
+        verify_published_object(&repository, self.tree_id, ObjectType::Tree)?;
+        require_clean_repository(
+            &repository,
+            &project.canonical_path,
+            WorkspaceBackendError::DirtyTarget {
+                project_id: project.id,
+                path: project.canonical_path.clone(),
+            },
+        )
+    }
+
     fn record(
         &self,
         workspace: &WorkspaceRecord,
@@ -1485,24 +1531,52 @@ impl IntegrationCandidate {
         repository: &Repository,
         workspace: &WorkspaceRecord,
     ) -> Result<(), WorkspaceBackendError> {
-        let Some(buffer) = self.commit_buffer.as_deref() else {
-            return Ok(());
-        };
-        let written = repository
-            .odb()
-            .and_then(|database| database.write(ObjectType::Commit, buffer))
-            .map_err(|source| WorkspaceBackendError::Git {
-                action: "write the integration commit",
-                path: repository.path().to_owned(),
-                source,
-            })?;
-        if written != self.target_commit {
-            return Err(WorkspaceBackendError::IntegrationPlanMismatch {
-                assignment_id: workspace.assignment_id,
-            });
+        if let Some(buffer) = self.commit_buffer.as_deref() {
+            let written = repository
+                .odb()
+                .and_then(|database| database.write(ObjectType::Commit, buffer))
+                .map_err(|source| WorkspaceBackendError::Git {
+                    action: "write the integration commit",
+                    path: repository.path().to_owned(),
+                    source,
+                })?;
+            if written != self.target_commit {
+                return Err(WorkspaceBackendError::IntegrationPlanMismatch {
+                    assignment_id: workspace.assignment_id,
+                });
+            }
+        }
+        verify_published_object(
+            repository,
+            self.target_commit,
+            ObjectType::Commit,
+        )
+    }
+}
+
+fn verify_published_object(
+    repository: &Repository,
+    oid: Oid,
+    kind: ObjectType,
+) -> Result<(), WorkspaceBackendError> {
+    let verify = || -> Result<(), git2::Error> {
+        let fresh = Repository::open(repository.path())?;
+        let database = fresh.odb()?;
+        let object = database.read(oid)?;
+        if object.kind() != kind
+            || Oid::hash_object(kind, object.data())? != oid
+        {
+            return Err(git2::Error::from_str(
+                "published object does not match its expected type and ID",
+            ));
         }
         Ok(())
-    }
+    };
+    verify().map_err(|source| WorkspaceBackendError::Git {
+        action: "verify Git object publication through a fresh repository",
+        path: repository.path().to_owned(),
+        source,
+    })
 }
 
 fn parse_workspace_commit(
@@ -1927,6 +2001,7 @@ fn integration_candidate(
             assignment_id: workspace.assignment_id,
         });
     }
+    crate::fault::point("integration.tree.before");
     let tree_id = index.write_tree_to(repository).map_err(|source| {
         WorkspaceBackendError::Git {
             action: "write the integration tree",
@@ -1934,6 +2009,8 @@ fn integration_candidate(
             source,
         }
     })?;
+    verify_published_object(repository, tree_id, ObjectType::Tree)?;
+    crate::fault::point("integration.tree.after");
     let tree = repository.find_tree(tree_id).map_err(|source| {
         WorkspaceBackendError::Git {
             action: "resolve the integration tree",
@@ -2019,7 +2096,10 @@ fn rebase_candidate(
                 assignment_id: workspace.assignment_id,
             });
         }
+        crate::fault::point("integration.tree.before");
         let tree_id = index.write_tree_to(repository).map_err(git_error)?;
+        verify_published_object(repository, tree_id, ObjectType::Tree)?;
+        crate::fault::point("integration.tree.after");
         let tree = repository.find_tree(tree_id).map_err(git_error)?;
         let buffer = repository
             .commit_create_buffer(
@@ -2074,6 +2154,7 @@ fn target_matches_candidate(
             source,
         }
     })?;
+    verify_published_object(repository, index_tree, ObjectType::Tree)?;
     if index_tree != candidate_tree {
         return Ok(false);
     }
@@ -2534,6 +2615,8 @@ pub(crate) enum WorkspaceError {
 
 #[cfg(test)]
 mod tests {
+    mod publication;
+
     use std::fs;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::os::unix::fs::PermissionsExt;
