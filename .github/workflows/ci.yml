@@ -52,6 +52,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - name: Run Versionary
         uses: jolars/versionary@v1.4.0
