@@ -46,6 +46,9 @@
               ./LICENSE-APACHE
               ./LICENSE-MIT
               ./README.md
+              # Opt-in validation tests embed the pinned development environment.
+              ./devenv.lock
+              ./devenv.yaml
               ./docs
               ./examples
               ./schemas
