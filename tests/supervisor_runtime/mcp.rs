@@ -13,6 +13,9 @@ mod validation_environment;
 #[path = "queue.rs"]
 mod queue;
 
+#[path = "rediscovery.rs"]
+mod rediscovery;
+
 pub(super) struct McpClient {
     child: Child,
     input: Option<ChildStdin>,
