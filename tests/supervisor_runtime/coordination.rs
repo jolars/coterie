@@ -60,10 +60,7 @@ fn coordinator_polls_multiple_completions_through_validated_closure() {
     let planner = captured_environment(&capture);
     let bootstrap = fs::read_to_string(&capture).unwrap();
     assert!(bootstrap.contains("If you are coordinating delegated work"));
-    assert!(
-        bootstrap
-            .contains("after=<progress_cursor>, limit=50, and wait_seconds=5")
-    );
+    assert!(bootstrap.contains("polling fallback with wait_seconds=5"));
     assert!(bootstrap.contains("`workspace_integrate` with assignment_id="));
     assert!(
         bootstrap.contains("`task_close` with task_id=<task_id> and summary=")
@@ -90,11 +87,7 @@ fn coordinator_polls_multiple_completions_through_validated_closure() {
         ));
         let bootstrap = fs::read_to_string(&capture).unwrap();
         assert!(bootstrap.contains("If you are coordinating delegated work"));
-        assert!(
-            bootstrap.contains(
-                "after=<progress_cursor>, limit=50, and wait_seconds=5"
-            )
-        );
+        assert!(bootstrap.contains("polling fallback with wait_seconds=5"));
         assert!(
             !bootstrap.contains("`workspace_integrate` with assignment_id=")
         );

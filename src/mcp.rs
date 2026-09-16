@@ -12,13 +12,14 @@ use crate::id::OperationId;
 use crate::protocol::RpcRequest;
 use crate::supervisor::{SupervisorClient, SupervisorError};
 
+mod client;
 #[cfg(test)]
 mod tests;
 mod tools;
 
 const MAXIMUM_MESSAGE_BYTES: usize = 1024 * 1024;
 const PROTOCOL_VERSION: &str = "2025-06-18";
-pub(crate) const INSTRUCTIONS: &str = "Use the Coterie MCP tools for all orchestration. Call prime at startup. If tools are deferred, discover them with tool_search using Coterie prime as the query. Call new_operation_id before each mutation and reuse that ID with identical arguments after an uncertain outcome. Tokens and caller identity are supplied by the bridge; never put them in tool arguments. Read inbox separately from progress. Shell commands retain their selected sandbox restrictions.";
+pub(crate) const INSTRUCTIONS: &str = "Use the Coterie MCP tools for all orchestration. Call prime at startup. If tools are deferred, discover them with tool_search using Coterie prime as the query. Call new_operation_id before each mutation. After uncertainty, call retry_mutation with that ID; if unavailable, repeat the original tool with the same ID and arguments. Tokens and caller identity are supplied by the bridge; never put them in tool arguments. Use poll for progress and pending inbox messages; inbox_handled acknowledges only explicitly handled messages. Shell commands retain their selected sandbox restrictions.";
 
 #[derive(Debug, Error)]
 pub(crate) enum McpError {
@@ -70,6 +71,28 @@ fn empty_object() -> Value {
 
 pub(crate) fn catalog() -> Vec<Value> {
     let mut catalog = tools::catalog();
+    for (name, description, schema, read_only) in [
+        (
+            "poll",
+            "Read progress and inbox together without acknowledging messages. Pass the returned cursor unchanged on the next call; omit it to replay from the start. Drains up to 16 progress pages and 100 changes, including empty pages with has_more. Repeat while has_more. Set include_progress=false without task:read. wait_seconds defaults to zero and is at most five.",
+            schemars::schema_for!(client::Poll),
+            true,
+        ),
+        (
+            "inbox_handled",
+            "Acknowledge explicitly handled message IDs. Partial handling is allowed for a prefix of the unacknowledged inbox; skipping an unhandled message fails safely. Reuse operation_id and identical arguments on retry.",
+            schemars::schema_for!(client::Handled),
+            false,
+        ),
+        (
+            "retry_mutation",
+            "Resend a saved mutation with its original operation ID and identical arguments. Available across supervisor reconnections in this bridge. If the bridge restarted or the saved successful request expired, repeat the original tool and arguments with the same ID.",
+            schemars::schema_for!(client::Retry),
+            false,
+        ),
+    ] {
+        catalog.push(json!({"name":name,"description":description,"inputSchema":schema,"annotations":{"readOnlyHint":read_only,"destructiveHint":!read_only,"idempotentHint":true,"openWorldHint":false}}));
+    }
     catalog.push(json!({
         "name": "new_operation_id",
         "description": "Allocate one operation ID before a mutation. Save it and reuse it with identical arguments when retrying an uncertain outcome.",
@@ -98,8 +121,9 @@ pub(crate) async fn run() -> Result<(), SupervisorError> {
 async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     mut input: R,
     mut output: W,
-    mut client: SupervisorClient,
+    client: SupervisorClient,
 ) -> Result<(), SupervisorError> {
+    let mut client = client::Client::new(client);
     let mut initialized = false;
     let mut ready = false;
     let mut registered_thread: Option<String> = None;
@@ -209,9 +233,9 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
                                 return Err(SupervisorError::InvalidProof);
                             }
                             if registered_thread.is_none()
-                                && matches!(request_reconnecting(&mut client, RpcRequest::BindForegroundNotifications {
+                                && matches!(client.request(RpcRequest::BindForegroundNotifications {
                                     operation_id: OperationId::generate(), thread_id: thread.to_owned(),
-                                }).await, Ok(crate::protocol::RpcResponse::ForegroundNotifications {
+                                }, None).await, Ok(crate::protocol::RpcResponse::ForegroundNotifications {
                                     availability: crate::protocol::notifications::NotificationAvailability::Automatic,
                                     ..
                                 }))
@@ -262,7 +286,7 @@ async fn request_reconnecting(
 }
 
 async fn call_tool(
-    client: &mut SupervisorClient,
+    client: &mut client::Client<SupervisorClient>,
     call: Call,
 ) -> Result<Value, (i32, &'static str)> {
     if call.name == "new_operation_id" {
@@ -276,9 +300,46 @@ async fn call_tool(
     let operation_id = call.arguments.get("operation_id").and_then(|value| {
         serde_json::from_value::<OperationId>(value.clone()).ok()
     });
-    let request = tools::request(&call.name, call.arguments)
-        .map_err(|message| (-32602, message))?;
-    match request_reconnecting(client, request).await {
+    let result = match call.name.as_str() {
+        "poll" => {
+            let arguments =
+                serde_json::from_value::<client::Poll>(call.arguments)
+                    .map_err(|_| {
+                        (-32602, "Arguments do not match this tool's schema.")
+                    })?;
+            match client.poll(arguments).await {
+                Ok(page) => {
+                    return Ok(tool_result(
+                        json!({"schema_version":1,"data":page}),
+                        false,
+                    ));
+                }
+                Err(error) => Err(error),
+            }
+        }
+        "inbox_handled" => {
+            let arguments =
+                serde_json::from_value::<client::Handled>(call.arguments)
+                    .map_err(|_| {
+                        (-32602, "Arguments do not match this tool's schema.")
+                    })?;
+            client.handled(arguments).await
+        }
+        "retry_mutation" => {
+            let arguments =
+                serde_json::from_value::<client::Retry>(call.arguments)
+                    .map_err(|_| {
+                        (-32602, "Arguments do not match this tool's schema.")
+                    })?;
+            client.retry(arguments.operation_id).await
+        }
+        _ => {
+            let request = tools::request(&call.name, call.arguments)
+                .map_err(|message| (-32602, message))?;
+            client.request(request, operation_id).await
+        }
+    };
+    match result {
         Ok(mut response) => {
             if let crate::protocol::RpcResponse::Prime { page } = &mut response
             {
@@ -288,6 +349,9 @@ async fn call_tool(
                 page.commands.extend([
                     "inbox_acknowledge".to_owned(),
                     "new_operation_id".to_owned(),
+                    "poll".to_owned(),
+                    "inbox_handled".to_owned(),
+                    "retry_mutation".to_owned(),
                 ]);
             }
             Ok(tool_result(

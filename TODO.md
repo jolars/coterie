@@ -341,14 +341,16 @@ Scientific relevance and task scope remain agent responsibilities.
   duplicates, and crash recovery. `task check` passed all 509 tests and gates;
   the opt-in real foreground test passed on Codex 0.153.4. See the
   [delivery contract and evidence](docs/codex-queue.md).
-- [ ] **Medium: Reduce client-side protocol bookkeeping.** Add client support
+- [x] **Medium: Reduce client-side protocol bookkeeping.** Add client support
   for separate progress and inbox cursors, page draining, acknowledgement of
   handled messages, and mutation retries. Progress must never acknowledge
   messages; uncertain retries must retain the original operation ID and
   identical arguments. Test empty pages with `has_more`, reconnects, partial
   message handling, and uncertain mutation outcomes before shortening
   agent-facing instructions. Preserve explicit task acceptance and generation
-  checks.
+  checks. MCP polling checkpoints, handled-message acknowledgements, and saved
+  mutation retries passed deterministic disconnect and partial-handling tests
+  and `task check` (531 tests). See the [client helper contract](docs/client-bookkeeping.md).
 - [x] **Medium: Document and test MCP bridge rediscovery after reconnect.**
   Exercise a stale tool identifier followed by discovery of the current bridge
   and `prime`, verifying the same run and agent identity with current session

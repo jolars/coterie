@@ -139,17 +139,12 @@ fn progress_agent_cli_requires_capability_and_preserves_operator_boundaries() {
         let bootstrap = fs::read_to_string(&capture).unwrap();
         assert!(bootstrap.contains("If you are coordinating delegated work"));
         assert!(bootstrap.contains("unless the user pauses"));
-        assert!(bootstrap.contains("`inbox` with after=<inbox_cursor>"));
-        assert!(
-            bootstrap
-                .contains("`inbox_acknowledge` and through=<inbox_cursor>")
-        );
+        assert!(bootstrap.contains("`poll`"));
+        assert!(bootstrap.contains("`inbox_handled` with their message_ids"));
         assert!(bootstrap.contains("prime.notifications"));
         assert!(bootstrap.contains("polling fallback"));
         assert_eq!(
-            bootstrap.contains(
-                "after=<progress_cursor>, limit=50, and wait_seconds=5"
-            ),
+            bootstrap.contains("polling fallback with wait_seconds=5"),
             allowed
         );
         assert!(

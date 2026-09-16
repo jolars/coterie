@@ -25,16 +25,19 @@ the run. It does not establish automatic foreground wake-up.
    the run and agent but replaces the session and advances its generation.
    Stop and report an unexpected identity instead of continuing the old work.
 4. Restore context from `prime` and fetch needed full task or assignment details.
-   Resume `progress` with its saved cursor only for the same run and caller;
-   drain every page while `has_more` is true, including empty pages. Read
-   `inbox` separately with its recipient-local cursor and acknowledge only
-   messages actually handled. Tool discovery and `prime` do not acknowledge
-   messages or accept submitted tasks.
+   Resume `poll` with its saved checkpoint only for the same run and agent;
+   repeat while `has_more` is true. It drains progress pages and returns pending
+   inbox messages with separate cursors. Use `inbox_handled` only after handling
+   a prefix of those messages. A restarted bridge has no saved mutation requests;
+   repeat an uncertain mutation's original tool with its original operation ID
+   and identical arguments. Tool discovery and `prime` do not acknowledge messages
+   or accept submitted tasks. See the [client helper contract](client-bookkeeping.md).
 5. Check `prime.notifications`. Only `automatic` establishes the current
    foreground's notification binding. For `unavailable`, `pending_binding`,
-   or `uncertain`, use the authorized polling fallback: `progress` with
-   `after=<saved-cursor>`, `limit=50`, and `wait_seconds=5`, followed by `inbox`
-   on each cycle. Report a delivery blocker when user action is needed. A
+   or `uncertain`, use the authorized polling fallback: `poll` with
+   `cursor=<saved-checkpoint>` and `wait_seconds=5`. Roles without `task:read`
+   use `include_progress=false` for inbox access. Report a delivery blocker
+   when user action is needed. A
    restored bridge cannot override an earlier pause or stop instruction.
 
 If discovery finds no current bridge, initialization fails, or the current

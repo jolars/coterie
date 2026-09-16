@@ -921,7 +921,7 @@ while work remains, unless the user pauses it. This is conditional guidance for
 every configured role, not a runtime classification of role names or an automatic
 assignment of coordination responsibility. The run's snapshotted capabilities
 select command guidance: `task:read` permits continued
-`progress` inspection and fallback polling with `after=<cursor>` and
+progress inspection through the MCP `poll` helper and fallback polling with
 `wait_seconds=5`, `workspace:integrate` permits
 explicit integration, and `task:close` permits closure after validation. Agents
 without a needed capability report the blocker to the user or an authorized
@@ -930,10 +930,14 @@ coordinator instead of attempting the restricted command.
 When `prime.notifications` is `automatic`, a coordinator may end its turn after
 handling actionable results and messages while waiting for delegated work.
 Otherwise it uses the polling fallback within its granted authority.
-Coordinators drain progress pages using `next_cursor` until `has_more` is false,
-read `inbox --after <cursor>` with its separate recipient-local cursor on each
-polling cycle, and acknowledge messages only after handling them. Progress
-cursors neither read nor acknowledge messages. Submissions must be carried
+Coordinators use `poll` to drain progress pages and inspect pending inbox messages
+with one replayable checkpoint containing separate cursors. Each call drains at
+most 16 progress pages or 100 changes; callers continue while `has_more` is true.
+Unhandled messages remain in later polls. The `inbox_handled` helper resolves
+explicitly handled message IDs and acknowledges only a prefix without unhandled
+gaps. Roles without `task:read` can poll only their inbox. The underlying
+`progress`, `inbox`, and explicit cursor acknowledgement tools remain available.
+Progress cursors neither read nor acknowledge messages. Submissions must be carried
 through review, integration where needed, validation, and accepted task closure
 within granted authority. Submission or provider exit alone is not acceptance.
 Agents report blockers requiring user action rather than silently ending a turn
@@ -1735,6 +1739,16 @@ return explicit errors rather than retrying through another channel.
 
 Each mutation requires an operation ID. `new_operation_id` allocates one, and
 bootstrap instructs agents to preserve it and identical arguments on retries.
+The bridge saves original typed mutation requests before dispatch and retries
+once after a transient connection failure, authenticating again against the
+same run. `retry_mutation` resends a retained request by operation ID through
+the supervisor's normal generation and capability checks. The bounded in-memory
+request cache never evicts unresolved requests. A restarted bridge requires the
+original tool arguments and operation ID. Read checkpoints survive bridge or
+session replacement for the same run and agent and grant no authority. The
+[client helper contract](docs/client-bookkeeping.md) specifies bounds, partial
+message handling, replay, and failure tests. No client database or new persistent
+schema is introduced.
 MCP uses bounded newline-delimited JSON-RPC, negotiated protocol version
 `2025-06-18`, typed input schemas, and matching redacted textual and structured
 results. The generated [tool catalog](schemas/mcp-tools-v1.json) is checked

@@ -81,13 +81,12 @@ fn coordination_bootstrap_follows_capabilities_for_any_role_name() {
                 bootstrap.contains("If you are coordinating delegated work")
             );
             assert!(bootstrap.contains("unless the user pauses"));
-            assert!(bootstrap.contains("`inbox` with after=<inbox_cursor>"));
+            assert!(bootstrap.contains("`poll`"));
             assert!(
-                bootstrap
-                    .contains("`inbox_acknowledge` and through=<inbox_cursor>")
+                bootstrap.contains("`inbox_handled` with their message_ids")
             );
             assert!(bootstrap.contains("only after handling"));
-            assert!(bootstrap.contains("separate"));
+            assert!(bootstrap.contains("never acknowledges"));
             assert!(bootstrap.contains("review"));
             assert!(bootstrap.contains("validation"));
             assert!(bootstrap.contains("Report blockers"));
@@ -96,9 +95,7 @@ fn coordination_bootstrap_follows_capabilities_for_any_role_name() {
             assert!(bootstrap.contains("may end your turn"));
             assert!(bootstrap.contains("polling fallback"));
             assert_eq!(
-                bootstrap.contains(
-                    "after=<progress_cursor>, limit=50, and wait_seconds=5"
-                ),
+                bootstrap.contains("polling fallback with wait_seconds=5"),
                 read
             );
             assert_eq!(bootstrap.contains("has_more"), read);
@@ -126,10 +123,7 @@ fn builtin_coordination_bootstrap_preserves_configured_instructions() {
     .unwrap();
     let bootstrap = bootstrap_instruction(RunId::generate(), "lead", &config);
     assert!(bootstrap.contains("Delegate independent implementation"));
-    assert!(
-        bootstrap
-            .contains("after=<progress_cursor>, limit=50, and wait_seconds=5")
-    );
+    assert!(bootstrap.contains("polling fallback with wait_seconds=5"));
     assert!(bootstrap.contains("`workspace_integrate` with assignment_id="));
     assert!(
         bootstrap.contains("`task_close` with task_id=<task_id> and summary=")

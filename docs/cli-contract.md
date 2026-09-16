@@ -1066,6 +1066,20 @@ MCP operations. Mutations require a `co-ULID` operation ID; call
 `new_operation_id` once and retain the ID for retries with identical arguments.
 That local tool returns the allocated `operation_id` directly.
 
+The MCP client helpers reduce cursor and retry bookkeeping. `poll` returns
+`schema_version=1` and `data` containing `cursor`, `changes`, `messages`,
+`has_more`, and `timed_out`. Pass its cursor unchanged on the next call; it
+keeps progress and inbox positions separate and retains unhandled messages.
+It drains up to 16 progress pages or 100 changes, including empty pages with
+`has_more`. Repeat while more remain. `inbox_handled` accepts an operation ID
+and handled message IDs, rejecting gaps before acknowledging a prefix.
+`retry_mutation` resends the saved original request by operation ID. After bridge
+replacement, repeat the original tool with the same ID and identical arguments.
+These helpers preserve task acceptance and generation checks. Their errors use
+the same diagnostic envelope. See the [full contract and tests](client-bookkeeping.md)
+for reconnect behavior and bounds. The CLI's explicit cursor commands retain
+their existing output shapes and exit codes.
+
 The explicitly opted-in checks use the installed Codex provider. The MCP
 startup/call check uses App Server to exercise Codex's MCP client without a
 model. The job check launches real workers through Coterie; the foreground check

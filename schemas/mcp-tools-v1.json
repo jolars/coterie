@@ -875,6 +875,160 @@
     {
       "annotations": {
         "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read progress and inbox together without acknowledging messages. Pass the returned cursor unchanged on the next call; omit it to replay from the start. Drains up to 16 progress pages and 100 changes, including empty pages with has_more. Repeat while has_more. Set include_progress=false without task:read. wait_seconds defaults to zero and is at most five.",
+      "inputSchema": {
+        "$defs": {
+          "AgentId": {
+            "pattern": "^cg-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "PollCursor": {
+            "additionalProperties": false,
+            "description": "A read checkpoint can be replayed after a lost response or bridge replacement.\nIt grants no authority and never represents a durable acknowledgement.",
+            "properties": {
+              "agent_id": {
+                "$ref": "#/$defs/AgentId"
+              },
+              "inbox": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "progress": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "run_id": {
+                "$ref": "#/$defs/RunId"
+              }
+            },
+            "required": [
+              "run_id",
+              "agent_id",
+              "inbox"
+            ],
+            "type": "object"
+          },
+          "RunId": {
+            "pattern": "^cr-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/PollCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "include_progress": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "wait_seconds": {
+            "format": "uint8",
+            "maximum": 5,
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "title": "Poll",
+        "type": "object"
+      },
+      "name": "poll"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Acknowledge explicitly handled message IDs. Partial handling is allowed for a prefix of the unacknowledged inbox; skipping an unhandled message fails safely. Reuse operation_id and identical arguments on retry.",
+      "inputSchema": {
+        "$defs": {
+          "MessageId": {
+            "pattern": "^cm-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "message_ids": {
+            "items": {
+              "$ref": "#/$defs/MessageId"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          }
+        },
+        "required": [
+          "operation_id",
+          "message_ids"
+        ],
+        "title": "Handled",
+        "type": "object"
+      },
+      "name": "inbox_handled"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Resend a saved mutation with its original operation ID and identical arguments. Available across supervisor reconnections in this bridge. If the bridge restarted or the saved successful request expired, repeat the original tool and arguments with the same ID.",
+      "inputSchema": {
+        "$defs": {
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          }
+        },
+        "required": [
+          "operation_id"
+        ],
+        "title": "Retry",
+        "type": "object"
+      },
+      "name": "retry_mutation"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": true

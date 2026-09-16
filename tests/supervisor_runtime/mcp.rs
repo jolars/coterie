@@ -16,6 +16,9 @@ mod queue;
 #[path = "rediscovery.rs"]
 mod rediscovery;
 
+#[path = "client_bookkeeping.rs"]
+mod client_bookkeeping;
+
 pub(super) struct McpClient {
     child: Child,
     input: Option<ChildStdin>,
