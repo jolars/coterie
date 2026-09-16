@@ -1,6 +1,8 @@
 {
   "schema_version": 1,
   "data": {
+    "session": null,
+    "notifications": "unavailable",
     "identity": {
       "run_id": "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV",
       "channel": "operator",

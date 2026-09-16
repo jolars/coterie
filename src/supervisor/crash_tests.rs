@@ -206,6 +206,11 @@ fn crash_matrix_foreground_exit() {
 }
 
 #[test]
+fn crash_matrix_foreground_notification() {
+    matrix("foreground-notification");
+}
+
+#[test]
 fn crash_matrix_workspace_recovery() {
     recovery_matrix("spawn", "workspace.reference.after");
 }
@@ -240,8 +245,10 @@ fn crash_matrix_covers_all_declared_boundaries() {
         include_str!("session.rs"),
         include_str!("projects.rs"),
         include_str!("idle.rs"),
+        include_str!("notifications.rs"),
         include_str!("recovery.rs"),
         include_str!("../providers.rs"),
+        include_str!("../providers/notifications.rs"),
         include_str!("../project.rs"),
         include_str!("../private_fs.rs"),
         include_str!("../workspace.rs"),
@@ -290,6 +297,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "malformed-process",
         "foreground",
         "foreground-exit",
+        "foreground-notification",
     ] {
         let fixture = Directory::new();
         child(&fixture.0, case, "exercise", None, 0);
@@ -643,6 +651,61 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
                 )
                 .unwrap();
             }
+            if case == "foreground-notification" {
+                let queue = crate::providers::notifications::CodexQueue::new(
+                    &[root.join("codex").to_str().unwrap().into()],
+                    &root.join("project"),
+                    provider.foreground_process_identity(&handle).unwrap(),
+                );
+                fixture
+                    .store
+                    .transaction(|r| {
+                        r.enable_notifications(scope)?;
+                        assert!(r.bind_notifications(
+                            scope,
+                            "01234567-89ab-cdef-0123-456789abcdef"
+                        )?);
+                        Ok(())
+                    })
+                    .unwrap();
+                send_message(
+                    &mut fixture.store,
+                    run_id,
+                    &AuthenticatedCaller::Operator,
+                    OperationId::generate(),
+                    agent.id.to_string(),
+                    "Private report.".into(),
+                    None,
+                )
+                .unwrap();
+                injection::arm(&root.join("trace"), boundary);
+                let RpcResponse::ForegroundNotificationClaimed {
+                    claim: Some(claim),
+                } = notifications::execute(
+                    &mut fixture.store,
+                    run_id,
+                    &AuthenticatedCaller::Operator,
+                    RpcRequest::ClaimForegroundNotification {
+                        operation_id: OperationId::generate(),
+                        scope,
+                    },
+                    None,
+                )
+                .unwrap()
+                else {
+                    panic!("expected a notification claim");
+                };
+                let observed =
+                    notifications::attempt(&queue, scope, &claim).await;
+                notifications::execute(
+                    &mut fixture.store,
+                    run_id,
+                    &AuthenticatedCaller::Operator,
+                    observed,
+                    None,
+                )
+                .unwrap();
+            }
             injection::disarm();
         });
     } else {
@@ -667,6 +730,32 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
                 LifecycleState::Unknown | LifecycleState::Exited
             ));
             assert_eq!(session.process_owner, SessionProcessOwner::Foreground);
+            if case == "foreground-notification" {
+                let scope = SessionScope {
+                    run_id: session.run_id,
+                    agent_id: session.agent_id,
+                    session_id: session.id,
+                    generation: session.generation,
+                };
+                assert!(
+                    !fixture
+                        .store
+                        .transaction(|r| r.notification_pending(scope, true))
+                        .unwrap()
+                );
+                assert!(
+                    fixture
+                        .store
+                        .transaction(|r| r.claim_notification(
+                            scope,
+                            OperationId::generate(),
+                            true,
+                            now
+                        ))
+                        .unwrap()
+                        .is_none()
+                );
+            }
         }
         let before = fixture
             .store
@@ -709,11 +798,23 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
         fs::read_to_string(root.join("project/AGENTS.md")).unwrap(),
         "Preserve project instructions.\n"
     );
+    if case == "foreground-notification" {
+        if trace.contains("notification.queue.spawned") {
+            wait_for_file(&root.join("codex.queued"));
+        }
+        let queued =
+            fs::read_to_string(root.join("codex.queued")).unwrap_or_default();
+        assert!(
+            queued.lines().count() <= 1,
+            "recovery duplicated the provider effect"
+        );
+    }
 }
 
 // This executable exercises the actual Codex process adapter without a model,
 // network, or credentials. Its independent ledger detects repeated launches.
 const PROCESS_PROVIDER: &str = r#"#!/bin/sh
+if [ "$1" = "queue" ]; then printf 'queued\n' >> "$0.queued"; exit 0; fi
 if [ "${3-}" = "mcp" ] && [ "${4-}" = "get" ]; then printf '%s\n' '{"enabled":true,"transport":{"type":"stdio","command":"coterie","args":["__mcp"],"env_vars":["COTERIE_TOKEN"]}}'; exit 0; fi
 if [ "$1" = "--version" ]; then printf 'codex-cli 0.153.4\n'; exit 0; fi
 if [ "$1" = "--help" ] || [ "${2-}" = "--help" ]; then

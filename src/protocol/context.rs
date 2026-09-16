@@ -12,6 +12,8 @@ pub(crate) const PREVIEW_BYTES: usize = 512;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct PrimePage {
+    pub(crate) session: Option<Box<crate::auth::SessionScope>>,
+    pub(crate) notifications: super::notifications::NotificationAvailability,
     pub(crate) identity: super::CallerSummary,
     pub(crate) projects: Vec<super::ProjectSummary>,
     pub(crate) peers: Vec<super::AgentSummary>,

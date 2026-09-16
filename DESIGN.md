@@ -921,11 +921,15 @@ while work remains, unless the user pauses it. This is conditional guidance for
 every configured role, not a runtime classification of role names or an automatic
 assignment of coordination responsibility. The run's snapshotted capabilities
 select command guidance: `task:read` permits continued
-`progress` polling with `after=<cursor>` and `wait_seconds=5`, `workspace:integrate` permits
+`progress` inspection and fallback polling with `after=<cursor>` and
+`wait_seconds=5`, `workspace:integrate` permits
 explicit integration, and `task:close` permits closure after validation. Agents
 without a needed capability report the blocker to the user or an authorized
 coordinator instead of attempting the restricted command.
 
+When `prime.notifications` is `automatic`, a coordinator may end its turn after
+handling actionable results and messages while waiting for delegated work.
+Otherwise it uses the polling fallback within its granted authority.
 Coordinators drain progress pages using `next_cursor` until `has_more` is false,
 read `inbox --after <cursor>` with its separate recipient-local cursor on each
 polling cycle, and acknowledge messages only after handling them. Progress
@@ -935,10 +939,36 @@ within granted authority. Submission or provider exit alone is not acceptance.
 Agents report blockers requiring user action rather than silently ending a turn
 with work awaiting coordination.
 
-Durable messages and progress waits do not resume an idle foreground provider
-or start another turn after one ends. An agent must remain active to poll.
-Automatic wake-up requires separate, capability-probed provider support; ordinary
-message persistence, live delivery, and progress polling do not establish it.
+The Codex adapter capability-probes `queue --help` and delivers automatic
+foreground notifications through `codex queue`. Durable inbox messages and,
+with `task:read`, external worker lifecycle changes trigger delivery. A role's
+own mutations do not trigger a notification loop. No role name acquires special
+runtime semantics.
+
+The foreground wrapper retains the configured command, working directory,
+provider environment, and unreaped child. The host MCP bridge binds Codex's
+`_meta.threadId` to the current authenticated session generation. The supervisor
+also verifies the Unix socket peer's Linux process identity: the bridge must
+be the Coterie executable launched directly by the recorded foreground process.
+Tool arguments, session names, working-directory searches, and agent RPC
+credentials alone cannot choose a destination. Bindings are immutable.
+
+The supervisor coalesces pending changes, commits a delivery attempt, and
+records the wrapper's queue observation. Delivery never acknowledges an inbox
+message or accepts a task. Queue input contains only a fixed notice with the
+run, session, and generation; worker content stays in authenticated tool results.
+The recipient compares the notice with the authenticated scope in `prime.session`.
+The notice preserves earlier user restrictions, pauses, and stop instructions.
+It cannot authorize new work or resume paused work.
+
+The wrapper reauthenticates after supervisor recovery and may restore its
+owned child's process observation. The MCP bridge reconnects using the same
+agent credentials and operation IDs. Delivery stops for exited, stale,
+unobserved, or stopping sessions. Queue attempts have a bounded timeout. Because
+the queue CLI has no caller-supplied idempotency key, an uncertain attempt is
+not retransmitted: automatic delivery becomes `uncertain`, and the operator is
+directed to the inbox and polling fallback. A fresh foreground generation can
+establish a new binding. See the [delivery contract and tests](docs/codex-queue.md).
 
 Dynamic context is obtained through `coterie prime` so agents can recover after
 compaction, provider resume, or a fresh session. Every agent process receives an

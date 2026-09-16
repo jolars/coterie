@@ -61,7 +61,7 @@ struct Call {
     #[serde(default = "empty_object")]
     arguments: Value,
     #[serde(rename = "_meta", default)]
-    _meta: Option<Value>,
+    meta: Option<Value>,
 }
 
 fn empty_object() -> Value {
@@ -102,6 +102,7 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
 ) -> Result<(), SupervisorError> {
     let mut initialized = false;
     let mut ready = false;
+    let mut registered_thread: Option<String> = None;
     loop {
         let mut frame = Vec::new();
         let count = (&mut input)
@@ -191,7 +192,33 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
             }
             "tools/call" => {
                 match serde_json::from_value::<Call>(message.params) {
-                    Ok(call) => call_tool(&mut client, call).await,
+                    Ok(call) => {
+                        if let Some(thread) = call
+                            .meta
+                            .as_ref()
+                            .and_then(|meta| meta.get("threadId"))
+                            .and_then(Value::as_str)
+                            && crate::protocol::notifications::valid_thread_id(
+                                thread,
+                            )
+                        {
+                            if registered_thread
+                                .as_deref()
+                                .is_some_and(|id| id != thread)
+                            {
+                                return Err(SupervisorError::InvalidProof);
+                            }
+                            if registered_thread.is_none()
+                                && matches!(request_reconnecting(&mut client, RpcRequest::BindForegroundNotifications {
+                                    operation_id: OperationId::generate(), thread_id: thread.to_owned(),
+                                }).await, Ok(crate::protocol::RpcResponse::ForegroundNotifications {
+                                    availability: crate::protocol::notifications::NotificationAvailability::Automatic,
+                                    ..
+                                }))
+                            { registered_thread = Some(thread.to_owned()); }
+                        }
+                        call_tool(&mut client, call).await
+                    }
                     Err(_) => Err((-32602, "Invalid tool-call parameters.")),
                 }
             }
@@ -207,6 +234,31 @@ async fn serve<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
 
 fn valid_id(id: &Value) -> bool {
     id.is_string() || id.is_i64() || id.is_u64()
+}
+
+async fn request_reconnecting(
+    client: &mut SupervisorClient,
+    request: RpcRequest,
+) -> Result<crate::protocol::RpcResponse, SupervisorError> {
+    let result = client.request(request.clone()).await;
+    if matches!(&result, Err(error) if error.is_transient_connection_failure())
+    {
+        let Some(mut replacement) =
+            crate::supervisor::connect_from_agent_environment().await?
+        else {
+            return result;
+        };
+        if replacement.run_id() != client.run_id() {
+            return Err(SupervisorError::InvalidProof);
+        }
+        replacement.request(RpcRequest::Whoami).await?;
+        // Mutations retain their original operation IDs and arguments. A lost
+        // response therefore cannot turn reconnection into a second mutation.
+        let result = replacement.request(request).await;
+        *client = replacement;
+        return result;
+    }
+    result
 }
 
 async fn call_tool(
@@ -226,7 +278,7 @@ async fn call_tool(
     });
     let request = tools::request(&call.name, call.arguments)
         .map_err(|message| (-32602, message))?;
-    match client.request(request).await {
+    match request_reconnecting(client, request).await {
         Ok(mut response) => {
             if let crate::protocol::RpcResponse::Prime { page } = &mut response
             {

@@ -10,6 +10,9 @@ mod commit_handoff;
 #[path = "validation_environment.rs"]
 mod validation_environment;
 
+#[path = "queue.rs"]
+mod queue;
+
 pub(super) struct McpClient {
     child: Child,
     input: Option<ChildStdin>,

@@ -332,6 +332,15 @@ Scientific relevance and task scope remain agent responsibilities.
   Recovery snapshots and sourced reports passed staged-artifact continuation,
   schema upgrades, crash tests, and `task check`. See the
   [handoff guide](docs/recovery-handoffs.md).
+- [x] **High: Deliver foreground wake-up notifications through Codex queue.**
+  Capability-probed delivery binds provider metadata to the authenticated
+  foreground generation and verifies the host bridge's process provenance.
+  Durable attempts coalesce updates without promoting worker content, changing
+  user authority, acknowledging inbox messages, or accepting tasks. Tests cover
+  busy and ended turns, stale bindings, shutdown, reconnects, command failure,
+  duplicates, and crash recovery. `task check` passed all 509 tests and gates;
+  the opt-in real foreground test passed on Codex 0.153.4. See the
+  [delivery contract and evidence](docs/codex-queue.md).
 - [ ] **Medium: Reduce client-side protocol bookkeeping.** Add client support
   for separate progress and inbox cursors, page draining, acknowledgement of
   handled messages, and mutation retries. Progress must never acknowledge

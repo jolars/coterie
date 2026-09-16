@@ -1,6 +1,7 @@
 //! Versioned local RPC framing and ownership handshakes.
 
 pub(crate) mod context;
+pub(crate) mod notifications;
 pub(crate) mod progress;
 pub(crate) mod recovery;
 
@@ -18,7 +19,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 12;
+pub(crate) const PROTOCOL_VERSION: u16 = 13;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -74,6 +75,27 @@ pub(crate) enum RequestAuthentication {
 #[serde(tag = "method", content = "parameters", rename_all = "snake_case")]
 pub(crate) enum RpcRequest {
     Ping,
+    EnableForegroundNotifications {
+        operation_id: OperationId,
+        scope: crate::auth::SessionScope,
+    },
+    BindForegroundNotifications {
+        operation_id: OperationId,
+        thread_id: String,
+    },
+    ForegroundNotificationPending {
+        scope: crate::auth::SessionScope,
+    },
+    ClaimForegroundNotification {
+        operation_id: OperationId,
+        scope: crate::auth::SessionScope,
+    },
+    ObserveForegroundNotification {
+        operation_id: OperationId,
+        delivery_id: OperationId,
+        scope: crate::auth::SessionScope,
+        outcome: notifications::QueueOutcome,
+    },
     LaunchForeground {
         operation_id: OperationId,
         token: AgentToken,
@@ -267,6 +289,13 @@ pub(crate) enum RpcResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub(crate) enum RpcResponse {
+    ForegroundNotifications {
+        availability: notifications::NotificationAvailability,
+        pending: bool,
+    },
+    ForegroundNotificationClaimed {
+        claim: Option<notifications::NotificationClaim>,
+    },
     Pong {
         run_id: RunId,
     },
@@ -685,7 +714,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 12,
+                    "protocol_version": 13,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -799,7 +828,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 12,
+                    "protocol_version": 13,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

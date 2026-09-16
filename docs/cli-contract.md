@@ -38,8 +38,12 @@ accepted task closure, and tells them to report blockers requiring user action.
 Roles lacking monitoring, integration, or closure authority must request help
 from the user or an authorized coordinator for those actions.
 
-While coordinating, poll `progress --after <progress_cursor> --wait 5 --json`
-when `task:read` is granted. Start without `--after`, save each `next_cursor`,
+Check `prime.notifications` while coordinating. When it is `automatic`, handle
+current results and inbox messages, then end the turn if only waiting for
+delegated work. Coterie queues a notification when new durable updates arrive.
+Use `progress` with `--wait 0` to inspect updates. Otherwise, use the fallback
+`progress --after <progress_cursor> --wait 5 --json` when `task:read` is granted.
+Start without `--after`, save each `next_cursor`,
 and drain pages while `has_more` is true, including empty pages. On each cycle,
 including after a timeout, read `inbox --after <inbox_cursor> --json` using its
 separate cursor (initially 0), handle the messages, then acknowledge the handled
@@ -48,10 +52,12 @@ current tasks with `prime` and full result details with `task show`; provider ex
 not task acceptance. Integrate with `workspace:integrate` and close with
 `task:close` only after their respective review and validation conditions pass.
 
-Durable messages and progress waits do not resume an idle foreground provider
-or start a new turn after one ends. Continued polling requires an active agent.
-Automatic wake-up requires separate, capability-probed provider support; neither
-ordinary message delivery nor a progress wait provides it.
+Automatic delivery uses capability-probed [Codex queue support](codex-queue.md).
+Only a fixed notification enters the provider conversation; worker content
+remains in the authenticated inbox and task views. Notifications preserve user
+pauses and restrictions and never grant authority or acknowledge messages.
+If queue delivery fails or becomes uncertain, Coterie suspends automatic
+delivery for that session and reports the polling fallback.
 
 Startup and recovery use a durable snapshot of the resolved run configuration.
 An incompatible file or operator override produces `invalid_configuration`
@@ -285,6 +291,14 @@ displayed task page, not a complete run-wide ready queue.
 
 Text previews contain `text`, `total_bytes`, and `truncated`. Full details remain
 available through `task show` and `assignment show` using each summary's ID.
+`notifications` describes this caller's foreground delivery: `automatic`,
+`pending_binding`, `unavailable`, or `uncertain`. Operator and background
+callers report `unavailable`. A queue success means the provider accepted the
+notice; it does not prove that the agent handled the update. `uncertain`
+requires manual inbox/progress inspection or a fresh foreground session.
+`session` contains the authenticated agent's `run_id`, `agent_id`, `session_id`,
+and `generation`; it is null for operator callers. Compare this scope with a
+queued notification before acting, and ignore notices from another generation.
 `unresolved_dependencies` contains up to eight IDs, with `omitted_dependencies`
 counting the rest; task details include the complete unresolved list.
 `next_action` identifies a recorded prerequisite such as `wait_for_dependencies`,

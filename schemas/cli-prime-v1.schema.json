@@ -290,6 +290,15 @@
         "none"
       ]
     },
+    "NotificationAvailability": {
+      "type": "string",
+      "enum": [
+        "unavailable",
+        "pending_binding",
+        "automatic",
+        "uncertain"
+      ]
+    },
     "OperationId": {
       "type": "string",
       "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -367,6 +376,9 @@
             }
           ]
         },
+        "notifications": {
+          "$ref": "#/$defs/NotificationAvailability"
+        },
         "peers": {
           "type": "array",
           "items": {
@@ -391,6 +403,16 @@
             "$ref": "#/$defs/RecoveryBrief"
           }
         },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "tasks": {
           "type": "array",
           "items": {
@@ -399,6 +421,8 @@
         }
       },
       "required": [
+        "session",
+        "notifications",
         "identity",
         "projects",
         "peers",
@@ -630,6 +654,31 @@
     "SessionId": {
       "type": "string",
       "pattern": "^cs-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "SessionScope": {
+      "description": "The full scope that fences a session credential.",
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "generation": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": [
+        "run_id",
+        "agent_id",
+        "session_id",
+        "generation"
+      ]
     },
     "TaskBrief": {
       "description": "The ID is the stable reference accepted by `task show` / `task_show`.",

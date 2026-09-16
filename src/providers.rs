@@ -1,6 +1,7 @@
 //! Out-of-process agent harness adapters.
 
 mod mcp;
+pub(crate) mod notifications;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::env;
@@ -78,6 +79,7 @@ pub(crate) enum ProviderCapability {
     Interrupt,
     Termination,
     TranscriptStreaming,
+    QueuedNotifications,
 }
 
 impl fmt::Display for ProviderCapability {
@@ -95,6 +97,7 @@ impl fmt::Display for ProviderCapability {
             Self::Interrupt => "interrupt",
             Self::Termination => "termination",
             Self::TranscriptStreaming => "transcript streaming",
+            Self::QueuedNotifications => "queued foreground notifications",
         })
     }
 }
@@ -1164,6 +1167,17 @@ impl CodexProvider {
         )?;
         if mcp::supports_transport(&output.stdout) {
             capabilities.insert(ProviderCapability::SupervisorRpc);
+        }
+        if interactive_help
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("queue"))
+            && self
+                .command_output(&["queue", "--help"], "queue capability")
+                .is_ok_and(|output| {
+                    notifications::supports_queue(&output.stdout)
+                })
+        {
+            capabilities.insert(ProviderCapability::QueuedNotifications);
         }
 
         Ok(ProviderProbe {

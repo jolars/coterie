@@ -144,9 +144,8 @@ fn progress_agent_cli_requires_capability_and_preserves_operator_boundaries() {
             bootstrap
                 .contains("`inbox_acknowledge` and through=<inbox_cursor>")
         );
-        assert!(
-            bootstrap.contains("do not resume an idle foreground provider")
-        );
+        assert!(bootstrap.contains("prime.notifications"));
+        assert!(bootstrap.contains("polling fallback"));
         assert_eq!(
             bootstrap.contains(
                 "after=<progress_cursor>, limit=50, and wait_seconds=5"

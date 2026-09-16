@@ -4,6 +4,7 @@ mod configuration;
 mod context;
 mod diagnostics;
 mod foreground;
+mod notifications;
 mod progress;
 mod recovery;
 pub(crate) mod resubmit;
@@ -129,6 +130,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 17,
         name: "recovery_handoffs",
         sql: include_str!("state/migrations/0017_recovery_handoffs.sql"),
+    },
+    Migration {
+        version: 18,
+        name: "foreground_notifications",
+        sql: include_str!("state/migrations/0018_foreground_notifications.sql"),
     },
 ];
 
@@ -4052,6 +4058,8 @@ mod tests {
             "configuration_snapshots",
             "events",
             "foreground_process_identity",
+            "foreground_notifications",
+            "notification_deliveries",
             "messages",
             "operations",
             "projects",

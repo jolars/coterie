@@ -80,6 +80,35 @@ impl InheritedInput {
 }
 
 impl ForegroundIdentity {
+    /// MCP metadata is accepted only from the host bridge launched directly by
+    /// this provider. Agent-selected RPC payloads do not establish provenance.
+    pub(crate) fn owns_bridge(&self, process_id: u32) -> bool {
+        let check = || -> io::Result<bool> {
+            let provider = process_directory(self.process_id)?;
+            if self.verify(&provider)?.is_some() {
+                return Ok(false);
+            }
+            let bridge = process_directory(process_id)?;
+            let stat = process_stat(&bridge)?;
+            let executable: File = openat(
+                &bridge,
+                "exe",
+                OFlag::O_PATH | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )?
+            .into();
+            let executable = executable.metadata()?;
+            let current = std::fs::metadata(std::env::current_exe()?)?;
+            Ok(stat.parent_id == self.process_id
+                && !stat.exited
+                && bridge.metadata()?.uid() == self.user_id
+                && executable.dev() == current.dev()
+                && executable.ino() == current.ino()
+                && self.verify(&provider)?.is_none())
+        };
+        check().unwrap_or(false)
+    }
+
     /// The caller retains the unreaped child, so this PID cannot yet be reused.
     pub(crate) fn capture_child(
         process_id: u32,

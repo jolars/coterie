@@ -5,6 +5,7 @@ mod commit_handoff;
 mod context;
 mod doctor;
 mod idle;
+mod notifications;
 mod progress;
 mod projects;
 mod recovery;
@@ -564,6 +565,17 @@ async fn launch_foreground_codex(
         session_id,
         generation,
     };
+    let queue_supported = probe
+        .capabilities
+        .contains(&ProviderCapability::QueuedNotifications);
+    if queue_supported {
+        client
+            .request(RpcRequest::EnableForegroundNotifications {
+                operation_id: OperationId::generate(),
+                scope,
+            })
+            .await?;
+    }
     let socket_path = checked_socket_path(directories, run_id)?;
     let specification = LaunchSpecification {
         scope,
@@ -598,16 +610,40 @@ async fn launch_foreground_codex(
             identity: provider.foreground_process_identity(&session),
         })
         .await;
+    let queue = if queue_supported {
+        provider
+            .foreground_process_identity(&session)
+            .map(|identity| {
+                crate::providers::notifications::CodexQueue::new(
+                    &binding.command,
+                    &project.canonical_path,
+                    identity,
+                )
+            })
+    } else {
+        None
+    };
     let termination = async {
         if startup.is_ok() {
-            wait_for_foreground_termination(
+            let stop = wait_for_foreground_termination(
                 project.clone(),
                 directories.clone(),
                 run_id,
                 scope,
                 overrides.clone(),
-            )
-            .await;
+            );
+            if let Some(queue) = &queue {
+                tokio::select! {
+                    biased;
+                    () = stop => (),
+                    () = async {
+                        notifications::deliver(project, directories, scope, overrides, queue).await;
+                        std::future::pending::<()>().await;
+                    } => (),
+                }
+            } else {
+                stop.await;
+            }
         }
     };
     let (status, termination_requested) = match provider
@@ -2208,6 +2244,12 @@ fn record_operation_reconciliation(
 }
 
 enum SupervisorCommand {
+    BindForegroundNotifications {
+        caller: AuthenticatedCaller,
+        request: RpcRequest,
+        peer_pid: Option<u32>,
+        response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
+    },
     ProjectHandshake {
         request: HandshakeRequest,
         response: oneshot::Sender<Result<ActiveRunEntry, RpcFailure>>,
@@ -2255,6 +2297,16 @@ fn handle_command<P: Provider, B: WorkspaceBackend>(
     foreground: &mut ForegroundCoordination,
 ) {
     match command {
+        SupervisorCommand::BindForegroundNotifications {
+            caller,
+            request,
+            peer_pid,
+            response,
+        } => {
+            let _disconnected = response.send(notifications::execute(
+                store, run_id, &caller, request, peer_pid,
+            ));
+        }
         SupervisorCommand::ProjectHandshake { response, .. } => {
             let _disconnected = response.send(Err(conflict(
                 "project handshake requires the lease-owning runtime",
@@ -2830,6 +2882,13 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
     }
     match request {
         RpcRequest::Ping => Ok(RpcResponse::Pong { run_id }),
+        request @ (RpcRequest::EnableForegroundNotifications { .. }
+        | RpcRequest::BindForegroundNotifications { .. }
+        | RpcRequest::ForegroundNotificationPending { .. }
+        | RpcRequest::ClaimForegroundNotification { .. }
+        | RpcRequest::ObserveForegroundNotification { .. }) => {
+            notifications::execute(store, run_id, caller, request, None)
+        }
         RpcRequest::LaunchForeground {
             operation_id,
             token,
@@ -5635,7 +5694,7 @@ fn bootstrap_instruction(
     );
     if allowed("task", "read") {
         bootstrap.push_str(
-            "\nCall `progress` initially with after=null, limit=50, and wait_seconds=0, then with after=<progress_cursor>, limit=50, and wait_seconds=5. Save each next_cursor and drain pages while has_more is true, even when changes is empty. Inspect bounded current tasks with `prime`; fetch full descriptions and results with `task_show`, and full reports or recovery provenance with `assignment_show`. Detail continuations retain revision and next_cursor. For recent raw activity use `logs` with tail=true and limit=4096 when authorized; full transcripts remain available from after=0.",
+            "\nCall `progress` initially with after=null, limit=50, and wait_seconds=0. When prime.notifications is automatic, inspect progress with wait_seconds=0 after notifications instead of repeatedly waiting. Otherwise use the polling fallback with after=<progress_cursor>, limit=50, and wait_seconds=5. Save each next_cursor and drain pages while has_more is true, even when changes is empty. Inspect bounded current tasks with `prime`; fetch full descriptions and results with `task_show`, and full reports or recovery provenance with `assignment_show`. Detail continuations retain revision and next_cursor. For recent raw activity use `logs` with tail=true and limit=4096 when authorized; full transcripts remain available from after=0.",
         );
         bootstrap.push_str("\nFor a recovery continuation, read assignment_show on the source assignment ID in prime.recoveries. Its recovery_handoffs separate the recorded Git snapshot from reported validation_evidence and unfinished_steps with source references. Missing reports or historical snapshots mean unknown. Preserve the source files and index; port selected changes into your own fresh worktree, then validate and submit through the normal commit handoff.");
     } else {
@@ -5668,7 +5727,7 @@ fn bootstrap_instruction(
         );
     }
     bootstrap.push_str(
-        "\nReport blockers requiring user action. Do not silently end your turn while delegated work still needs coordination. Durable messages and progress waits do not resume an idle foreground provider or start a new turn after yours ends. Automatic wake-up requires separate, capability-probed provider support.",
+        "\nReport blockers requiring user action. Check prime.notifications before relying on automatic delivery. When it is automatic, and you have handled current inbox messages and actionable results, you may end your turn while waiting for delegated work. Coterie will queue a fixed notification when new inbox messages or permitted worker lifecycle changes arrive. This does not waive review, integration, validation, or acceptance. Notifications preserve user pauses and stop instructions; they never grant new authority. When notifications is unavailable, pending_binding, or uncertain, use the polling fallback when authorized and report delivery blockers requiring user action. Do not silently leave actionable delegated results unhandled.",
     );
     bootstrap
 }
@@ -6472,6 +6531,26 @@ async fn serve_connection(
             .await?
             {
                 Ok(caller) => match request.request {
+                    request @ RpcRequest::BindForegroundNotifications {
+                        ..
+                    } => {
+                        let (response, receiver) = oneshot::channel();
+                        commands.send(SupervisorCommand::BindForegroundNotifications {
+                            caller, request,
+                            peer_pid: stream.peer_cred().ok().and_then(|c| c.pid()).and_then(|pid| u32::try_from(pid).ok()),
+                            response,
+                        }).await.map_err(|_| SupervisorError::CommandChannelClosed)?;
+                        let result = receiver.await.map_err(|_| {
+                            SupervisorError::CommandChannelClosed
+                        })?;
+                        (
+                            match result {
+                                Ok(value) => RpcResult::Ok(Box::new(value)),
+                                Err(error) => RpcResult::Err(error),
+                            },
+                            false,
+                        )
+                    }
                     RpcRequest::Shutdown { operation_id } => {
                         if caller.is_operator() {
                             let result =
@@ -6838,7 +6917,7 @@ fn socket_access_hint(source: &io::Error) -> &'static str {
 }
 
 impl SupervisorError {
-    fn is_transient_connection_failure(&self) -> bool {
+    pub(crate) fn is_transient_connection_failure(&self) -> bool {
         match self {
             Self::RpcTimeout { .. } => true,
             Self::SocketIo { source, .. } => matches!(
@@ -7170,7 +7249,8 @@ mod tests {
                         "the operator ping must not use agent authentication"
                     )
                 }
-                SupervisorCommand::Dispatch { .. } => {
+                SupervisorCommand::Dispatch { .. }
+                | SupervisorCommand::BindForegroundNotifications { .. } => {
                     panic!("the shutdown request must use its dedicated path")
                 }
             };

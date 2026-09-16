@@ -86,6 +86,11 @@ pub(super) fn prime(
     }
     Ok(RpcResponse::Prime {
         page: crate::protocol::context::PrimePage {
+            session: match caller {
+                AuthenticatedCaller::Agent(scope) => Some(Box::new(*scope)),
+                AuthenticatedCaller::Operator => None,
+            },
+            notifications: notifications::availability(store, caller)?,
             identity,
             projects: projects.into_iter().map(project_summary).collect(),
             peers,

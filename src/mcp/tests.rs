@@ -10,6 +10,10 @@ fn tools_have_typed_arguments_and_exclude_operator_authority() {
         "shutdown",
         "doctor",
         "launch_foreground",
+        "bind_foreground_notifications",
+        "enable_foreground_notifications",
+        "claim_foreground_notification",
+        "observe_foreground_notification",
         "exec",
         "read_file",
     ] {
@@ -17,6 +21,13 @@ fn tools_have_typed_arguments_and_exclude_operator_authority() {
         assert!(!tools.iter().any(|tool| tool["name"] == name));
     }
     assert!(tools::request("prime", json!({"token": "forged"})).is_err());
+    assert!(
+        tools::request(
+            "prime",
+            json!({"thread_id": "01234567-89ab-cdef-0123-456789abcdef"})
+        )
+        .is_err()
+    );
     assert!(
         tools::request(
             "task_close",

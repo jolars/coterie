@@ -91,10 +91,10 @@ fn coordination_bootstrap_follows_capabilities_for_any_role_name() {
             assert!(bootstrap.contains("review"));
             assert!(bootstrap.contains("validation"));
             assert!(bootstrap.contains("Report blockers"));
-            assert!(
-                bootstrap.contains("do not resume an idle foreground provider")
-            );
-            assert!(bootstrap.contains("capability-probed provider support"));
+            assert!(bootstrap.contains("prime.notifications"));
+            assert!(bootstrap.contains("automatic"));
+            assert!(bootstrap.contains("may end your turn"));
+            assert!(bootstrap.contains("polling fallback"));
             assert_eq!(
                 bootstrap.contains(
                     "after=<progress_cursor>, limit=50, and wait_seconds=5"

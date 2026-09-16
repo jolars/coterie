@@ -45,6 +45,8 @@ fn example() -> PrimePage {
         next_action: NextAction::Ready,
     };
     PrimePage {
+        session: None,
+        notifications: Default::default(),
         identity: crate::protocol::CallerSummary {
             run_id: "cr-01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
             channel: crate::protocol::CallerChannel::Operator,
