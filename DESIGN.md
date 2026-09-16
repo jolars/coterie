@@ -1142,7 +1142,9 @@ non-code assignments; Coterie does not require a new commit or infer task qualit
 from Git changes. Project and read-only assignments retain their existing
 submission behavior, and `finish --status failed` remains available with dirty
 work preserved. Bootstrap instructions and finish help explain the sequence:
-validate, commit any intended changes, then finish.
+validate, commit any intended changes, then finish. Unchanged Git worktree
+results still follow guarded integration and explicit validated closure; see
+the [unchanged-review acceptance guide](docs/review-acceptance.md).
 
 ### Linked-worktree commit handoff
 

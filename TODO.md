@@ -349,12 +349,16 @@ Scientific relevance and task scope remain agent responsibilities.
   message handling, and uncertain mutation outcomes before shortening
   agent-facing instructions. Preserve explicit task acceptance and generation
   checks.
-- [ ] **Medium: Document and test MCP bridge rediscovery after reconnect.**
+- [x] **Medium: Document and test MCP bridge rediscovery after reconnect.**
   Exercise a stale tool identifier followed by discovery of the current bridge
   and `prime`, verifying the same run and agent identity with current session
   authentication. Document the recovery steps and test that stale credentials
   remain rejected. Distinguish restored tool access from automatic foreground
-  wake-up, which requires separate provider capability evidence.
+  wake-up, which requires separate provider capability evidence. Deterministic
+  bridge/authentication coverage and the opt-in Codex 0.153.4 host-catalog test
+  passed, along with the integrated `task check` gate. See the
+  [recovery guide](docs/mcp-rediscovery.md) and
+  [two-worker run evidence](docs/codex-queue.md#two-worker-dogfooding).
 
 ### Commit-handoff validation follow-ups
 
@@ -386,7 +390,7 @@ independent review reached validated closure. Pin the Coterie build, provider
 version, and effective policy when reproducing these observations; they do not
 establish behavior across other builds or policies.
 
-- [ ] **Medium: Make review-only task acceptance explicit.** A clean review
+- [x] **Medium: Make review-only task acceptance explicit.** A clean review
   submitted its unchanged base commit, but `task close` required a no-op
   `workspace integrate` first. Specify and test the supported path from an
   unchanged submission through validation and accepted closure. Document the
@@ -394,7 +398,10 @@ establish behavior across other builds or policies.
   contract in `DESIGN.md` before changing closure rules. Preserve explicit
   acceptance, generation checks, and dependency release only after closure.
   Cover a target that advances during review and verify that accepting the
-  review cannot move its HEAD or overwrite work.
+  review cannot move its HEAD or overwrite work. Real-Git tests cover both
+  integration strategies, target movement, dirty work preservation, stale
+  ownership, and explicit closure; the integrated `task check` gate passed.
+  See the [unchanged-review acceptance guide](docs/review-acceptance.md).
 - [ ] **Medium: Diagnose build-artifact disk pressure across worktrees.**
   Separate Rust build caches exhausted available disk space during parallel
   work. Measure per-assignment artifact usage, expose actionable low-space
