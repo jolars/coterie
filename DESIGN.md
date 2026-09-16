@@ -1481,6 +1481,17 @@ The supervisor adopts a live process only when the provider can prove its
 identity and configuration generation. Ambiguous processes are reported as
 unknown rather than killed or adopted.
 
+Foreground recovery may record a session as lost when its saved provider
+identity proves that the process is absent. This establishes neither an exit
+status nor task success. A live, inaccessible, or unrecognized foreground
+process remains unknown; only its wrapper owns process control and exit-status
+observation.
+
+A later exit observation from the owning foreground wrapper may refine a lost
+session to exited within the same generation. Its exit details are recorded,
+and its revoked credentials remain revoked. Other terminal states and stale
+generations retain their existing fences.
+
 Restarts are bounded. Repeated failures within a configured window quarantine
 the session and emit a visible event. The supervisor does not spin indefinitely
 or consume unbounded provider quota. The default policy allows three launch
@@ -1536,6 +1547,16 @@ projects still indexed to that run and preserves indexes belonging to newer runs
 Stopping from any attached project waits for the run's socket and all of its
 attached-project index entries to retire. Entries belonging to newer runs do
 not delay completion.
+
+If `coterie stop` cannot reach the indexed supervisor, it starts a replacement
+for that same run under its saved configuration. Recovery validates the existing
+database and project identities, applies supported migrations, and acquires the
+attached-project leases. It commits shutdown intent before reconciling sessions
+or workspaces, so pending launches remain blocked. Current configuration files
+and locks do not prevent stopping an older run. A missing database, unsafe
+socket, or uncertain process state never authorizes discarding run state.
+Interrupted completion is acknowledged from the committed stop operation, and
+the caller waits for socket and index retirement without creating another run.
 
 ## Events and observability
 

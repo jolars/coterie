@@ -641,11 +641,39 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 continue;
             }
             if session.process_owner == SessionProcessOwner::Foreground {
+                let absent =
+                    if let Some(provider_id) = &session.provider_session_id {
+                        let role = store
+                            .transaction(|repositories| {
+                                repositories.agent(session.agent_id)
+                            })?
+                            .ok_or(StoreError::InvalidConfigurationSnapshot {
+                                run_id,
+                            })?
+                            .role;
+                        self.configure_provider(store, run_id, &role)?;
+                        matches!(
+                            self.provider.recover(provider_id, scope),
+                            Ok(ProviderRecovery::Lost)
+                        )
+                    } else {
+                        false
+                    };
+                // Only absence is useful here: the wrapper owns foreground
+                // control and exit status, so recovery must never adopt it.
                 self.record_reconciliation(
                     store,
                     scope,
-                    ExternalResourceState::Unknown,
-                    LifecycleState::Unknown,
+                    if absent {
+                        ExternalResourceState::Lost
+                    } else {
+                        ExternalResourceState::Unknown
+                    },
+                    if absent {
+                        LifecycleState::Lost
+                    } else {
+                        LifecycleState::Unknown
+                    },
                     reconciled_at,
                 )?;
                 continue;

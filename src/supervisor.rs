@@ -11,6 +11,7 @@ mod projects;
 mod recovery;
 mod resubmit;
 mod session;
+mod stop;
 
 #[cfg(test)]
 mod bootstrap_tests;
@@ -169,8 +170,14 @@ pub(crate) async fn run(
                 project.identity.clone(),
             );
             let directories = CoterieDirectories::from_environment()?;
-            serve_with_overrides(entry, project, directories, &overrides)
-                .await?;
+            serve_with_overrides(
+                entry,
+                project,
+                directories,
+                &overrides,
+                arguments.stop_operation,
+            )
+            .await?;
             Ok(crate::cli::ExitCategory::Success)
         }
         Some(CliCommand::SupervisorShutdown) => {
@@ -260,6 +267,24 @@ pub(crate) async fn run(
                     .map_err(|error| command_error(error, operation_id))?;
                 let entry = active_entry(&project, &directories)
                     .map_err(|error| command_error(error, operation_id))?;
+                if stopping {
+                    let operation_id =
+                        operation_id.expect("stop has an operation ID");
+                    let response =
+                        stop::run(&project, &directories, &entry, operation_id)
+                            .await
+                            .map_err(|error| {
+                                error.for_operation(operation_id)
+                            })?;
+                    await_retirement(&directories, &project, &entry)
+                        .await
+                        .map_err(|error| error.for_operation(operation_id))?;
+                    return render_public_response(
+                        json_output,
+                        Some(operation_id),
+                        &response,
+                    );
+                }
                 let socket = checked_socket_path(&directories, entry.run_id)
                     .map_err(|error| command_error(error, operation_id))?;
                 let client =
@@ -1464,9 +1489,9 @@ async fn connect_or_start_with_overrides(
         )
     });
     let child =
-        spawn_supervisor(&candidate, &project.canonical_path, overrides)?;
+        spawn_supervisor(&candidate, &project.canonical_path, overrides, None)?;
     let client = await_startup(project, directories, child, |candidate| {
-        spawn_supervisor(candidate, &project.canonical_path, overrides)
+        spawn_supervisor(candidate, &project.canonical_path, overrides, None)
     })
     .await?;
     verify_configuration(directories, client.run_id(), &configuration)?;
@@ -1477,15 +1502,23 @@ fn spawn_supervisor(
     entry: &ActiveRunEntry,
     project_path: &Path,
     overrides: &crate::cli::config::Overrides,
+    stop_operation: Option<OperationId>,
 ) -> Result<SpawnedSupervisor, SupervisorError> {
     let executable =
         std::env::current_exe().map_err(SupervisorError::CurrentExecutable)?;
-    let mut child = Command::new(&executable)
+    let mut command = Command::new(&executable);
+    command
         .args(overrides.arguments())
         .arg(INTERNAL_SUPERVISOR_ARGUMENT)
         .arg(entry.run_id.to_string())
         .arg(entry.project_id.to_string())
-        .arg(project_path)
+        .arg(project_path);
+    if let Some(operation_id) = stop_operation {
+        command
+            .arg("--stop-operation")
+            .arg(operation_id.to_string());
+    }
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1606,6 +1639,7 @@ async fn serve(
         project,
         directories,
         &crate::cli::config::Overrides::default(),
+        None,
     )
     .await
 }
@@ -1615,8 +1649,13 @@ async fn serve_with_overrides(
     project: DiscoveredProject,
     directories: CoterieDirectories,
     overrides: &crate::cli::config::Overrides,
+    stop_operation: Option<OperationId>,
 ) -> Result<(), SupervisorError> {
-    let configuration = load_configuration_with_overrides(&project, overrides)?;
+    let configuration = if stop_operation.is_some() {
+        None
+    } else {
+        Some(load_configuration_with_overrides(&project, overrides)?)
+    };
     directories.prepare()?;
     let lease = match ProjectLease::try_acquire(
         &directories,
@@ -1627,12 +1666,15 @@ async fn serve_with_overrides(
         LeaseAttempt::Held => return Ok(()),
     };
     let run_directories = directories.prepare_run(active.run_id)?;
-    let mut store = initialize_store_with_configuration(
-        &run_directories.state,
-        &active,
-        &project,
-        &configuration,
-    )?;
+    let mut store = match configuration {
+        Some(configuration) => initialize_store_with_configuration(
+            &run_directories.state,
+            &active,
+            &project,
+            &configuration,
+        )?,
+        None => stop::open_store(&directories, &active, &project)?,
+    };
     let socket_path = checked_socket_path(&directories, active.run_id)?;
     let stopped = store.transaction(|repositories| {
         Ok(repositories
@@ -1651,6 +1693,19 @@ async fn serve_with_overrides(
         return Ok(());
     }
     remove_stale_socket(&socket_path).await?;
+    if let Some(operation_id) = stop_operation {
+        let now_ms = unix_timestamp_ms()?;
+        store.transaction(|repositories| {
+            let policy = repositories.configuration(active.run_id)?.supervision;
+            repositories.begin_run_shutdown(
+                active.run_id,
+                operation_id,
+                now_ms,
+                policy.interrupt_grace_ms,
+                policy.shutdown_timeout_ms,
+            )
+        })?;
+    }
     crate::fault::point("socket.bind.before");
     let listener = UnixListener::bind(&socket_path).map_err(|source| {
         SupervisorError::SocketIo {
@@ -3649,7 +3704,12 @@ fn observe_foreground_ended(
                     id: scope.agent_id,
                     reason: "the foreground session disappeared".to_owned(),
                 })?;
-            if session.state.is_terminal() { return Ok(session.state); }
+            if session.state.is_terminal()
+                && !(session.state == LifecycleState::Lost
+                    && matches!(end, ForegroundEnd::Exited { .. }))
+            {
+                return Ok(session.state);
+            }
             let transition = repositories
                 .record_session_reconciliation_state(
                     scope,

@@ -474,6 +474,8 @@ pub(crate) struct PrivateSupervisorArguments {
     pub(crate) run_id: crate::id::RunId,
     pub(crate) project_id: crate::id::ProjectId,
     pub(crate) project_path: PathBuf,
+    #[arg(long)]
+    pub(crate) stop_operation: Option<OperationId>,
 }
 
 /// The schema version emitted by the programmatic CLI interface.

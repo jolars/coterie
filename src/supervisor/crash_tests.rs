@@ -25,6 +25,11 @@ fn crash_matrix_attached_run_publication_and_retirement() {
 }
 
 #[test]
+fn crash_matrix_offline_stop_recovery() {
+    matrix("runtime-stop");
+}
+
+#[test]
 fn crash_matrix_project_attachment() {
     matrix("attachment");
 }
@@ -289,6 +294,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "external-close",
         "runtime",
         "runtime-attachment",
+        "runtime-stop",
         "process",
         "interrupt-process",
         "terminate-process",
@@ -710,8 +716,13 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
         });
     } else {
         let now = unix_timestamp().unwrap();
-        fixture
-            .sessions
+        let mut foreground_sessions = AgentSessionSupervisor::new(
+            crate::providers::CodexProvider::new([root
+                .join("codex")
+                .into_os_string()]),
+            &fixture.run,
+        );
+        foreground_sessions
             .reconcile_after_restart(
                 &mut fixture.store,
                 RUN.parse().unwrap(),
@@ -727,8 +738,16 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
         for session in sessions {
             assert!(matches!(
                 session.state,
-                LifecycleState::Unknown | LifecycleState::Exited
+                LifecycleState::Unknown
+                    | LifecycleState::Exited
+                    | LifecycleState::Lost
             ));
+            if session.state == LifecycleState::Lost {
+                assert_eq!(
+                    session.reconciliation_state,
+                    ExternalResourceState::Lost
+                );
+            }
             assert_eq!(session.process_owner, SessionProcessOwner::Foreground);
             if case == "foreground-notification" {
                 let scope = SessionScope {
@@ -1220,7 +1239,8 @@ async fn runtime_operator_completion_still_waits_for_retirement() {
 }
 
 fn runtime_child(root: &Path, mode: &str, case: &str) {
-    let attach = case != "runtime";
+    let attach = case != "runtime" && case != "runtime-stop";
+    let stopping = case == "runtime-stop";
     if mode == "exercise" {
         prepare_project(root);
         if case == "runtime-attachment" {
@@ -1235,6 +1255,39 @@ fn runtime_child(root: &Path, mode: &str, case: &str) {
         project.identity.clone(),
     );
     let directories = CoterieDirectories::from_environment().unwrap();
+    if stopping {
+        if mode == "exercise" {
+            let run = directories.prepare_run(active.run_id).unwrap();
+            drop(initialize_store(&run.state, &active, &project).unwrap());
+            let LeaseAttempt::Acquired(lease) = ProjectLease::try_acquire(
+                &directories,
+                &project.identity,
+                active.run_id,
+            )
+            .unwrap() else {
+                panic!("fixture lease")
+            };
+            ActiveRunIndex::new(&directories)
+                .publish(&active, &lease)
+                .unwrap();
+        } else if ActiveRunIndex::new(&directories)
+            .lookup(&project.identity)
+            .unwrap()
+            .is_none()
+        {
+            let mut store =
+                open_configuration_store(&directories, active.run_id).unwrap();
+            assert_eq!(
+                store
+                    .transaction(|r| r.run(active.run_id))
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                "stopped"
+            );
+            return;
+        }
+    }
     if mode == "exercise" {
         let index = std::env::var("COTERIE_CRASH_TEST_INDEX")
             .unwrap()
@@ -1285,7 +1338,21 @@ fn runtime_child(root: &Path, mode: &str, case: &str) {
         Ok(())
     };
     let result = runtime.block_on(coordinate_runtime(
-        serve(active.clone(), project.clone(), directories.clone()),
+        async {
+            if stopping {
+                serve_with_overrides(
+                    active.clone(),
+                    project.clone(),
+                    directories.clone(),
+                    &crate::cli::config::Overrides::default(),
+                    Some(OPERATION.parse().unwrap()),
+                )
+                .await
+            } else {
+                serve(active.clone(), project.clone(), directories.clone())
+                    .await
+            }
+        },
         operator,
     ));
     injection::disarm();

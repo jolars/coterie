@@ -1888,7 +1888,14 @@ impl Repositories<'_, '_> {
         if session.state == observed {
             return Ok(SessionTransitionOutcome::Unchanged);
         }
-        if !session.state.allows(observed) {
+        // Recovery can prove absence before the owning wrapper reports the
+        // reaped exit. That stronger observation refines the same generation's
+        // loss without restoring its revoked credentials or adopting a process.
+        let foreground_exit = session.process_owner
+            == SessionProcessOwner::Foreground
+            && session.state == LifecycleState::Lost
+            && observed == LifecycleState::Exited;
+        if !session.state.allows(observed) && !foreground_exit {
             return Err(StoreError::InvalidSessionTransition {
                 session_id: session.id,
                 current: session.state,
@@ -6353,6 +6360,86 @@ mod tests {
                 Ok(())
             })
             .expect("the terminal lifecycle should be readable");
+    }
+
+    #[test]
+    fn only_current_foreground_exits_refine_loss_without_restoring_credentials()
+    {
+        for owner in [
+            SessionProcessOwner::Foreground,
+            SessionProcessOwner::Supervisor,
+        ] {
+            let mut store = Store::open_in_memory().unwrap();
+            let mut records = Records::fixture();
+            records.session.process_owner = owner;
+            let scope = SessionScope {
+                run_id: records.run.id,
+                agent_id: records.agent.id,
+                session_id: records.session.id,
+                generation: records.session.generation,
+            };
+            store
+                .transaction(|repositories| {
+                    repositories.insert_run(&records.run)?;
+                    repositories.insert_agent(&records.agent)?;
+                    repositories.insert_session(&records.session)?;
+                    repositories
+                        .activate_session_credential(&records.credential)?;
+                    repositories.record_session_lifecycle(
+                        scope,
+                        LifecycleState::Lost,
+                        20,
+                    )?;
+                    assert_eq!(
+                        repositories.record_session_lifecycle(
+                            SessionScope {
+                                generation: scope.generation - 1,
+                                ..scope
+                            },
+                            LifecycleState::Exited,
+                            21,
+                        )?,
+                        SessionTransitionOutcome::Stale
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let result = store.transaction(|repositories| {
+                repositories.record_session_lifecycle(
+                    scope,
+                    LifecycleState::Exited,
+                    22,
+                )
+            });
+            if owner == SessionProcessOwner::Foreground {
+                assert_eq!(result.unwrap(), SessionTransitionOutcome::Applied);
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(super::StoreError::InvalidSessionTransition { .. })
+                ));
+            }
+            store
+                .transaction(|repositories| {
+                    assert_eq!(
+                        repositories
+                            .session_credential(scope.session_id)?
+                            .unwrap()
+                            .revoked_at,
+                        Some(20)
+                    );
+                    assert!(matches!(
+                        repositories.record_session_lifecycle(
+                            scope,
+                            LifecycleState::Running,
+                            23,
+                        ),
+                        Err(super::StoreError::InvalidSessionTransition { .. })
+                    ));
+                    Ok(())
+                })
+                .unwrap();
+        }
     }
 
     #[test]

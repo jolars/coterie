@@ -92,6 +92,25 @@ fn startup_upgrades_historical_snapshots_before_validation() {
 }
 
 #[test]
+fn stop_upgrades_historical_snapshots_without_adopting_current_policy() {
+    for version in 10..=14 {
+        let fixture = TestEnvironment::new();
+        let (database, task) = historical_run(&fixture, version);
+        write_global(&fixture, "invalid configuration");
+        let stopped = fixture.run_json(&["stop", "--json"]);
+        assert_eq!(stopped["data"]["run_id"], RUN_ID);
+        assert_eq!(fixture.index_entry_count(), 0);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let retained: String = connection
+            .query_row("SELECT id FROM tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(retained, task["id"]);
+        let timeout: i64 = connection.query_row("SELECT json_extract(document_json, '$.effective.supervision.idle_timeout_seconds') FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
+        assert_eq!(timeout, 0);
+    }
+}
+
+#[test]
 fn doctor_identifies_pending_upgrade_without_decoding_or_mutating_old_policy() {
     let fixture = TestEnvironment::new();
     let (database, _) = historical_run(&fixture, 12);
