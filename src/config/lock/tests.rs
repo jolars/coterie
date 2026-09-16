@@ -75,7 +75,7 @@ fn fingerprint_covers_all_portable_policy_and_ignores_host_bindings() {
     }
 }
 
-fn golden_locks() -> [(PathBuf, String); 3] {
+fn golden_locks() -> [(PathBuf, ConfigLock); 3] {
     let fixture = Fixture::new();
     fixture.write(
         "config.toml",
@@ -103,14 +103,7 @@ fn golden_locks() -> [(PathBuf, String); 3] {
         } else {
             root.join(format!("tests/golden/config-lock-{name}.json"))
         };
-        (
-            path,
-            format!(
-                "{}\n",
-                serde_json::to_string_pretty(&ConfigLock::for_config(&config))
-                    .unwrap()
-            ),
-        )
+        (path, ConfigLock::for_config(&config))
     })
 }
 
@@ -238,15 +231,29 @@ fn crashes_during_creation_and_replacement_leave_complete_locks_and_retries_conv
 
 #[test]
 fn locks_and_fingerprints_match_golden_contracts() {
-    for (path, actual) in golden_locks() {
-        assert_eq!(actual, fs::read_to_string(path).unwrap());
+    for (path, mut actual) in golden_locks() {
+        assert_eq!(
+            actual.coterie_version,
+            format!("^{}", env!("CARGO_PKG_VERSION"))
+        );
+        let expected = fs::read_to_string(path).unwrap();
+        let golden: ConfigLock = serde_json::from_str(&expected).unwrap();
+        semver::VersionReq::parse(&golden.coterie_version).unwrap();
+        // Release bumps change compatibility without changing portable policy.
+        actual.coterie_version = golden.coterie_version;
+        assert_eq!(
+            format!("{}\n", serde_json::to_string_pretty(&actual).unwrap()),
+            expected
+        );
     }
 }
 
 #[test]
 #[ignore = "explicit developer command to regenerate lock golden files"]
 fn regenerate_lock_goldens() {
-    for (path, text) in golden_locks() {
+    for (path, lock) in golden_locks() {
+        let text =
+            format!("{}\n", serde_json::to_string_pretty(&lock).unwrap());
         fs::write(path, text).unwrap();
     }
 }
