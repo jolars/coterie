@@ -429,6 +429,32 @@ establish behavior across other builds or policies.
   widen permissions automatically. Keep real-provider coverage opt-in and
   retain the completed Nix daemon and `.devenv` access coverage.
 
+### Diplodocus notification-loop follow-up
+
+Observed September 17, 2026 in run `cr-01M2GGM9R6E0HV9TB43G50V93T`,
+foreground session `cs-01M2RDNP2KQ80Z4CQ3RSZW7Y9H`, generation 1.
+
+- [ ] **High: Diagnose and stop repeated foreground notifications without new
+  updates.** Identical automatic notices repeatedly started lead turns after
+  implementation, integration, and validation had finished and all workers had
+  exited. Each `prime` confirmed the same session and `notifications=automatic`;
+  each `poll` returned `changes=[]`, `messages=[]`, and `has_more=false`, with
+  unchanged inbox cursor 51 and progress sequence 370. No messages remained to
+  acknowledge. One original docstring task remained submitted because its
+  reviewed result was integrated through a replacement task, and closing the
+  original required an operator override. Treat that as reproduction context,
+  not an established cause. Pin the running Coterie build, provider version,
+  and effective policy; inspect durable delivery attempts and eligible event
+  cursors to distinguish newly queued notices from provider replay or an
+  existing queue backlog. Reproduce the read-only `prime`/`poll`/end-turn cycle
+  with a deterministic provider, both with all tasks closed and with an
+  unchanged submitted task requiring operator action. Once eligible updates
+  have been delivered and consumed, repeated reads, reconciliation, and turn
+  completion must cause no further queue attempts without a new eligible
+  event. Test coalescing, reconnects, supervisor restart, and stale generations
+  while preserving explicit inbox acknowledgement, task acceptance, and user
+  pauses. Keep any real-provider regression opt-in.
+
 ### M7 gate
 
 - [ ] The full design criterion succeeds end to end, including the two-project
