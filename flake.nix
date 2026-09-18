@@ -57,6 +57,9 @@
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
+          # Isolate tests so concurrent child launches cannot inherit another
+          # test's socket listener and delay its closure.
+          useNextest = true;
           # The submission tests execute real Git hooks.
           nativeCheckInputs = [ pkgs.gitMinimal ];
 
