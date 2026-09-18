@@ -765,6 +765,17 @@ fn foreground_child(root: PathBuf, mode: &str, case: &str) {
                     None,
                 )
                 .unwrap();
+                notifications::execute(
+                    &mut fixture.store,
+                    run_id,
+                    &AuthenticatedCaller::Agent(scope),
+                    RpcRequest::ReceiveForegroundNotification {
+                        operation_id: OperationId::generate(),
+                        delivery_id: claim.operation_id,
+                    },
+                    None,
+                )
+                .unwrap();
             }
             injection::disarm();
         });

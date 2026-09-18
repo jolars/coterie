@@ -136,6 +136,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "foreground_notifications",
         sql: include_str!("state/migrations/0018_foreground_notifications.sql"),
     },
+    Migration {
+        version: 19,
+        name: "notification_receipts",
+        sql: include_str!("state/migrations/0019_notification_receipts.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -5540,6 +5545,16 @@ mod tests {
             let legacy_payload =
                 json!({"schema_version": 1, "data": legacy_recovery})
                     .to_string();
+            if prior_count >= 18 {
+                connection.execute(
+                    "INSERT INTO foreground_notifications (session_id, run_id, agent_id, generation, thread_id, event_cursor, message_cursor) VALUES (?1, ?2, ?3, 2, '01234567-89ab-cdef-0123-456789abcdef', 7, 3)",
+                    rusqlite::params![SESSION_ID, RUN_ID, AGENT_ID],
+                ).unwrap();
+                connection.execute(
+                    "INSERT INTO notification_deliveries (operation_id, session_id, event_cursor, message_cursor, state, created_at, observed_at) VALUES (?1, ?2, 7, 3, 'accepted', 12, 13)",
+                    rusqlite::params![SECOND_OPERATION_ID, SESSION_ID],
+                ).unwrap();
+            }
             connection.execute(
                 "INSERT INTO events (id, run_id, sequence, event_type, actor, subject, task_id, payload_json, summary, created_at) VALUES (?1, ?2, 1, 'task.recovered', 'operator', ?3, ?3, ?4, 'Historical recovery.', 12)",
                 rusqlite::params![crate::id::EventId::generate(), RUN_ID, TASK_ID, legacy_payload],
@@ -5549,6 +5564,30 @@ mod tests {
             let store =
                 Store::open(&database.0).expect("the database should upgrade");
             let mut store = store;
+            if prior_count >= 18 {
+                let delivery: (String, String, Option<i64>, i64, i64) = store.connection.query_row(
+                    "SELECT state, receipt_state, received_at, event_cursor, message_cursor FROM notification_deliveries WHERE operation_id = ?1",
+                    [SECOND_OPERATION_ID], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                ).unwrap();
+                assert_eq!(
+                    delivery,
+                    ("accepted".into(), "legacy".into(), None, 7, 3)
+                );
+                let scope = SessionScope {
+                    run_id: RUN_ID.parse().unwrap(),
+                    agent_id: AGENT_ID.parse().unwrap(),
+                    session_id: SESSION_ID.parse().unwrap(),
+                    generation: 2,
+                };
+                store.transaction(|r| {
+                    // The historical recovery event has already retired this
+                    // session; migration must not restore its delivery authority.
+                    assert_eq!(r.notification_availability(scope, 14)?, crate::protocol::notifications::NotificationAvailability::Unavailable);
+                    assert!(!r.notification_pending(scope, true)?);
+                    assert!(!r.receive_notification(scope, SECOND_OPERATION_ID.parse().unwrap(), 14)?);
+                    Ok(())
+                }).unwrap();
+            }
             let historical_recovery = store
                 .transaction(|r| {
                     assert!(

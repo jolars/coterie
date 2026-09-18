@@ -48,11 +48,79 @@ fn fake_queue_foreground() {
                 serde_json::to_vec(&prime).unwrap(),
             )
             .unwrap();
+        } else if input.trim().starts_with('{') {
+            let command: Value = serde_json::from_str(&input).unwrap();
+            if command["reconnect"] == true {
+                drop(bridge);
+                bridge = McpClient::start(Command::new(
+                    std::env::var_os("COTERIE_BIN").unwrap(),
+                ));
+                bridge.initialize();
+            }
+            let response = bridge.call(
+                command["name"].as_str().unwrap(),
+                command["arguments"].clone(),
+            );
+            fs::write(
+                command["response_path"].as_str().unwrap(),
+                serde_json::to_vec(&response).unwrap(),
+            )
+            .unwrap();
         } else {
             break;
         }
         input.clear();
     }
+}
+
+fn foreground_call(
+    foreground: &mut QueueForeground<'_>,
+    name: &str,
+    arguments: Value,
+    reconnect: bool,
+) -> Value {
+    let response_path = foreground
+        .fixture
+        .root
+        .join(format!("response-{}", ulid::Ulid::generate()));
+    writeln!(foreground.stdin.as_mut().unwrap(), "{}", json!({"name":name,"arguments":arguments,"response_path":response_path,"reconnect":reconnect})).unwrap();
+    wait_until("the fake foreground completing its tool call", || {
+        response_path.exists()
+    });
+    let response: Value =
+        serde_json::from_slice(&fs::read(response_path).unwrap()).unwrap();
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    response["result"]["structuredContent"]["data"].clone()
+}
+
+fn receive_notice(
+    foreground: &mut QueueForeground<'_>,
+    capture: &Path,
+) -> Value {
+    let captured = fs::read(capture).unwrap();
+    let notice = captured
+        .split(|b| *b == 0)
+        .rfind(|p| !p.is_empty())
+        .unwrap();
+    let notice = std::str::from_utf8(notice).unwrap();
+    let delivery_id = notice
+        .split_once("delivery_id=")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .next()
+        .unwrap();
+    let arguments = json!({"delivery_id":delivery_id,"operation_id":format!("co-{}", ulid::Ulid::generate())});
+    assert_eq!(
+        foreground_call(
+            foreground,
+            "notification_received",
+            arguments.clone(),
+            false
+        )["received"],
+        true
+    );
+    arguments
 }
 
 struct QueueForeground<'a> {
@@ -178,10 +246,20 @@ printf '{"type":"turn.completed","usage":{}}\n'
     wait_until(
         "a queued worker submission without an inbox message",
         || {
-            database.query_row("SELECT EXISTS(SELECT 1 FROM events AS e JOIN notification_deliveries AS d ON d.event_cursor >= e.sequence WHERE e.event_type = 'task.lifecycle_changed' AND json_extract(e.payload_json, '$.data.status') = 'submitted' AND d.state = 'accepted')", [], |row| row.get::<_, bool>(0)).unwrap()
+            database.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE event_type = 'task.lifecycle_changed' AND json_extract(payload_json, '$.data.status') = 'submitted') AND EXISTS(SELECT 1 FROM notification_deliveries WHERE state = 'accepted')", [], |row| row.get::<_, bool>(0)).unwrap()
         },
     );
     assert!(capture.exists());
+    receive_notice(&mut foreground, &capture);
+    let poll = foreground_call(&mut foreground, "poll", json!({}), false);
+    assert!(
+        poll["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["kind"] == "task"
+                && change["status"] == "submitted")
+    );
     assert_eq!(
         database
             .query_row("SELECT COUNT(*) FROM messages", [], |r| r
@@ -216,6 +294,7 @@ fn automatic_queue_reconnects_without_replaying_accepted_deliveries() {
         database.query_row("SELECT COUNT(*) FROM notification_deliveries WHERE state = 'accepted'", [], |r| r.get::<_, i64>(0)).unwrap() == 1
     });
     let before = fs::read(&capture).unwrap();
+    fixture.run_json(&["send", "lead", "Coalesced across restart.", "--json"]);
     supervisor.kill().unwrap();
     supervisor.wait().unwrap();
     wait_until("foreground owner restoring notification delivery", || {
@@ -247,12 +326,263 @@ fn automatic_queue_reconnects_without_replaying_accepted_deliveries() {
         "{prime}"
     );
     assert_eq!(fs::read(&capture).unwrap(), before);
+    receive_notice(&mut foreground, &capture);
+    let poll = foreground_call(&mut foreground, "poll", json!({}), false);
+    assert_eq!(poll["messages"].as_array().unwrap().len(), 2);
+    thread::sleep(Duration::from_millis(1200));
+    assert_eq!(fs::read(&capture).unwrap(), before);
     fixture.run_json(&["send", "lead", "After restart.", "--json"]);
     wait_until("delivery after supervisor recovery", || {
         database.query_row("SELECT COUNT(*) FROM notification_deliveries WHERE state = 'accepted'", [], |r| r.get::<_, i64>(0)).unwrap() == 2
     });
     fixture.run_json(&["stop", "--json"]);
     foreground.wait().unwrap();
+}
+
+#[test]
+fn automatic_queue_read_only_turns_do_not_rearm_closed_tasks() {
+    read_only_notification_turns(true);
+}
+
+#[test]
+fn automatic_queue_read_only_turns_do_not_rearm_a_submission_needing_override()
+{
+    read_only_notification_turns(false);
+}
+
+fn read_only_notification_turns(close_task: bool) {
+    let fixture = TestEnvironment::new();
+    let (mut foreground, capture) = queue_fixture(&fixture);
+    let script = fs::read_to_string(fixture.root.join("bin/codex")).unwrap();
+    let release = fixture.root.join("worker-release");
+    fs::write(fixture.root.join("bin/codex"), format!("{}\nwhile [ ! -e '{}' ]; do sleep 0.01; done\n{}", script.split_once("is_job=false").unwrap().0, release.display(), r#"
+printf '{"type":"thread.started","thread_id":"notification-worker"}\n'
+"$COTERIE_BIN" finish --status completed --summary 'Implemented and validated the result.' --json >/dev/null || exit 41
+printf '{"type":"turn.completed","usage":{}}\n'
+"#)).unwrap();
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Notification loop regression",
+        "--json",
+    ]);
+    let task_id = task["data"]["task"]["id"].as_str().unwrap();
+    let spawn =
+        fixture.run_json(&["spawn", "worker", "--task", task_id, "--json"]);
+    let assignment = spawn["data"]["assignment_id"].as_str().unwrap();
+    let status = fixture.run_json(&["status", "--json"]);
+    let database = database(&fixture, &status);
+    let workspace: Vec<u8> = database
+        .query_row(
+            "SELECT path FROM workspaces WHERE assignment_id = ?1",
+            [assignment],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let workspace = PathBuf::from(String::from_utf8(workspace).unwrap());
+    let result = commit_file(
+        &workspace,
+        Path::new("result.txt"),
+        "Validated result.\n",
+        "worker result",
+    );
+    fs::write(release, "").unwrap();
+    wait_until("submitted task and exited worker", || {
+        database.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE status = 'submitted') AND NOT EXISTS(SELECT 1 FROM sessions WHERE process_owner = 'supervisor' AND state <> 'exited')", [], |r| r.get::<_, bool>(0)).unwrap()
+    });
+    if close_task {
+        fixture.run_json(&[
+            "workspace",
+            "integrate",
+            "--assignment",
+            assignment,
+            "--json",
+        ]);
+        fixture.run_json(&[
+            "task",
+            "close",
+            task_id,
+            "--summary",
+            "Reviewed, integrated, and validated.",
+            "--json",
+        ]);
+    } else {
+        // Apply the reviewed replacement with further edits outside this
+        // assignment. Its conflicting original remains submitted for the
+        // operator to resolve or accept explicitly.
+        let target = commit_file(
+            &fixture.project,
+            Path::new("result.txt"),
+            "Validated result with replacement edits.\n",
+            "replacement result",
+        );
+        assert_ne!(result, target);
+        let integration = fixture
+            .command()
+            .args([
+                "workspace",
+                "integrate",
+                "--assignment",
+                assignment,
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(integration.status.code(), Some(5));
+        let rejected = fixture
+            .command()
+            .args([
+                "task",
+                "close",
+                task_id,
+                "--summary",
+                "Attempt ordinary closure.",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(rejected.status.code(), Some(5));
+    }
+    wait_until("the first accepted notice", || {
+        accepted_deliveries(&database) == 1
+    });
+    let queued = fs::read(&capture).unwrap();
+    // Model a long provider turn that reads every update before consuming its
+    // queued notice. New messages must join that notice, not create a backlog.
+    let mut cursor = Value::Null;
+    for index in 0..3 {
+        fixture.run_json(&[
+            "send",
+            "lead",
+            &format!("Update {index}"),
+            "--json",
+        ]);
+        let prime =
+            foreground_call(&mut foreground, "prime", json!({}), index == 1);
+        assert_eq!(prime["notifications"], "automatic");
+        let poll = foreground_call(
+            &mut foreground,
+            "poll",
+            json!({"cursor":cursor,"wait_seconds":0}),
+            false,
+        );
+        cursor = poll["cursor"].clone();
+        assert_eq!(poll["messages"].as_array().unwrap().len(), index + 1);
+        // Ending a fake turn returns it to waiting on stdin, without any RPC.
+        thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT COUNT(*) FROM notification_deliveries",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(fs::read(&capture).unwrap(), queued);
+    }
+    let receipt = receive_notice(&mut foreground, &capture);
+    let poll = foreground_call(
+        &mut foreground,
+        "poll",
+        json!({"cursor":cursor,"wait_seconds":0}),
+        false,
+    );
+    assert_eq!(poll["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE acknowledged_at IS NULL",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        3
+    );
+    let ids: Vec<_> = poll["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].clone())
+        .collect();
+    foreground_call(
+        &mut foreground,
+        "inbox_handled",
+        json!({"operation_id":format!("co-{}",ulid::Ulid::generate()),"message_ids":ids}),
+        false,
+    );
+    cursor = poll["cursor"].clone();
+    let events_before: i64 = database
+        .query_row("SELECT MAX(sequence) FROM events", [], |r| r.get(0))
+        .unwrap();
+    for index in 0..4 {
+        let prime =
+            foreground_call(&mut foreground, "prime", json!({}), index == 1);
+        assert_eq!(prime["notifications"], "automatic");
+        let poll = foreground_call(
+            &mut foreground,
+            "poll",
+            json!({"cursor":cursor,"wait_seconds":0}),
+            false,
+        );
+        assert_eq!(poll["changes"], json!([]));
+        assert_eq!(poll["messages"], json!([]));
+        assert_eq!(poll["has_more"], false);
+        cursor = poll["cursor"].clone();
+        thread::sleep(Duration::from_millis(600));
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT COUNT(*) FROM notification_deliveries",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(fs::read(&capture).unwrap(), queued);
+    }
+    assert_eq!(
+        database
+            .query_row("SELECT MAX(sequence) FROM events", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        events_before
+    );
+    assert_eq!(
+        database
+            .query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                [task_id],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+        if close_task { "closed" } else { "submitted" }
+    );
+    // Only a new eligible update rearms delivery. Retrying the earlier receipt
+    // through a replacement bridge cannot consume this next notice.
+    fixture.run_json(&["send", "lead", "New eligible event", "--json"]);
+    wait_until("one new notice for the new event", || {
+        accepted_deliveries(&database) == 2
+    });
+    assert_eq!(
+        foreground_call(
+            &mut foreground,
+            "notification_received",
+            receipt,
+            true
+        )["received"],
+        true
+    );
+    assert_eq!(database.query_row("SELECT COUNT(*) FROM notification_deliveries WHERE receipt_state = 'pending'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    receive_notice(&mut foreground, &capture);
+    fixture.run_json(&["stop", "--json"]);
+    foreground.wait().unwrap();
+}
+
+fn accepted_deliveries(database: &rusqlite::Connection) -> i64 {
+    database.query_row("SELECT COUNT(*) FROM notification_deliveries WHERE state = 'accepted'", [], |r| r.get(0)).unwrap()
 }
 
 #[test]
@@ -274,6 +604,10 @@ fn automatic_queue_coalesces_messages_without_promoting_their_contents() {
     assert!(!args[4].contains("WORKER_SECRET"));
     assert!(args[4].contains("pauses"));
     assert!(args[4].contains("inbox"));
+    assert!(args[4].contains(
+        "receipt does not acknowledge inbox messages or resume work"
+    ));
+    assert!(args[4].contains("ignore this stale notification"));
     let status = fixture.run_json(&["status", "--json"]);
     let database = database(&fixture, &status);
     assert_eq!(
@@ -322,7 +656,7 @@ fn installed_codex_queue_wakes_idle_foreground_for_worker_message() {
     )
     .unwrap();
     let prompt = format!(
-        "This is a bounded Coterie notification conformance test. Call Coterie's prime tool, then reply QUEUE_READY and end your turn. Do not poll, wait in a tool, spawn workers, or run shell commands. An authorized test operator will later spawn a worker and send a separate wake-up notification. Only after that notification, call inbox and inspect prime. If your inbox contains {WORKER_MESSAGE} and the task named Queue test worker is submitted, use new_operation_id and task_create to create one task titled {WITNESS_TITLE}, description=Observed a durable worker submission after a queued notification., project=primary, group=null, dependencies=[]. Acknowledge the handled inbox message with a fresh operation ID, then reply QUEUE_HANDLED and end your turn. Do not integrate or close the worker task; the test ends after notification handling. Perform no other work."
+        "This is a bounded Coterie notification conformance test. Call Coterie's prime tool, then reply QUEUE_READY and end your turn. During this initial turn, do not poll, wait in a tool, spawn workers, or run shell commands. An authorized test operator will later spawn a worker and send a separate wake-up notification. For each matching automatic notification, verify prime.session, report notification_received with its delivery_id and a fresh operation ID, then poll. If your inbox contains {WORKER_MESSAGE} and the task named Queue test worker is submitted, use new_operation_id and task_create to create one task titled {WITNESS_TITLE}, description=Observed a durable worker submission after a queued notification., project=primary, group=null, dependencies=[]. Acknowledge the handled inbox message with a fresh operation ID, then reply QUEUE_HANDLED and end your turn. Do not integrate or close the worker task; the test ends after notification handling. Perform no other work."
     );
     let global = include_str!("../../examples/config/global.toml")
         .replace(
@@ -422,6 +756,7 @@ printf '{{"type":"turn.completed","usage":{{}}}}\n'
     foreground.wait_for("worker message handling after queue delivery", || {
         message_count(&database, agent_id, true) == 1
             && witness_count(&database) == 1
+            && database.query_row("SELECT NOT EXISTS(SELECT 1 FROM notification_deliveries WHERE state <> 'accepted' OR receipt_state <> 'received') AND NOT EXISTS(SELECT 1 FROM sessions WHERE process_owner = 'supervisor' AND state <> 'exited')", [], |r| r.get::<_, bool>(0)).unwrap()
             && completed_turn(&mut app, &thread_id)
     });
     assert_eq!(
@@ -436,6 +771,15 @@ printf '{{"type":"turn.completed","usage":{{}}}}\n'
     );
     assert!(database.query_row("SELECT COUNT(*) FROM notification_deliveries WHERE state = 'accepted'", [], |r| r.get::<_, i64>(0)).unwrap() >= 1);
     assert_ne!(last_turn_id(&mut app, &thread_id), initial_turn);
+    let settled_turn = last_turn_id(&mut app, &thread_id);
+    let settled_deliveries = accepted_deliveries(&database);
+    // Provider handling is observed separately from queue acceptance. Once
+    // every notice is received, an idle read-only observer must see no loop.
+    for _ in 0..5 {
+        thread::sleep(Duration::from_secs(1));
+        assert_eq!(accepted_deliveries(&database), settled_deliveries);
+        assert_eq!(last_turn_id(&mut app, &thread_id), settled_turn);
+    }
     assert_eq!(
         fixture.run_json(&["status", "--json"])["data"]["agents"][0]["id"],
         agent_id

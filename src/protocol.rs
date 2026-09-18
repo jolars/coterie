@@ -19,7 +19,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 13;
+pub(crate) const PROTOCOL_VERSION: u16 = 14;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -95,6 +95,10 @@ pub(crate) enum RpcRequest {
         delivery_id: OperationId,
         scope: crate::auth::SessionScope,
         outcome: notifications::QueueOutcome,
+    },
+    ReceiveForegroundNotification {
+        operation_id: OperationId,
+        delivery_id: OperationId,
     },
     LaunchForeground {
         operation_id: OperationId,
@@ -289,6 +293,9 @@ pub(crate) enum RpcResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub(crate) enum RpcResponse {
+    ForegroundNotificationReceived {
+        received: bool,
+    },
     ForegroundNotifications {
         availability: notifications::NotificationAvailability,
         pending: bool,
@@ -714,7 +721,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 13,
+                    "protocol_version": 14,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -828,7 +835,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 13,
+                    "protocol_version": 14,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

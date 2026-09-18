@@ -24,6 +24,15 @@ pub(super) fn execute(
     peer_pid: Option<u32>,
 ) -> Result<RpcResponse, RpcFailure> {
     let (scope, operation_id) = match &request {
+        RpcRequest::ReceiveForegroundNotification { operation_id, .. } => {
+            let AuthenticatedCaller::Agent(scope) = caller else {
+                return Err(RpcFailure::new(
+                    RpcFailureCode::PermissionDenied,
+                    "only the authenticated foreground recipient can report a notification receipt",
+                ));
+            };
+            (*scope, Some(*operation_id))
+        }
         RpcRequest::BindForegroundNotifications {
             operation_id,
             thread_id,
@@ -122,6 +131,9 @@ pub(super) fn execute(
                 claim: r.claim_notification(scope, operation_id, progress, now)?,
             }),
             RpcRequest::ObserveForegroundNotification { delivery_id, outcome, .. } => r.observe_notification(scope, *delivery_id, *outcome, now)?,
+            RpcRequest::ReceiveForegroundNotification { delivery_id, .. } => return Ok(RpcResponse::ForegroundNotificationReceived {
+                received: r.receive_notification(scope, *delivery_id, now)?,
+            }),
             _ => unreachable!(),
         }
         Ok(RpcResponse::ForegroundNotifications { availability: r.notification_availability(scope, now)?, pending: false })
@@ -289,6 +301,21 @@ mod tests {
                 RpcRequest::BindForegroundNotifications {
                     operation_id: OperationId::generate(),
                     thread_id: "01234567-89ab-cdef-0123-456789abcdef".into()
+                },
+                None,
+            )
+            .unwrap_err()
+            .code,
+            RpcFailureCode::PermissionDenied
+        );
+        assert_eq!(
+            execute(
+                &mut store,
+                scope.run_id,
+                &AuthenticatedCaller::Operator,
+                RpcRequest::ReceiveForegroundNotification {
+                    operation_id: OperationId::generate(),
+                    delivery_id: OperationId::generate()
                 },
                 None,
             )

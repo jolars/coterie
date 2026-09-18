@@ -352,6 +352,7 @@ async fn call_tool(
                     "poll".to_owned(),
                     "inbox_handled".to_owned(),
                     "retry_mutation".to_owned(),
+                    "notification_received".to_owned(),
                 ]);
             }
             Ok(tool_result(

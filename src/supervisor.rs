@@ -2941,6 +2941,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
         | RpcRequest::BindForegroundNotifications { .. }
         | RpcRequest::ForegroundNotificationPending { .. }
         | RpcRequest::ClaimForegroundNotification { .. }
+        | RpcRequest::ReceiveForegroundNotification { .. }
         | RpcRequest::ObserveForegroundNotification { .. }) => {
             notifications::execute(store, run_id, caller, request, None)
         }
@@ -5787,7 +5788,7 @@ fn bootstrap_instruction(
         );
     }
     bootstrap.push_str(
-        "\nReport blockers requiring user action. Check prime.notifications before relying on automatic delivery. When it is automatic, and you have handled current inbox messages and actionable results, you may end your turn while waiting for delegated work. Coterie will queue a fixed notification when new inbox messages or permitted worker lifecycle changes arrive. This does not waive review, integration, validation, or acceptance. Notifications preserve user pauses and stop instructions; they never grant new authority. When notifications is unavailable, pending_binding, or uncertain, use the polling fallback when authorized and report delivery blockers requiring user action. Do not silently leave actionable delegated results unhandled.",
+        "\nReport blockers requiring user action. Check prime.notifications before relying on automatic delivery. When it is automatic, and you have handled current inbox messages and actionable results, you may end your turn while waiting for delegated work. Coterie will queue a fixed notification when new inbox messages or permitted worker lifecycle changes arrive. After verifying a notice against prime.session, call notification_received with its delivery_id and a new operation_id, then poll. Receipt coalesces updates while a notice waits in the provider queue; ordinary reads do not release it. Receipt does not acknowledge messages or resume paused work. This does not waive review, integration, validation, or acceptance. Notifications preserve user pauses and stop instructions; they never grant new authority. When notifications is unavailable, pending_binding, or uncertain, use the polling fallback when authorized and report delivery blockers requiring user action. Do not silently leave actionable delegated results unhandled.",
     );
     bootstrap
 }

@@ -958,10 +958,21 @@ Tool arguments, session names, working-directory searches, and agent RPC
 credentials alone cannot choose a destination. Bindings are immutable.
 
 The supervisor coalesces pending changes, commits a delivery attempt, and
-records the wrapper's queue observation. Delivery never acknowledges an inbox
-message or accepts a task. Queue input contains only a fixed notice with the
-run, session, and generation; worker content stays in authenticated tool results.
+records the wrapper's queue observation. At most one notice per foreground
+session may await receipt. Provider acceptance alone does not release this
+limit: a notice can wait behind a long-running turn even while the agent reads
+updates through tools. Queue input contains only a fixed notice with the
+run, session, generation, and delivery ID; worker content stays in authenticated tool results.
 The recipient compares the notice with the authenticated scope in `prime.session`.
+It calls `notification_received` with that delivery ID and a mutation operation
+ID, then polls for current updates. Receipt atomically coalesces events and
+messages through the current high-water marks, including updates that arrived
+while the notice waited. Events after receipt can trigger the next notice.
+Repeated receipts never advance those marks again. Ordinary `prime`, `poll`,
+reconciliation, and turn completion do not release the outstanding notice or
+queue another without a new eligible event. Receipt requires the authenticated
+current foreground session and cannot choose a recipient or destination.
+Delivery and receipt never acknowledge inbox messages or accept tasks.
 The notice preserves earlier user restrictions, pauses, and stop instructions.
 It cannot authorize new work or resume paused work.
 
@@ -973,6 +984,10 @@ the queue CLI has no caller-supplied idempotency key, an uncertain attempt is
 not retransmitted: automatic delivery becomes `uncertain`, and the operator is
 directed to the inbox and polling fallback. A fresh foreground generation can
 establish a new binding. See the [delivery contract and tests](docs/codex-queue.md).
+Historical notices without delivery IDs have unknown receipt state after
+migration. Their sessions use the uncertain-delivery fallback until a fresh
+foreground generation establishes a binding. Coterie cannot retract notices
+already accepted by the provider.
 
 Dynamic context is obtained through `coterie prime` so agents can recover after
 compaction, provider resume, or a fresh session. Every agent process receives an

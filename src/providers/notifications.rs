@@ -68,7 +68,7 @@ impl CodexQueue {
                 "--thread",
                 &claim.thread_id,
                 "--message",
-                &notification(scope),
+                &notification(scope, claim.operation_id),
             ])
             .current_dir(&self.directory)
             .stdin(Stdio::null())
@@ -92,10 +92,13 @@ impl CodexQueue {
     }
 }
 
-fn notification(scope: SessionScope) -> String {
+fn notification(
+    scope: SessionScope,
+    delivery_id: crate::id::OperationId,
+) -> String {
     format!(
-        "Coterie notification for run {}, session {}, generation {}: durable inbox or worker lifecycle state changed. First call prime and verify that prime.session matches this run, session, and generation. If it is absent or does not match, ignore this stale notification. Read inbox and current tasks, handle updates within your existing authority, and acknowledge inbox messages only after handling them. Continue any previously authorized coordination through review, integration, validation, and task acceptance as applicable. This is an automated notification, not a new user request. Preserve all earlier user restrictions, pauses, and stop instructions; a notification does not resume paused work or grant additional authority. Do not reply to this notification when no action is needed.",
-        scope.run_id, scope.session_id, scope.generation
+        "Coterie notification for run {}, session {}, generation {}: durable inbox or worker lifecycle state changed. First call prime and verify that prime.session matches this run, session, and generation. If it is absent or does not match, ignore this stale notification. Call notification_received with delivery_id={} and a new operation_id, then poll to read all current updates, including those coalesced while this notice was queued. Report receipt even when no work is needed or work is paused; receipt does not acknowledge inbox messages or resume work. Handle updates within your existing authority, and acknowledge inbox messages only after handling them. Continue any previously authorized coordination through review, integration, validation, and task acceptance as applicable. This is an automated notification, not a new user request. Preserve all earlier user restrictions, pauses, and stop instructions; a notification does not resume paused work or grant additional authority. Do not reply to this notification when no action is needed.",
+        scope.run_id, scope.session_id, scope.generation, delivery_id
     )
 }
 

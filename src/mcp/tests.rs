@@ -63,6 +63,27 @@ fn mutation_retries_preserve_the_supplied_operation_id() {
 }
 
 #[test]
+fn notification_receipt_cannot_choose_a_session_or_destination() {
+    let arguments = json!({"operation_id":crate::id::OperationId::generate(),"delivery_id":crate::id::OperationId::generate()});
+    assert!(matches!(
+        tools::request("notification_received", arguments.clone()).unwrap(),
+        RpcRequest::ReceiveForegroundNotification { .. }
+    ));
+    for field in ["session_id", "agent_id", "thread_id", "scope", "through"] {
+        let mut invalid = arguments.clone();
+        invalid[field] = json!("forged");
+        assert!(tools::request("notification_received", invalid).is_err());
+    }
+    let catalog = tools::catalog();
+    let tool = catalog
+        .iter()
+        .find(|t| t["name"] == "notification_received")
+        .unwrap();
+    assert_eq!(tool["annotations"]["readOnlyHint"], false);
+    assert_eq!(tool["annotations"]["idempotentHint"], true);
+}
+
+#[test]
 fn mcp_catalog_matches_the_generated_contract() {
     let expected: Value =
         serde_json::from_str(include_str!("../../schemas/mcp-tools-v1.json"))

@@ -72,7 +72,7 @@ impl Repositories<'_, '_> {
             Some(Some(_)) => {
                 let uncertain: bool = self.transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM notification_deliveries WHERE session_id = ?1 AND
-                        (state IN ('failed', 'unknown') OR (state = 'attempting' AND created_at < ?2)))",
+                        (receipt_state = 'legacy' OR state IN ('failed', 'unknown') OR (state = 'attempting' AND created_at < ?2)))",
                     params![scope.session_id, now.saturating_sub(15)], |row| row.get(0),
                 )?;
                 if uncertain {
@@ -94,7 +94,8 @@ impl Repositories<'_, '_> {
         }
         let binding: Option<(Option<String>, i64, i64)> = self.transaction.query_row(
             "SELECT thread_id, event_cursor, message_cursor FROM foreground_notifications WHERE session_id = ?1
-                AND NOT EXISTS(SELECT 1 FROM notification_deliveries WHERE session_id = ?1 AND state <> 'accepted')",
+                AND NOT EXISTS(SELECT 1 FROM notification_deliveries WHERE session_id = ?1
+                    AND (state <> 'accepted' OR receipt_state <> 'received'))",
             [scope.session_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).optional()?;
         let Some((Some(thread), event_cursor, message_cursor)) = binding else {
@@ -174,12 +175,50 @@ impl Repositories<'_, '_> {
         )?;
         Ok(())
     }
+
+    pub(crate) fn receive_notification(
+        &self,
+        scope: SessionScope,
+        delivery_id: OperationId,
+        now: i64,
+    ) -> Result<bool, StoreError> {
+        if !self.notifications_live(scope)? {
+            return Ok(false);
+        }
+        let receipt: Option<String> = self.transaction.query_row(
+            "SELECT receipt_state FROM notification_deliveries WHERE operation_id = ?1
+                AND session_id = ?2 AND state IN ('attempting', 'accepted')",
+            params![delivery_id, scope.session_id], |row| row.get(0),
+        ).optional()?;
+        match receipt.as_deref() {
+            Some("received") => return Ok(true),
+            Some("pending") => (),
+            _ => return Ok(false),
+        }
+        self.transaction.execute(
+            "UPDATE notification_deliveries SET receipt_state = 'received', received_at = ?2 WHERE operation_id = ?1",
+            params![delivery_id, now],
+        )?;
+        // The recipient polls after receipt. That read covers updates that
+        // arrived while this notice waited in the provider's queue. Replayed
+        // receipts must never consume updates belonging to a later notice.
+        self.transaction.execute(
+            "UPDATE foreground_notifications SET
+                event_cursor = (SELECT COALESCE(MAX(sequence), 0) FROM events WHERE run_id = ?2),
+                message_cursor = (SELECT COALESCE(MAX(sequence), 0) FROM messages WHERE run_id = ?2 AND recipient_agent_id = ?3)
+                WHERE session_id = ?1",
+            params![scope.session_id, scope.run_id, scope.agent_id],
+        )?;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::auth::SessionScope;
-    use crate::protocol::notifications::QueueOutcome;
+    use crate::protocol::notifications::{
+        NotificationAvailability, QueueOutcome,
+    };
     use crate::state::*;
 
     fn fixture() -> (Store, SessionScope) {
@@ -291,6 +330,14 @@ mod tests {
             })
             .unwrap();
         message(&mut store, scope, 3);
+        store
+            .transaction(|r| {
+                assert!(r.receive_notification(scope, id, 6)?);
+                assert!(!r.notification_pending(scope, false)?);
+                Ok(())
+            })
+            .unwrap();
+        message(&mut store, scope, 4);
         assert!(
             store
                 .transaction(|r| r.claim_notification(
@@ -302,6 +349,171 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn accepted_notification_bounds_the_provider_backlog_until_receipt() {
+        let (mut store, scope) = fixture();
+        message(&mut store, scope, 1);
+        let delivery = OperationId::generate();
+        store
+            .transaction(|r| {
+                assert!(
+                    r.claim_notification(scope, delivery, true, 3)?.is_some()
+                );
+                r.observe_notification(
+                    scope,
+                    delivery,
+                    QueueOutcome::Accepted,
+                    4,
+                )
+            })
+            .unwrap();
+        // The foreground can read updates while its queued notice is still
+        // waiting for the current provider turn to finish.
+        for sequence in 2..=5 {
+            message(&mut store, scope, sequence);
+            store
+                .transaction(|r| {
+                    assert_eq!(
+                        r.messages_after(scope.run_id, scope.agent_id, 0)?
+                            .len(),
+                        sequence as usize
+                    );
+                    assert!(!r.notification_pending(scope, true)?);
+                    assert!(
+                        r.claim_notification(
+                            scope,
+                            OperationId::generate(),
+                            true,
+                            5
+                        )?
+                        .is_none()
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
+        store
+            .transaction(|r| {
+                assert!(r.receive_notification(scope, delivery, 6)?);
+                assert!(!r.notification_pending(scope, true)?);
+                assert!(
+                    r.messages_after(scope.run_id, scope.agent_id, 0)?
+                        .iter()
+                        .all(|m| m.acknowledged_at.is_none())
+                );
+                Ok(())
+            })
+            .unwrap();
+        message(&mut store, scope, 6);
+        store.transaction(|r| {
+            // Even a fresh operation ID for an old receipt cannot swallow a
+            // later update or release a newer outstanding notice.
+            assert!(r.receive_notification(scope, delivery, 7)?);
+            assert!(r.notification_pending(scope, true)?);
+            let next = OperationId::generate();
+            assert!(r.claim_notification(scope, next, true, 7)?.is_some());
+            r.observe_notification(scope, next, QueueOutcome::Accepted, 8)?;
+            assert!(r.receive_notification(scope, delivery, 9)?);
+            assert!(!r.notification_pending(scope, true)?);
+            assert_eq!(r.transaction.query_row("SELECT receipt_state FROM notification_deliveries WHERE operation_id = ?1", [next], |row| row.get::<_, String>(0))?, "pending");
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn notification_receipts_are_scoped_and_do_not_resolve_uncertain_effects() {
+        for outcome in [
+            QueueOutcome::Accepted,
+            QueueOutcome::Unknown,
+            QueueOutcome::Failed,
+        ] {
+            let (mut store, scope) = fixture();
+            message(&mut store, scope, 1);
+            let delivery = OperationId::generate();
+            store
+                .transaction(|r| {
+                    r.claim_notification(scope, delivery, true, 3)?.unwrap();
+                    for invalid in [
+                        SessionScope {
+                            generation: 2,
+                            ..scope
+                        },
+                        SessionScope {
+                            session_id: SessionId::generate(),
+                            ..scope
+                        },
+                        SessionScope {
+                            agent_id: AgentId::generate(),
+                            ..scope
+                        },
+                    ] {
+                        assert!(!r.receive_notification(invalid, delivery, 4)?);
+                    }
+                    assert!(!r.receive_notification(
+                        scope,
+                        OperationId::generate(),
+                        4
+                    )?);
+                    // Receipt can race the queue subprocess exit and its recorded
+                    // observation. It proves receipt, not the subprocess outcome.
+                    assert!(r.receive_notification(scope, delivery, 4)?);
+                    assert!(!r.notification_pending(scope, true)?);
+                    r.observe_notification(scope, delivery, outcome, 5)?;
+                    Ok(())
+                })
+                .unwrap();
+            message(&mut store, scope, 2);
+            store
+                .transaction(|r| {
+                    assert_eq!(
+                        r.notification_pending(scope, true)?,
+                        outcome == QueueOutcome::Accepted
+                    );
+                    assert_eq!(
+                        r.notification_availability(scope, 6)?,
+                        if outcome == QueueOutcome::Accepted {
+                            NotificationAvailability::Automatic
+                        } else {
+                            NotificationAvailability::Uncertain
+                        }
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_delivery_receipt_stays_unknown() {
+        let (mut store, scope) = fixture();
+        message(&mut store, scope, 1);
+        let delivery = OperationId::generate();
+        store.transaction(|r| {
+            r.claim_notification(scope, delivery, true, 3)?.unwrap();
+            r.observe_notification(scope, delivery, QueueOutcome::Accepted, 4)?;
+            r.transaction.execute("UPDATE notification_deliveries SET receipt_state = 'legacy'", [])?;
+            assert_eq!(r.notification_availability(scope, 5)?, NotificationAvailability::Uncertain);
+            assert!(!r.receive_notification(scope, delivery, 5)?);
+            Ok(())
+        }).unwrap();
+        message(&mut store, scope, 2);
+        store
+            .transaction(|r| {
+                assert!(!r.notification_pending(scope, true)?);
+                assert!(
+                    r.claim_notification(
+                        scope,
+                        OperationId::generate(),
+                        true,
+                        6
+                    )?
+                    .is_none()
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

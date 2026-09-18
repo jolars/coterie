@@ -1066,6 +1066,17 @@ MCP operations. Mutations require a `co-ULID` operation ID; call
 `new_operation_id` once and retain the ID for retries with identical arguments.
 That local tool returns the allocated `operation_id` directly.
 
+On a matching automatic notice, `notification_received` takes its `delivery_id`
+and a new `operation_id`, then returns `data.result=foreground_notification_received`
+and `data.received`. A false receipt means the delivery is unknown, belongs to
+another session, is legacy or failed, or the session can no longer receive
+notifications. The tool cannot select a session or queue destination. Call
+`poll` after a successful receipt to read updates coalesced while the notice
+waited. Ordinary reads do not report receipt. Receipt does not acknowledge
+inbox messages, accept tasks, or resume paused work. Retrying the same receipt
+cannot release a later notice. This agent-only tool adds no public CLI command
+or exit code; the [notification contract](codex-queue.md) describes recovery.
+
 The MCP client helpers reduce cursor and retry bookkeeping. `poll` returns
 `schema_version=1` and `data` containing `cursor`, `changes`, `messages`,
 `has_more`, and `timed_out`. Pass its cursor unchanged on the next call; it

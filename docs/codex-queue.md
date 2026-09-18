@@ -3,9 +3,11 @@
 Coterie uses `codex queue` to notify the foreground when durable inbox messages
 or permitted worker lifecycle changes arrive. A coordinator can end its turn
 while waiting for delegated work once `prime.notifications` is `automatic`.
-Codex CLI 0.153.4 passed the real-provider acceptance test; upgrading to 0.154
-is not required for this feature. Start a new foreground with the updated
-Coterie binary to enable it.
+Codex CLI 0.153.4 passed the original wake-up acceptance test. The receipt
+protocol added after the [notification backlog incident](notification-loop.md)
+has deterministic coverage; its updated real-provider regression remains
+opt-in and has not been rerun. Start a new foreground with the updated Coterie
+binary to establish the current delivery contract.
 
 ## Delivery contract
 
@@ -25,16 +27,25 @@ terminal output, or another process's environment.
 
 New inbox messages belong to their durable recipient. Roles with `task:read`
 also receive external task, assignment, and session lifecycle notifications.
-Own mutations do not trigger a feedback loop. Pending changes are coalesced
-before delivery; later changes can produce another notice while Codex is busy.
+Own mutations do not trigger a feedback loop. Each foreground session has at
+most one notice awaiting receipt. Updates that arrive while that notice waits
+in Codex's queue join it, even if the active turn has already read those updates.
+Provider acceptance does not prove that the notice has started a turn.
 
 The supervisor commits an attempt before the wrapper invokes the provider and
 records the observed result afterward. The notice contains fixed instructions
-and the Coterie run, session, and generation. Worker text never becomes a
-provider user message. The recipient compares the notice with `prime.session`, reads
-its inbox and current tasks, and explicitly acknowledges handled messages.
+and the Coterie run, session, generation, and delivery ID. Worker text never
+becomes a provider user message. The recipient compares the notice with
+`prime.session`, calls `notification_received` with its `delivery_id` and a new
+`operation_id`, then calls `poll`. Receipt covers the current event and inbox
+high-water marks, so the subsequent read includes coalesced updates. It does
+not advance a polling cursor or acknowledge messages. The agent explicitly
+acknowledges handled messages afterward. Repeating a receipt, including with a
+different operation ID, cannot consume newer updates or release a newer notice.
+Ordinary reads and turn completion do not count as receipt.
 Review, integration, validation, and accepted task closure remain required.
 Notifications preserve all earlier user restrictions, pauses, and stop requests.
+Reporting receipt is transport bookkeeping and does not authorize resuming work.
 
 ## Availability and recovery
 
@@ -45,7 +56,7 @@ Notifications preserve all earlier user restrictions, pauses, and stop requests.
 | `automatic` | Queue support and the current foreground binding are established. |
 | `pending_binding` | Queue support is enabled, but provider thread metadata has not been bound. |
 | `unavailable` | This caller has no active notification binding or is not the foreground recipient. |
-| `uncertain` | A failed, interrupted, or overdue attempt prevents further automatic delivery. |
+| `uncertain` | A failed, interrupted, overdue, or legacy attempt prevents further automatic delivery. |
 
 Queue commands have a ten-second deadline and are terminated and reaped on
 timeout. A success status records provider acceptance, not agent handling.
@@ -63,9 +74,16 @@ unobserved processes, and pending shutdown prevent new delivery. A previously
 queued notice carries its old session identity and instructs the recipient to
 ignore it when that identity no longer matches.
 
-Bindings and attempts live in schema migration 18. Internal RPC protocol 13
-adds provider notification coordination; the public MCP catalog does not expose
-destination selection or delivery controls. The same-user trust boundary is
+Bindings and attempts live in schema migration 18; migration 19 adds receipt
+state and timestamps. Historical attempts become `legacy`, preserving their
+queue outcomes while making receipt explicitly unknown. Such sessions report
+`uncertain` and use the polling fallback. Restart the foreground with the new
+binary to establish a fresh generation. Coterie cannot retract notices already
+accepted by an older provider queue.
+
+Internal RPC protocol 14 adds receipt reporting. The public MCP catalog exposes
+only receipt of the caller's own notice, with no destination selection or
+delivery controls. The same-user trust boundary is
 unchanged: this is not isolation from a deliberately hostile same-UID process.
 
 ## Tests
@@ -73,8 +91,15 @@ unchanged: this is not isolation from a deliberately hostile same-UID process.
 Ordinary CI tests message coalescing, message confidentiality, explicit inbox
 acknowledgement, role authority, busy MCP calls, stale bindings, provider exit,
 shutdown, bounded command failure, and supervisor/bridge reconnection. The
-foreground notification crash matrix interrupts every traced intent and effect
-boundary and checks repeated recovery against an independent queue ledger.
+foreground notification crash matrix interrupts every traced intent, effect,
+and receipt transaction boundary and checks repeated recovery against an
+independent queue ledger. Deterministic foreground tests reproduce a long turn
+reading multiple updates before consuming its notice, followed by repeated
+read-only `prime`/`poll`/end-turn cycles. They cover all-closed tasks and an
+unchanged submission whose replacement was committed separately and conflicts
+with ordinary integration. Receipt leaves inbox acknowledgement and task
+acceptance explicit. New eligible events rearm delivery once; stale receipt
+retries cannot swallow them.
 Every historical database schema is upgraded by the migration tests.
 
 The real-provider test is an explicit opt-in requiring local Codex authentication

@@ -48,6 +48,9 @@ macro_rules! agent_tools {
 }
 
 agent_tools! {
+    NotificationReceived("notification_received", "Report receipt of the delivery_id in an automatic Coterie notice after verifying its scope with prime. Then poll to read all current updates. This only releases notification coalescing; it does not acknowledge inbox messages, accept tasks, or resume paused work. Reuse operation_id and delivery_id on retry. Ordinary prime and poll reads do not report receipt.", false) {
+        operation_id: OperationId, delivery_id: OperationId
+    } => RpcRequest::ReceiveForegroundNotification { operation_id, delivery_id },
     Whoami("whoami", "Report the authenticated agent and session identity.", true) {} => RpcRequest::Whoami,
     Prime("prime", "Read bounded current tasks, assignment summaries, recovery references, and commit_handoffs. Drain has_more using next_task as after_task; current_task stays pinned. Fetch full text with task_show and assignment_show. Establish an authorized coordinator for worktree commits before editing. Call at startup.", true) { after_task: Option<TaskId>, limit: Option<u16> } => RpcRequest::Prime { after_task, limit: limit.unwrap_or(20) },
     Status("status", "Inspect the run, agents, and tasks within this agent's authority.", true) {} => RpcRequest::Status,

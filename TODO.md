@@ -434,7 +434,7 @@ establish behavior across other builds or policies.
 Observed September 17, 2026 in run `cr-01M2GGM9R6E0HV9TB43G50V93T`,
 foreground session `cs-01M2RDNP2KQ80Z4CQ3RSZW7Y9H`, generation 1.
 
-- [ ] **High: Diagnose and stop repeated foreground notifications without new
+- [x] **High: Diagnose and stop repeated foreground notifications without new
   updates.** Identical automatic notices repeatedly started lead turns after
   implementation, integration, and validation had finished and all workers had
   exited. Each `prime` confirmed the same session and `notifications=automatic`;
@@ -453,7 +453,12 @@ foreground session `cs-01M2RDNP2KQ80Z4CQ3RSZW7Y9H`, generation 1.
   completion must cause no further queue attempts without a new eligible
   event. Test coalescing, reconnects, supervisor restart, and stale generations
   while preserving explicit inbox acknowledgement, task acceptance, and user
-  pauses. Keep any real-provider regression opt-in.
+  pauses. Keep any real-provider regression opt-in. The
+  [incident audit and regression evidence](docs/notification-loop.md) identify
+  accepted notices accumulating during a long foreground turn. Delivery now
+  permits one outstanding notice per session until explicit receipt coalesces
+  current updates. `task check` passed with 543 tests and 24 skips; the updated
+  real-provider regression remains opt-in and was not run.
 
 ### M7 gate
 
