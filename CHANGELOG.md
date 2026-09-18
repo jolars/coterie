@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.1](https://github.com/jolars/coterie/compare/v0.2.0...v0.2.1) (2026-09-18)
+
+### Bug Fixes
+- use nextest ([`31d57fc`](https://github.com/jolars/coterie/commit/31d57fcc199451cde8deb03f82abbbc4817b5c09))
+- bound foreground notifications until receipt ([`658f681`](https://github.com/jolars/coterie/commit/658f681c07d4cafbdbd12d6a52f3c442dd91241d))
+
 ## [0.2.0](https://github.com/jolars/coterie/compare/v0.1.0...v0.2.0) (2026-09-16)
 
 ### Added
