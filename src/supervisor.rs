@@ -10,6 +10,7 @@ mod progress;
 mod projects;
 mod recovery;
 mod resubmit;
+mod run_recovery;
 mod session;
 mod stop;
 
@@ -124,6 +125,9 @@ pub(crate) async fn run(
                     | CliCommand::Doctor
                     | CliCommand::Supervisor(_)
                     | CliCommand::SupervisorConnect
+                    | CliCommand::Run(crate::cli::RunArguments {
+                        command: crate::cli::RunCommand::Recover(_)
+                    })
             )
         )
     {
@@ -176,6 +180,14 @@ pub(crate) async fn run(
                 directories,
                 &overrides,
                 arguments.stop_operation,
+                arguments.recover_operation.map(|operation_id| {
+                    run_recovery::Intent {
+                        operation_id,
+                        reason: arguments
+                            .recover_reason
+                            .expect("clap requires a recovery reason"),
+                    }
+                }),
             )
             .await?;
             Ok(crate::cli::ExitCategory::Success)
@@ -201,7 +213,8 @@ pub(crate) async fn run(
             {
                 return Err(SupervisorError::InvalidProof);
             }
-            await_retirement(&directories, &project, &entry).await?;
+            await_retirement(&directories, &project, &entry, operation_id)
+                .await?;
             Ok(crate::cli::ExitCategory::Success)
         }
         None => {
@@ -245,6 +258,12 @@ pub(crate) async fn run(
             }
             doctor::run(json_output, &overrides).await
         }
+        Some(CliCommand::Run(arguments)) => {
+            if foreground_operation_id.is_some() {
+                return Err(SupervisorError::ForegroundOperationIdWithCommand);
+            }
+            run_recovery::run(arguments.command, json_output, &overrides).await
+        }
         Some(command) => {
             let follow = matches!(&command, CliCommand::Events(args) if args.follow)
                 || matches!(&command, CliCommand::Logs(args) if args.follow);
@@ -276,9 +295,14 @@ pub(crate) async fn run(
                             .map_err(|error| {
                                 error.for_operation(operation_id)
                             })?;
-                    await_retirement(&directories, &project, &entry)
-                        .await
-                        .map_err(|error| error.for_operation(operation_id))?;
+                    await_retirement(
+                        &directories,
+                        &project,
+                        &entry,
+                        operation_id,
+                    )
+                    .await
+                    .map_err(|error| error.for_operation(operation_id))?;
                     return render_public_response(
                         json_output,
                         Some(operation_id),
@@ -316,13 +340,18 @@ pub(crate) async fn run(
                 let (project, directories, entry) = operator_context
                     .ok_or(SupervisorError::InvalidProof)
                     .map_err(|error| command_error(error, operation_id))?;
-                await_retirement(&directories, &project, &entry)
-                    .await
-                    .map_err(|error| {
-                        error.for_operation(
-                            operation_id.expect("stop has an operation ID"),
-                        )
-                    })?;
+                await_retirement(
+                    &directories,
+                    &project,
+                    &entry,
+                    operation_id.expect("stop has an operation ID"),
+                )
+                .await
+                .map_err(|error| {
+                    error.for_operation(
+                        operation_id.expect("stop has an operation ID"),
+                    )
+                })?;
             }
             render_public_response(json_output, operation_id, &response)
         }
@@ -913,6 +942,13 @@ pub(crate) async fn connect_from_agent_environment()
     )
     .await
     .map(Some)
+    .map_err(|error| {
+        if error.is_transient_connection_failure() {
+            RpcFailure::new(RpcFailureCode::Unavailable, format!(
+                "cannot reconnect to run {run_id}: {error}; for an active run, ask the operator to reconnect with `coterie` in its primary project; for a stopped run, the operator must use `coterie run list` and `coterie run recover {run_id} --reason TEXT`, then launch a fresh session; this agent bridge cannot reactivate runs"
+            )).into()
+        } else { error }
+    })
 }
 
 fn parse_agent_environment<T>(
@@ -1204,7 +1240,7 @@ fn public_request(
                 true,
             )
         }
-        CliCommand::Config(_) => {
+        CliCommand::Config(_) | CliCommand::Run(_) => {
             unreachable!("configuration commands run locally")
         }
         CliCommand::Supervisor(_)
@@ -1229,6 +1265,14 @@ fn render_public_response(
             object.insert("status".to_owned(), json!("stopped"));
         }
     }
+    render_data(json_output, operation_id, &data)
+}
+
+fn render_data(
+    json_output: bool,
+    operation_id: Option<OperationId>,
+    data: &serde_json::Value,
+) -> Result<crate::cli::ExitCategory, SupervisorError> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
     if json_output {
@@ -1253,6 +1297,7 @@ async fn await_retirement(
     directories: &CoterieDirectories,
     project: &DiscoveredProject,
     stopped: &ActiveRunEntry,
+    operation_id: OperationId,
 ) -> Result<(), SupervisorError> {
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     let index = ActiveRunIndex::new(directories);
@@ -1260,6 +1305,14 @@ async fn await_retirement(
     let attached = open_configuration_store(directories, stopped.run_id)?
         .transaction(|repositories| repositories.projects(stopped.run_id))?;
     loop {
+        if open_configuration_store(directories, stopped.run_id)?
+            .transaction(|r| {
+                r.recovered_shutdown_result(stopped.run_id, operation_id)
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
         // Secondary indexes retire before the primary, so the caller's own
         // index disappearing does not prove that the whole run has retired.
         let mut indexed = false;
@@ -1488,10 +1541,21 @@ async fn connect_or_start_with_overrides(
             project.identity.clone(),
         )
     });
-    let child =
-        spawn_supervisor(&candidate, &project.canonical_path, overrides, None)?;
+    let child = spawn_supervisor(
+        &candidate,
+        &project.canonical_path,
+        overrides,
+        None,
+        None,
+    )?;
     let client = await_startup(project, directories, child, |candidate| {
-        spawn_supervisor(candidate, &project.canonical_path, overrides, None)
+        spawn_supervisor(
+            candidate,
+            &project.canonical_path,
+            overrides,
+            None,
+            None,
+        )
     })
     .await?;
     verify_configuration(directories, client.run_id(), &configuration)?;
@@ -1503,6 +1567,7 @@ fn spawn_supervisor(
     project_path: &Path,
     overrides: &crate::cli::config::Overrides,
     stop_operation: Option<OperationId>,
+    recovery: Option<&run_recovery::Intent>,
 ) -> Result<SpawnedSupervisor, SupervisorError> {
     let executable =
         std::env::current_exe().map_err(SupervisorError::CurrentExecutable)?;
@@ -1518,6 +1583,14 @@ fn spawn_supervisor(
             .arg("--stop-operation")
             .arg(operation_id.to_string());
     }
+    if let Some(recovery) = recovery {
+        command
+            .arg("--json")
+            .arg("--recover-operation")
+            .arg(recovery.operation_id.to_string())
+            .arg("--recover-reason")
+            .arg(&recovery.reason);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1531,7 +1604,7 @@ fn spawn_supervisor(
         .ok_or(SupervisorError::MissingChildStderr)?;
     let error_output = Arc::new(Mutex::new(Vec::new()));
     let reader_output = Arc::clone(&error_output);
-    std::thread::spawn(move || {
+    let error_reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         if stderr.read_to_end(&mut bytes).is_ok()
             && let Ok(mut output) = reader_output.lock()
@@ -1542,6 +1615,7 @@ fn spawn_supervisor(
     Ok(SpawnedSupervisor {
         child,
         error_output,
+        error_reader: Some(error_reader),
     })
 }
 
@@ -1612,9 +1686,20 @@ async fn await_startup(
 struct SpawnedSupervisor {
     child: Child,
     error_output: Arc<Mutex<Vec<u8>>>,
+    error_reader: Option<std::thread::JoinHandle<()>>,
 }
 
 impl SpawnedSupervisor {
+    fn recovery_failure(&mut self) -> Option<SupervisorError> {
+        // Called only after observing child exit, so stderr is closed.
+        self.error_reader.take()?.join().ok()?;
+        let value: serde_json::Value =
+            serde_json::from_str(&self.error_message()?).ok()?;
+        let code =
+            serde_json::from_value(value["error"]["code"].clone()).ok()?;
+        let message = value["error"]["message"].as_str()?.to_owned();
+        Some(SupervisorError::StartupRejected { code, message })
+    }
     fn error_message(&self) -> Option<String> {
         let output = self.error_output.lock().ok()?;
         let message = String::from_utf8_lossy(&output).trim().to_owned();
@@ -1640,6 +1725,7 @@ async fn serve(
         directories,
         &crate::cli::config::Overrides::default(),
         None,
+        None,
     )
     .await
 }
@@ -1650,6 +1736,7 @@ async fn serve_with_overrides(
     directories: CoterieDirectories,
     overrides: &crate::cli::config::Overrides,
     stop_operation: Option<OperationId>,
+    recovery: Option<run_recovery::Intent>,
 ) -> Result<(), SupervisorError> {
     let configuration = if stop_operation.is_some() {
         None
@@ -1666,26 +1753,50 @@ async fn serve_with_overrides(
         LeaseAttempt::Held => return Ok(()),
     };
     let run_directories = directories.prepare_run(active.run_id)?;
-    let mut store = match configuration {
-        Some(configuration) => initialize_store_with_configuration(
-            &run_directories.state,
-            &active,
-            &project,
-            &configuration,
-        )?,
-        None => stop::open_store(&directories, &active, &project)?,
+    let mut store = if recovery.is_some() {
+        run_recovery::open_store(&directories, &active, &project)?
+    } else {
+        match configuration.as_ref() {
+            Some(configuration) => initialize_store_with_configuration(
+                &run_directories.state,
+                &active,
+                &project,
+                configuration,
+            )?,
+            None => stop::open_store(&directories, &active, &project)?,
+        }
     };
     let socket_path = checked_socket_path(&directories, active.run_id)?;
-    let stopped = store.transaction(|repositories| {
-        Ok(repositories
-            .run(active.run_id)?
-            .is_some_and(|run| run.status == "stopped"))
-    })?;
     let mut projects = projects::AttachedProjects::new(
         directories.clone(),
         active.clone(),
         lease,
     );
+    if let Some(intent) = &recovery {
+        let snapshot =
+            store.transaction(|r| r.run_configuration(active.run_id))?;
+        ensure_configuration_compatible(
+            active.run_id,
+            &snapshot,
+            configuration
+                .as_ref()
+                .expect("recovery loads current policy"),
+        )?;
+        projects.acquire_for_reactivation(&mut store, active.run_id)?;
+        crate::fault::point("run.recover.leases_acquired");
+        run_recovery::reactivate(
+            &mut store,
+            active.run_id,
+            intent,
+            &mut runtime_sessions(&run_directories.state),
+            &runtime_workspaces(&run_directories.state),
+        )?;
+    }
+    let stopped = store.transaction(|repositories| {
+        Ok(repositories
+            .run(active.run_id)?
+            .is_some_and(|run| run.status == "stopped"))
+    })?;
     projects.recover(&mut store, active.run_id, stopped)?;
     if stopped {
         remove_stale_socket(&socket_path).await?;
@@ -1857,10 +1968,14 @@ async fn serve_listener<P: Provider, B: WorkspaceBackend>(
     loop {
         tokio::select! {
             shutdown = shutdown_rx.recv() => {
-                if shutdown.is_some() {
+                if shutdown.is_none() {
+                    return Err(SupervisorError::ShutdownChannelClosed);
+                }
+                // An archived stop response can be replayed after reactivation.
+                // Only the current durable lifecycle authorizes retirement.
+                if store.transaction(|r| Ok(r.run(active.run_id)?.is_some_and(|run| run.status == "stopped")))? {
                     break;
                 }
-                return Err(SupervisorError::ShutdownChannelClosed);
             }
             accepted = listener.accept() => {
                 let (stream, _) = accepted.map_err(|source| {
@@ -2496,6 +2611,19 @@ fn begin_shutdown<P: Provider, B: WorkspaceBackend>(
     response: oneshot::Sender<Result<RpcResponse, RpcFailure>>,
     foreground: &mut ForegroundCoordination,
 ) {
+    match store
+        .transaction(|r| r.recovered_shutdown_result(run_id, operation_id))
+    {
+        Ok(Some(result)) => {
+            let _disconnected = response.send(Ok(result));
+            return;
+        }
+        Err(error) => {
+            let _disconnected = response.send(Err(rpc_state_failure(error)));
+            return;
+        }
+        Ok(None) => {}
+    }
     let result = unix_timestamp_ms()
         .map_err(supervisor_rpc_failure)
         .and_then(|now_ms| {
@@ -5880,6 +6008,7 @@ fn rpc_state_failure(error: StoreError) -> RpcFailure {
         StoreError::OperationConflict { .. }
         | StoreError::OperationIncomplete { .. }
         | StoreError::RunNotActive { .. }
+        | StoreError::RunRecoveryConflict { .. }
         | StoreError::StaleAssignment { .. }
         | StoreError::WorkspacePathReserved { .. }
         | StoreError::ResubmissionConflict { .. }
@@ -6758,7 +6887,7 @@ async fn authenticate_request(
                 }
                 Ok(Ok(Some(_)) | Ok(None)) => Ok(Err(RpcFailure::new(
                     RpcFailureCode::Unauthenticated,
-                    "agent credentials are invalid or no longer active",
+                    "agent credentials are invalid or no longer active; reconnecting cannot restore revoked credentials; after stopped-run recovery, launch a fresh session with `coterie`",
                 ))),
                 Ok(Err(failure)) => Ok(Err(failure)),
                 Err(_) => Err(SupervisorError::CommandChannelClosed),
@@ -6852,14 +6981,19 @@ async fn reject(
 /// A failure while locating, starting, or communicating with a supervisor.
 #[derive(Debug, Error)]
 pub(crate) enum SupervisorError {
+    #[error("{message}")]
+    StartupRejected {
+        code: crate::cli::ErrorCode,
+        message: String,
+    },
     #[error(transparent)]
     Mcp(#[from] crate::mcp::McpError),
     #[error(
-        "configuration overrides apply only to foreground startup, config commands, and doctor; an active run uses its saved snapshot"
+        "configuration overrides apply only to foreground startup, run recover, config commands, and doctor; an active run uses its saved snapshot"
     )]
     ConfigurationOverridesWithCommand,
     #[error(
-        "run {run_id} configuration conflicts with its active snapshot {fingerprint} (changed: {fields}); restore the run configuration, or stop the run with `coterie stop` before starting with the new configuration"
+        "run {run_id} configuration conflicts with its saved snapshot {fingerprint} (changed: {fields}); restore the saved configuration to reconnect or recover this run; to start a new run with different policy, first stop any active run with `coterie stop`"
     )]
     ConfigurationConflict {
         run_id: RunId,
@@ -6938,7 +7072,9 @@ pub(crate) enum SupervisorError {
         child_status: Option<std::process::ExitStatus>,
         child_error: Option<String>,
     },
-    #[error("no active run is indexed for this project")]
+    #[error(
+        "no active run is indexed for this project; use `coterie run list` to discover retained runs, then `coterie run recover <run-id> --reason TEXT` to continue a stopped run; `coterie` alone starts a new run"
+    )]
     NoActiveRun,
     #[error(
         "the root `--operation-id` option applies only to foreground launch"
@@ -7032,6 +7168,7 @@ impl SupervisorError {
             error => (error, None),
         };
         let code = match error {
+            Self::StartupRejected { code, .. } => *code,
             Self::Rejected { code, .. } => match code {
                 RpcFailureCode::Unauthenticated => {
                     crate::cli::ErrorCode::Unauthenticated
@@ -7078,6 +7215,7 @@ impl SupervisorError {
                 StoreError::OperationConflict { .. }
                 | StoreError::OperationIncomplete { .. }
                 | StoreError::RunNotActive { .. }
+                | StoreError::RunRecoveryConflict { .. }
                 | StoreError::StaleAssignment { .. }
                 | StoreError::WorkspaceResultConflict { .. }
                 | StoreError::WorkspaceTargetConflict { .. },
@@ -9685,6 +9823,7 @@ while :; do :; done
                 .unwrap();
         assert!(child.wait().unwrap().success());
         super::SpawnedSupervisor {
+            error_reader: None,
             child,
             error_output: std::sync::Arc::new(
                 std::sync::Mutex::new(Vec::new()),
@@ -9856,7 +9995,8 @@ while :; do :; done
         let mut retirement = std::pin::pin!(super::await_retirement(
             &directories,
             secondary,
-            stopped
+            stopped,
+            crate::id::OperationId::generate(),
         ));
         let mut context = Context::from_waker(Waker::noop());
         assert!(

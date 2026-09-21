@@ -24,6 +24,9 @@ mod review_acceptance;
 #[path = "supervisor_runtime/recovery.rs"]
 mod recovery;
 
+#[path = "supervisor_runtime/run_recovery.rs"]
+mod run_recovery;
+
 #[path = "supervisor_runtime/context.rs"]
 mod context;
 

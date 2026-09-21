@@ -8,6 +8,7 @@ mod notifications;
 mod progress;
 mod recovery;
 pub(crate) mod resubmit;
+mod run_recovery;
 pub(crate) mod supervision;
 
 #[cfg(test)]
@@ -295,6 +296,8 @@ pub(crate) enum StoreError {
     /// Orderly shutdown did not find the expected active run.
     #[error("run `{id}` is not active during orderly shutdown")]
     RunNotActive { id: RunId },
+    #[error("cannot recover stopped run {run_id}: {reason}")]
+    RunRecoveryConflict { run_id: RunId, reason: String },
 
     /// A credential already marked inactive cannot be activated again.
     #[error("session `{session_id}` credential is already revoked")]
@@ -810,6 +813,7 @@ pub(crate) struct EventRecord {
 pub(crate) enum EventKind {
     RunStarted,
     RunStopped,
+    RunRecovered,
     RunShutdownChanged,
     SessionControlChanged,
     SessionRestartLimited,
@@ -844,6 +848,7 @@ impl EventKind {
         match self {
             Self::RunStarted => "run.started",
             Self::RunStopped => "run.stopped",
+            Self::RunRecovered => "run.recovered",
             Self::RunShutdownChanged => "run.shutdown_changed",
             Self::SessionControlChanged => "session.control_changed",
             Self::SessionRestartLimited => "session.restart_limited",

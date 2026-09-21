@@ -11,6 +11,8 @@ mod resubmit_tests;
 
 #[path = "recovery_tests.rs"]
 mod recovery_tests;
+#[path = "run_recovery_tests.rs"]
+mod run_recovery_tests;
 
 #[path = "git_publication_tests.rs"]
 mod git_publication_tests;
@@ -30,6 +32,16 @@ fn crash_matrix_attached_run_publication_and_retirement() {
 #[test]
 fn crash_matrix_offline_stop_recovery() {
     matrix("runtime-stop");
+}
+
+#[test]
+fn crash_matrix_stopped_run_recovery() {
+    matrix("runtime-run-recovery");
+}
+
+#[test]
+fn crash_matrix_stopped_run_dirty_ownership() {
+    matrix("recover-run");
 }
 
 #[test]
@@ -300,12 +312,14 @@ fn crash_matrix_covers_all_declared_boundaries() {
     for source in [
         include_str!("../state.rs"),
         include_str!("../state/recovery.rs"),
+        include_str!("../state/run_recovery.rs"),
         include_str!("../supervisor.rs"),
         include_str!("session.rs"),
         include_str!("projects.rs"),
         include_str!("idle.rs"),
         include_str!("notifications.rs"),
         include_str!("recovery.rs"),
+        include_str!("run_recovery.rs"),
         include_str!("../providers.rs"),
         include_str!("../providers/notifications.rs"),
         include_str!("../project.rs"),
@@ -335,6 +349,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "finish",
         "resubmit",
         "recover-assignment",
+        "recover-run",
         "continue-assignment",
         "integrate",
         "merge",
@@ -349,6 +364,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "runtime",
         "runtime-attachment",
         "runtime-stop",
+        "runtime-run-recovery",
         "process",
         "interrupt-process",
         "terminate-process",
@@ -1350,9 +1366,14 @@ async fn runtime_operator_completion_still_waits_for_retirement() {
 fn runtime_child(root: &Path, mode: &str, case: &str) {
     let attach = case != "runtime" && case != "runtime-stop";
     let stopping = case == "runtime-stop";
+    let reactivating = case == "runtime-run-recovery";
+    let recovery = run_recovery::Intent {
+        operation_id: "co-01ARZ3NDEKTSV4RRFFQ69G5FC1".parse().unwrap(),
+        reason: "Continue retained work.".to_owned(),
+    };
     if mode == "exercise" {
         prepare_project(root);
-        if case == "runtime-attachment" {
+        if case == "runtime-attachment" || reactivating {
             Repository::init(root.join("library")).unwrap();
         }
     }
@@ -1364,6 +1385,57 @@ fn runtime_child(root: &Path, mode: &str, case: &str) {
         project.identity.clone(),
     );
     let directories = CoterieDirectories::from_environment().unwrap();
+    if reactivating && mode == "exercise" {
+        let run = directories.prepare_run(active.run_id).unwrap();
+        let mut store =
+            initialize_store(&run.state, &active, &project).unwrap();
+        let library =
+            DiscoveredProject::discover(root.join("library")).unwrap();
+        store
+            .transaction(|r| {
+                r.insert_project(&ProjectRecord {
+                    id: "cp-01ARZ3NDEKTSV4RRFFQ69G5FB2".parse().unwrap(),
+                    run_id: active.run_id,
+                    alias: "library".to_owned(),
+                    original_path: library.original_path,
+                    canonical_path: library.canonical_path,
+                    identity: library.identity,
+                    is_primary: false,
+                    attached_at: unix_timestamp().unwrap(),
+                })?;
+                r.insert_task(&TaskRecord {
+                    id: TASK.parse().unwrap(),
+                    run_id: active.run_id,
+                    project_id: active.project_id,
+                    group_id: None,
+                    title: "Retain this task".to_owned(),
+                    description: "Preserve dependencies and ownership"
+                        .to_owned(),
+                    status: TaskStatus::Open,
+                    result: None,
+                    created_at: 1,
+                    updated_at: 1,
+                })?;
+                let stop_id = "co-01ARZ3NDEKTSV4RRFFQ69G5FC0".parse().unwrap();
+                r.begin_run_shutdown(
+                    active.run_id,
+                    stop_id,
+                    FIXTURE_TIME_MS,
+                    250,
+                    5000,
+                )?;
+                r.stop_run(active.run_id, unix_timestamp().unwrap())?;
+                r.complete_shutdown_operation(
+                    active.run_id,
+                    &serde_json::to_value(RpcResponse::ShuttingDown {
+                        run_id: active.run_id,
+                        operation_id: stop_id,
+                    })?,
+                    FIXTURE_TIME_MS,
+                )
+            })
+            .unwrap();
+    }
     if stopping {
         if mode == "exercise" {
             let run = directories.prepare_run(active.run_id).unwrap();
@@ -1412,6 +1484,19 @@ fn runtime_child(root: &Path, mode: &str, case: &str) {
     let socket = directories.socket_path(active.run_id);
     let operator_entry = active.clone();
     let library = root.join("library");
+    let already_recovered_and_stopped = reactivating && {
+        let mut store =
+            open_configuration_store(&directories, active.run_id).unwrap();
+        recovery
+            .replay(&mut store, active.run_id)
+            .unwrap()
+            .is_some()
+            && store
+                .transaction(|r| {
+                    Ok(r.run(active.run_id)?.unwrap().status == "stopped")
+                })
+                .unwrap()
+    };
     let operator = async move {
         // The typed handshake establishes readiness. The parent watchdog bounds
         // the whole scenario, including retries and RPCs, under host load.
@@ -1428,7 +1513,7 @@ fn runtime_child(root: &Path, mode: &str, case: &str) {
             }
             sleep(Duration::from_millis(5)).await;
         };
-        if attach {
+        if attach && !reactivating {
             client
                 .request_unbounded(RpcRequest::ProjectAttach {
                     operation_id: "co-01ARZ3NDEKTSV4RRFFQ69G5FAZ"
@@ -1446,24 +1531,36 @@ fn runtime_child(root: &Path, mode: &str, case: &str) {
             .await?;
         Ok(())
     };
-    let result = runtime.block_on(coordinate_runtime(
-        async {
-            if stopping {
-                serve_with_overrides(
-                    active.clone(),
-                    project.clone(),
-                    directories.clone(),
-                    &crate::cli::config::Overrides::default(),
-                    Some(OPERATION.parse().unwrap()),
-                )
-                .await
-            } else {
-                serve(active.clone(), project.clone(), directories.clone())
-                    .await
-            }
-        },
-        operator,
-    ));
+    let supervisor = async {
+        if reactivating {
+            serve_with_overrides(
+                active.clone(),
+                project.clone(),
+                directories.clone(),
+                &crate::cli::config::Overrides::default(),
+                None,
+                Some(recovery.clone()),
+            )
+            .await
+        } else if stopping {
+            serve_with_overrides(
+                active.clone(),
+                project.clone(),
+                directories.clone(),
+                &crate::cli::config::Overrides::default(),
+                Some(OPERATION.parse().unwrap()),
+                None,
+            )
+            .await
+        } else {
+            serve(active.clone(), project.clone(), directories.clone()).await
+        }
+    };
+    let result = if already_recovered_and_stopped {
+        runtime.block_on(supervisor)
+    } else {
+        runtime.block_on(coordinate_runtime(supervisor, operator))
+    };
     injection::disarm();
     result.unwrap();
     assert!(
@@ -1484,6 +1581,23 @@ fn runtime_child(root: &Path, mode: &str, case: &str) {
     ));
     let run = directories.runs.join(RUN);
     let mut store = initialize_store(&run, &active, &project).unwrap();
+    if reactivating {
+        store
+            .transaction(|r| {
+                assert_eq!(r.tasks(active.run_id)?.len(), 1);
+                assert_eq!(r.projects(active.run_id)?.len(), 2);
+                assert_eq!(
+                    r.events_after(active.run_id, 0, 1000)?
+                        .iter()
+                        .filter(|event| event.event_type == "run.recovered")
+                        .count(),
+                    1
+                );
+                assert!(r.operation(recovery.operation_id)?.is_some());
+                Ok(())
+            })
+            .unwrap();
+    }
     assert_eq!(
         store
             .transaction(|r| r.run(active.run_id))
@@ -1618,6 +1732,10 @@ impl Fixture {
             recovery_tests::prepare(self, case);
             return;
         }
+        if case == "recover-run" {
+            run_recovery_tests::prepare(self);
+            return;
+        }
         if matches!(
             case,
             "finish"
@@ -1689,6 +1807,7 @@ impl Fixture {
 
     fn exercise(&mut self, case: &str) {
         match case {
+            "recover-run" => run_recovery_tests::exercise(self),
             "task" => self.task(),
             "spawn" => {
                 self.spawn().unwrap();
@@ -1895,6 +2014,10 @@ impl Fixture {
     }
 
     fn recover(&mut self, case: &str) {
+        if case == "recover-run" {
+            run_recovery_tests::exercise(self);
+            return;
+        }
         let run_id = RUN.parse().unwrap();
         let now = unix_timestamp().unwrap();
         if matches!(case, "recover-assignment" | "continue-assignment") {
@@ -1963,6 +2086,10 @@ impl Fixture {
     }
 
     fn verify(&mut self, case: &str) {
+        if case == "recover-run" {
+            run_recovery_tests::verify(self);
+            return;
+        }
         if matches!(case, "recover-assignment" | "continue-assignment") {
             recovery_tests::verify(self, case);
             return;

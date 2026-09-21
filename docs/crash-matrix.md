@@ -1,5 +1,14 @@
 # Crash recovery matrix
 
+Stopped-run recovery adds `runtime-run-recovery` and `recover-run` scenarios.
+They interrupt lease validation, the transaction that records `run.recovered`
+and reactivates the run, index and socket publication, and later retirement.
+The dirty-work scenario retains staged, unstaged, and untracked changes and
+compares raw source index bytes. Every crash is recovered twice; the second
+retry must leave database rows and retained files unchanged. Runtime recovery
+keeps the selected run ID, both attached projects, and the original task, with
+exactly one recovery event.
+
 The M4 crash matrix lives in
 [`src/supervisor/crash_tests.rs`](../src/supervisor/crash_tests.rs). It runs in
 the ordinary test suite, using temporary real Git repositories, SQLite files,

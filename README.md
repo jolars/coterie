@@ -61,6 +61,12 @@ an observed exit and no operation is pending or uncertain, new runs stop after
 global configuration to change that interval, or set it to `0` to require
 `coterie stop`. Read-only polling does not keep an idle run alive. Shutdown
 retains tasks, transcripts, and workspaces; the next launch starts a new run.
+To continue a retained run, use `coterie run list`, then
+`coterie run recover <run-id> --reason 'Continue retained work.'` before
+launching Coterie. Recovery preserves the original task graph and reports,
+checks saved policy and project leases, and requires fresh authenticated
+sessions. Interrupted assignments continue through `task recover` into fresh
+worktrees. See the [stopped-run recovery contract](docs/cli-contract.md#coterie-run-recover).
 Historical runs retain their saved policy with automatic shutdown disabled.
 
 ## Installation

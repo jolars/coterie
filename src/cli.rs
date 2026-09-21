@@ -13,6 +13,8 @@ mod resubmit_tests;
 
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod run_recovery_tests;
 
 #[cfg(test)]
 mod commit_handoff_tests;
@@ -59,6 +61,8 @@ pub(crate) struct Arguments {
 pub(crate) enum Command {
     /// Validate, inspect, or lock declarative configuration without starting a run.
     Config(config::ConfigArguments),
+    /// Discover retained runs or explicitly reactivate a stopped run as operator.
+    Run(RunArguments),
     /// Inspect the active run, agents, and tasks.
     Status,
     /// Diagnose operator health, foreground terminals, and durable state.
@@ -113,6 +117,33 @@ pub(crate) enum Command {
     SupervisorShutdown,
     #[command(name = "__mcp", hide = true)]
     Mcp,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RunArguments {
+    #[command(subcommand)]
+    pub(crate) command: RunCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum RunCommand {
+    /// List retained runs attached to this project without starting a supervisor.
+    List,
+    /// Reactivate this stopped run, preserving tasks, reports, and workspaces.
+    ///
+    /// Operator only. Stop any replacement run first and restore the saved
+    /// configuration. Then launch coterie for a fresh session. Use task recover
+    /// on interrupted assignments before spawning fresh worktree continuations.
+    Recover(RunRecoverArguments),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct RunRecoverArguments {
+    pub(crate) run_id: crate::id::RunId,
+    #[arg(long)]
+    pub(crate) reason: String,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
 }
 
 /// Run-scoped project commands.
@@ -474,8 +505,12 @@ pub(crate) struct PrivateSupervisorArguments {
     pub(crate) run_id: crate::id::RunId,
     pub(crate) project_id: crate::id::ProjectId,
     pub(crate) project_path: PathBuf,
-    #[arg(long)]
+    #[arg(long, conflicts_with = "recover_operation")]
     pub(crate) stop_operation: Option<OperationId>,
+    #[arg(long, requires = "recover_reason")]
+    pub(crate) recover_operation: Option<OperationId>,
+    #[arg(long, requires = "recover_operation")]
+    pub(crate) recover_reason: Option<String>,
 }
 
 /// The schema version emitted by the programmatic CLI interface.
@@ -578,7 +613,9 @@ impl From<ExitCategory> for std::process::ExitCode {
 }
 
 /// A stable, machine-readable CLI error code.
-#[derive(Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, JsonSchema, PartialEq, Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(
     not(test),

@@ -4,6 +4,7 @@ pub(crate) mod context;
 pub(crate) mod notifications;
 pub(crate) mod progress;
 pub(crate) mod recovery;
+pub(crate) mod run_recovery;
 
 use std::io;
 
@@ -548,7 +549,15 @@ pub(crate) struct IntegrationSummary {
 
 /// Counts of tasks in each durable lifecycle state.
 #[derive(
-    Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
 )]
 pub(crate) struct TaskCounts {
     pub(crate) open: u64,

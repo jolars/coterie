@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI mutation success response v1",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/RunRecoveryReport"
+    },
+    "operation_id": {
+      "$ref": "#/$defs/OperationId"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "operation_id",
+    "data"
+  ],
+  "$defs": {
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "OperationId": {
+      "type": "string",
+      "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "RunId": {
+      "type": "string",
+      "pattern": "^cr-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "RunRecoveryReport": {
+      "type": "object",
+      "properties": {
+        "next_step": {
+          "type": "string"
+        },
+        "operation_id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "previous_stop_operation_id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "previous_stopped_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "recovered_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        }
+      },
+      "required": [
+        "run_id",
+        "operation_id",
+        "previous_stop_operation_id",
+        "previous_stopped_at",
+        "recovered_at",
+        "next_step"
+      ]
+    }
+  }
+}

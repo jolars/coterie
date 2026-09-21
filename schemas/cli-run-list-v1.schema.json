@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Coterie CLI success response v1",
+  "type": "object",
+  "properties": {
+    "data": {
+      "$ref": "#/$defs/RetainedRuns"
+    },
+    "schema_version": {
+      "$ref": "#/$defs/CliSchemaVersion"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "data"
+  ],
+  "$defs": {
+    "CliSchemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "RetainedRun": {
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "primary_root": {
+          "type": "string"
+        },
+        "primary_root_bytes": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0
+          }
+        },
+        "run_id": {
+          "$ref": "#/$defs/RunId"
+        },
+        "status": {
+          "type": "string"
+        },
+        "stopped_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "tasks": {
+          "$ref": "#/$defs/TaskCounts"
+        }
+      },
+      "required": [
+        "run_id",
+        "status",
+        "primary_root",
+        "primary_root_bytes",
+        "created_at",
+        "stopped_at",
+        "tasks"
+      ]
+    },
+    "RetainedRuns": {
+      "type": "object",
+      "properties": {
+        "runs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RetainedRun"
+          }
+        }
+      },
+      "required": [
+        "runs"
+      ]
+    },
+    "RunId": {
+      "type": "string",
+      "pattern": "^cr-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
+    },
+    "TaskCounts": {
+      "description": "Counts of tasks in each durable lifecycle state.",
+      "type": "object",
+      "properties": {
+        "canceled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "closed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "in_progress": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "open": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "submitted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "open",
+        "in_progress",
+        "submitted",
+        "closed",
+        "canceled"
+      ]
+    }
+  }
+}

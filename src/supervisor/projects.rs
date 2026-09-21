@@ -111,6 +111,36 @@ impl AttachedProjects {
         Ok(())
     }
 
+    /// Acquire and validate the entire project set before publishing any index.
+    pub(super) fn acquire_for_reactivation(
+        &mut self,
+        store: &mut Store,
+        run_id: RunId,
+    ) -> Result<(), SupervisorError> {
+        let (projects, policy) = store.transaction(|r| {
+            Ok((r.projects(run_id)?, r.configuration(run_id)?))
+        })?;
+        for project in projects {
+            if let Some(entry) = ActiveRunIndex::new(&self.directories)
+                .lookup(&project.identity)?
+                && entry.run_id != run_id
+            {
+                return Err(conflict(format!(
+                    "project `{}` belongs to replacement run {}; explicitly stop that run before recovering {}",
+                    project.alias, entry.run_id, run_id
+                )).into());
+            }
+            self.acquire(&project)?;
+            if !project.is_primary {
+                validate_restrictions(
+                    &DiscoveredProject::discover(&project.canonical_path)?,
+                    &policy,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn acquire(
         &mut self,
         project: &ProjectRecord,

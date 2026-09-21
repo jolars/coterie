@@ -18,7 +18,7 @@ impl Repositories<'_, '_> {
             || self.run_shutdown(run_id)?.is_some()
         {
             return Err(reject(
-                "the run is stopped or draining; preserve the workspace and inspect `coterie doctor`",
+                "the run is stopped or draining; task recovery requires an active run; inspect `coterie doctor`; after shutdown completes, ask the operator to use `coterie run list` and `coterie run recover <run-id> --reason TEXT`, then launch a fresh session before retrying `task recover`",
             ));
         }
         let assignment = self

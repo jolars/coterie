@@ -693,7 +693,55 @@ checks eligibility and records shutdown intent in one transaction, then uses
 the ordinary shutdown phases to mark the run stopped, retire every attached
 project index and the socket, and release leases. Tasks, transcripts, and
 workspaces remain available on disk. Launching after idle shutdown starts a
-new run. Unknown process state never qualifies as idle.
+new run unless the operator explicitly recovers a retained run first. Unknown
+process state never qualifies as idle.
+
+### Explicit stopped-run recovery
+
+`coterie run list` discovers retained runs attached to the current project,
+including stopped runs that no longer have an active index. Discovery reads
+existing state without starting supervisors or modifying databases. It reports
+the run ID, primary root, lifecycle, task counts, and last stop time.
+
+`coterie run recover <run-id> --reason TEXT` explicitly reactivates that same
+run. It is an operator command, separate from reconnecting to an active run.
+The operator then launches `coterie` for a fresh authenticated foreground
+session. Recovery preserves task IDs, dependencies, accepted results, messages,
+reports, transcript references, and assignment history in the original store.
+It does not import work into a replacement run or resume old credentials.
+
+Before reactivation, the supervisor validates the saved configuration against
+current policy and locks, rechecks attached project identities and restrictions,
+and acquires every exclusive project lease. An existing replacement run must
+be explicitly stopped first, even when its supervisor is unreachable. Recovery
+never replaces that run's indexes. All recorded sessions must have observed
+exits with revoked credentials, and unresolved resource operations prevent
+reactivation. An observed exit followed by fresh provider proof can finalize a
+pending control record left by synchronous shutdown before the next control
+poll. Missing exit evidence and mismatched control generations still refuse
+recovery. Unfinished assignments retain their ownership and draining state;
+Git ownership is checked without refreshing the source index or changing files.
+
+The supervisor atomically records the prior shutdown, reason, operator, and
+recovery operation in an append-only `run.recovered` event, clears the completed
+shutdown marker, and reactivates the run. This durable intent precedes index
+publication. Interrupted publication can be retried for the exact run and
+operation ID. Exact retries return the original recovery result, including
+after subsequent task acceptance or another shutdown; they never reactivate a
+later stopped run again. Changed arguments conflict. No old session is relaunched.
+
+The stop operation that preceded recovery also remains replayable. Its recorded
+result describes the earlier shutdown and does not stop the continued run or
+wait for its new indexes to retire. A new stop requires a new operation ID.
+
+Unfinished assignments require the ordinary `task recover` checks before a
+fresh worktree continuation can claim their task. Recovery does not grant
+writable access to preserved worktrees or transfer changes automatically. The
+operator or continuation selects and copies useful changes into the fresh
+workspace while leaving source files, index, and references intact, then
+validates, commits, submits, integrates, and explicitly closes the same task.
+Dependencies remain blocked until accepted closure. The optional automated
+transfer helper remains separate future work.
 
 ## Embedded task and state store
 
@@ -1577,7 +1625,7 @@ retirement and lease release. Recovery can finish retirement if a crash occurs
 after the stopped state commits. M4 applies these phases to the primary project;
 Attachment retirement removes secondary indexes before the primary index, then
 releases all leases. The primary index therefore remains a recovery entrypoint
-after an interrupted retirement. Recovery of a stopped run acquires only the
+after an interrupted retirement. Finishing retirement of a stopped run acquires only the
 projects still indexed to that run and preserves indexes belonging to newer runs.
 Stopping from any attached project waits for the run's socket and all of its
 attached-project index entries to retire. Entries belonging to newer runs do

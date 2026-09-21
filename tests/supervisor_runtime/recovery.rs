@@ -77,11 +77,33 @@ fn read_only_worktree_has_no_commit_handoff() {
 #[test]
 fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure()
  {
+    recovery_workflow("active");
+}
+
+#[test]
+fn stopped_run_explicit_shutdown_continues_through_accepted_closure() {
+    recovery_workflow("explicit");
+}
+
+#[test]
+fn stopped_run_idle_shutdown_continues_through_accepted_closure() {
+    recovery_workflow("idle");
+}
+
+fn recovery_workflow(shutdown: &str) {
     let fixture = TestEnvironment::new();
     write_global(
         &fixture,
         &include_str!("../../examples/config/global.toml")
-            .replace("coordinator", "planner"),
+            .replace("coordinator", "planner")
+            .replace(
+                "idle_timeout_seconds = 60",
+                if shutdown == "idle" {
+                    "idle_timeout_seconds = 2"
+                } else {
+                    "idle_timeout_seconds = 0"
+                },
+            ),
     );
     fs::write(
         fixture.root.join("bin/codex"),
@@ -93,6 +115,8 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
     )
     .unwrap();
     fixture.launch(&[]);
+    let run_status = fixture.run_json(&["status", "--json"]);
+    let run_id = run_status["data"]["run_id"].as_str().unwrap();
     let task = fixture.run_json(&[
         "task",
         "create",
@@ -153,6 +177,11 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         "interrupted implementation",
     );
     fs::write(source.join("untracked.txt"), "preserve dirty work\n").unwrap();
+    fs::write(
+        source.join("zzz-unselected.txt"),
+        "leave this in the source\n",
+    )
+    .unwrap();
     fs::write(source.join("staged.txt"), "preserve staged artifact\n").unwrap();
     let source_repo = Repository::open(&source).unwrap();
     let mut index = source_repo.index().unwrap();
@@ -183,7 +212,49 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         "--json",
     ];
     rejected(&fixture, &recovery_args, "inactivity");
-    fs::write(format!("{}.exit", capture.display()), "exit").unwrap();
+    if shutdown == "explicit" {
+        fixture.run_json(&["stop", "--json"]);
+    } else {
+        fs::write(format!("{}.exit", capture.display()), "exit").unwrap();
+    }
+    let run_recovery_args = [
+        "run",
+        "recover",
+        run_id,
+        "--reason",
+        "Continue the interrupted task.",
+        "--operation-id",
+        "co-01ARZ3NDEKTSV4RRFFQ69G5FC1",
+        "--json",
+    ];
+    if shutdown == "idle" {
+        wait_until("idle stopped run retirement", || {
+            fixture.index_entry_count() == 0
+        });
+    }
+    let run_recovery = if shutdown != "active" {
+        let listed = fixture.run_json(&["run", "list", "--json"]);
+        assert_eq!(listed["data"]["runs"][0]["run_id"], run_id);
+        assert_eq!(listed["data"]["runs"][0]["status"], "stopped");
+        if shutdown == "explicit" {
+            fs::rename(source.join(".git"), source.join(".git.saved")).unwrap();
+            rejected(&fixture, &run_recovery_args, "ownership");
+            assert_eq!(fixture.index_entry_count(), 0);
+            fs::rename(source.join(".git.saved"), source.join(".git")).unwrap();
+        }
+        let result = fixture.run_json(&run_recovery_args);
+        assert_eq!(
+            fs::read(source_repo.path().join("index")).unwrap(),
+            source_index
+        );
+        let mut stale = fixture.agent_command(&old_environment);
+        stale.args(["prime", "--json"]);
+        assert_eq!(run(stale).status.code(), Some(6));
+        fixture.launch(&[]);
+        Some(result)
+    } else {
+        None
+    };
     wait_until("observed worker exit", || {
         let status = fixture.run_json(&["status", "--json"]);
         status["data"]["agents"]
@@ -241,7 +312,7 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
             .as_array()
             .unwrap()
             .len(),
-        3
+        4
     );
     assert_eq!(handoff["mechanical"]["complete"], true);
     assert_eq!(recovered["data"]["handoff"]["staged_paths"], 1);
@@ -392,6 +463,7 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
             "continue preserved work",
         );
     }
+    assert!(!continuation.join("zzz-unselected.txt").exists());
     fixture.run_agent_json(
         &[
             "finish",
@@ -455,6 +527,9 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         dependent["data"]["task"]["id"]
     );
     assert_eq!(fixture.run_json(&recovery_args), recovered);
+    if let Some(result) = &run_recovery {
+        assert_eq!(fixture.run_json(&run_recovery_args), *result);
+    }
     let after_closure = super::context::read_detail(
         &fixture,
         "assignment",
@@ -490,7 +565,90 @@ fn recovery_continuation_integrates_and_releases_dependencies_only_after_closure
         fs::read_to_string(source.join("untracked.txt")).unwrap(),
         "preserve dirty work\n"
     );
+    assert_eq!(
+        fs::read_to_string(source.join("zzz-unselected.txt")).unwrap(),
+        "leave this in the source\n"
+    );
+    let accepted = super::context::read_detail(&fixture, "task", task_id);
     fixture.run_json(&["stop", "--json"]);
+    if shutdown != "active" {
+        let retained_transcripts = || {
+            let directory =
+                fixture.state.join(format!("coterie/runs/{run_id}"));
+            let db = rusqlite::Connection::open_with_flags(
+                directory.join("state.sqlite3"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let mut statement = db
+                .prepare("SELECT id, transcript_path FROM sessions ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<Vec<u8>>>(1)?,
+                    ))
+                })
+                .unwrap()
+                .map(|row| {
+                    let (id, path) = row.unwrap();
+                    let bytes = path.as_ref().and_then(|path| {
+                        match fs::read(
+                            directory.join(std::ffi::OsStr::from_bytes(path)),
+                        ) {
+                            Ok(bytes) => Some(bytes),
+                            Err(error)
+                                if error.kind()
+                                    == std::io::ErrorKind::NotFound =>
+                            {
+                                None
+                            }
+                            Err(error) => panic!(
+                                "cannot inspect retained transcript: {error}"
+                            ),
+                        }
+                    });
+                    (id, path, bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let transcripts = retained_transcripts();
+        assert!(transcripts.iter().any(|(_, _, bytes)| {
+            bytes.as_ref().is_some_and(|bytes| !bytes.is_empty())
+        }));
+        fixture.run_json(&[
+            "run",
+            "recover",
+            run_id,
+            "--reason",
+            "Continue the dependent task.",
+            "--operation-id",
+            "co-01ARZ3NDEKTSV4RRFFQ69G5FC2",
+            "--json",
+        ]);
+        assert_eq!(retained_transcripts(), transcripts);
+        assert_eq!(
+            super::context::read_detail(&fixture, "task", task_id),
+            accepted
+        );
+        assert_eq!(
+            super::context::read_detail(
+                &fixture,
+                "assignment",
+                next["data"]["assignment_id"].as_str().unwrap()
+            ),
+            after_closure
+        );
+        assert_eq!(fixture.run_json(&recovery_args), recovered);
+        assert_eq!(fixture.run_json(&run_recovery_args), run_recovery.unwrap());
+        assert_eq!(
+            fixture.run_json(&["task", "ready", "--json"])["data"]["tasks"][0]
+                ["id"],
+            dependent["data"]["task"]["id"]
+        );
+        fixture.run_json(&["stop", "--json"]);
+    }
 }
 
 #[test]

@@ -1,5 +1,26 @@
 # Recovery handoffs
 
+If the run has stopped, first select it from an operator terminal:
+
+```console
+coterie run list
+coterie run recover <run-id> --reason 'Continue retained work.' --operation-id <operation-id>
+coterie
+```
+
+This reactivates the original run and starts a fresh foreground session on the
+next launch. Tasks, dependencies, accepted results, messages, handoffs, and
+transcript references keep their identities. Stop any replacement run first
+and restore the selected run's saved configuration. Recovery acquires all
+project leases and verifies process exits and retained ownership before
+activation. Stale credentials remain revoked. The
+[CLI contract](cli-contract.md#coterie-run-recover) describes
+discovery, policy checks, provenance, and idempotent retries.
+
+Reactivation leaves unfinished assignments preserved and draining. Continue
+them with the task recovery workflow below. Submitted tasks retain their normal
+review, integration, and acceptance requirements.
+
 When a worker exits before submission, recover its task with a sourced report:
 
 ```console
@@ -77,6 +98,13 @@ fresh continuation, MCP reconnects and full-detail paging, submission,
 integration, validation, and closure. The source HEAD, files, and raw index
 bytes must survive, and the continuation receives only its fresh writable
 workspace. Full handoff access does not grant source transcript access.
+
+Stopped-run variants exercise explicit and idle shutdown before the same
+workflow, replacement-run and policy conflicts, fresh authentication, and
+retained source ownership. Separate crash matrices interrupt run reactivation
+and index publication, and inspect dirty and staged source work. Every
+interrupted recovery is retried twice without duplicating state or changing
+source files or index bytes.
 
 Unit tests cover native paths, incomplete inspections, attribution, credential
 redaction, missing source references, immutable storage, changed-request

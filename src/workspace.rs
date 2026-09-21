@@ -351,6 +351,27 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         Ok(self.backend.recovery_snapshot(&workspace, &project)?)
     }
 
+    /// Inspects retained ownership before run reactivation without granting access.
+    pub(crate) fn verify_retained(
+        &self,
+        records: &[(WorkspaceRecord, ProjectRecord)],
+    ) -> Result<(), WorkspaceError> {
+        for (workspace, project) in records {
+            if self.backend.observe(workspace, project)?
+                != ExternalResourceState::Observed
+            {
+                return Err(StoreError::StaleAssignment {
+                    id: workspace.assignment_id,
+                }
+                .into());
+            }
+            if workspace.kind == "worktree" {
+                self.backend.recovery_snapshot(workspace, project)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Captures a read-only, immutable plan for one guarded integration.
     pub(crate) fn prepare_integration(
         &self,

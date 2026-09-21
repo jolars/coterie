@@ -7,7 +7,7 @@ output, retry behavior, authentication, and process exit codes.
 
 Generated `--help` output is authoritative for argument spelling. The reference
 below covers every implemented public command. Commands other than the foreground
-launch, `doctor`, and `config` require an active run and never create one as a side
+launch, `doctor`, `config`, and `run` require an active run and never create one as a side
 effect. Every subcommand accepts the global `--json` option; mutating run
 commands also accept
 `--operation-id <co-ULID>` as shown below.
@@ -79,7 +79,7 @@ current `coterie` to create a new run. The stopped run retains its tasks,
 transcripts, and workspaces, including unfinished work. Coterie does not
 automatically stop an incompatible supervisor or discard its socket and index.
 
-Startup, `config`, and `doctor` accept these configuration options:
+Startup, `run recover`, `config`, and `doctor` accept these configuration options:
 
 | Option | Effective setting |
 | --- | --- |
@@ -111,7 +111,8 @@ configuration and CLI overrides cannot change it. Durable events reset the
 timer, read-only commands do not, and supervisor recovery starts a fresh full
 interval. Idle shutdown records `reason: "idle_timeout"` in a
 `run.shutdown_changed` event and follows the same retention and retirement
-rules as `stop`. A later launch starts a new run. Existing runs migrated from
+rules as `stop`. A later launch starts a new run unless the operator first
+selects the retained run with `run recover`. Existing runs migrated from
 before this setting retain disabled idle shutdown and their original portable
 fingerprint; their saved policy must still match when reconnecting.
 
@@ -191,6 +192,63 @@ suggests restoring the configuration or reviewing its files and running
 release. `check` and `show` never modify a lock. Human validation and creation
 messages go to standard output; human effective reports are pretty JSON.
 Failures use standard error and leave standard output empty.
+
+### `coterie run list`
+
+```console
+coterie run list --json
+```
+
+These commands require the operator channel. `list` reads retained run databases
+attached to the current project, including runs whose active indexes have been
+retired. It does not start a supervisor or create runtime state. Its `runs` array
+is ordered by run ID. Entries report `run_id`, recorded `status`, `primary_root`
+and lossless `primary_root_bytes`, `created_at`, `stopped_at`, and task counts.
+An `active` record is desired state, not proof that its supervisor is alive.
+The [list schema](../schemas/cli-run-list-v1.schema.json) is generated from Rust.
+
+### `coterie run recover`
+
+```console
+coterie run recover <cr-ULID> --reason 'Continue retained work.' \
+  --operation-id <co-ULID> --json
+coterie
+```
+
+`recover` reactivates the selected stopped run, preserving its task graph,
+accepted results, reports, transcripts, and assignment identities. It starts
+the supervisor; the subsequent foreground launch creates a fresh authenticated
+session. It never imports work into a replacement run or renews old credentials.
+Run it from any attached project, using the original configuration overrides
+when needed. Policy is resolved from the saved primary root.
+
+Recovery checks the saved policy and current locks, every project identity and
+lease, observed process exits and revoked credentials, resolved resource intents,
+and retained assignment ownership. Restore changed policy before retrying
+(`invalid_configuration`, exit 3). Explicitly stop a replacement run first;
+conflicting indexes, held leases, incomplete shutdown, and uncertain ownership
+produce `conflict` (exit 5). Unsafe state or a missing database is never replaced
+with an empty run. Provider inspection failures remain errors. Diagnostics from
+the recovery supervisor preserve their stable error code and operation ID.
+
+The [recovery schema](../schemas/cli-run-recover-v1.schema.json) reports the run
+and recovery operation, previous stop operation and time, recovery time, and
+next step. `run.recovered` records the operator's reason and prior shutdown
+evidence. Reactivation commits before any index is published. Retry interrupted
+recovery with the same run ID, operation ID, and reason. Exact retries return
+the original result, even after accepted task closure or another stop, and do
+not reactivate a subsequently stopped run. A new continuation after another
+stop requires a new operation ID. Different arguments under the same ID conflict.
+Replaying the preceding `stop` operation likewise returns its original result
+without stopping the continued run. Use a new operation ID to stop it again.
+
+Reconnecting to an active run uses ordinary `coterie`. To continue interrupted
+assignments after reactivation, use `task recover`, then spawn fresh worktree
+assignments and follow the [recovery handoff workflow](recovery-handoffs.md).
+Submitted work retains normal integration and closure requirements. The MCP
+bridge has no run-reactivation tool or operator fallback; connection and task
+recovery diagnostics explain when the operator must select a stopped run and
+launch a fresh session. No preserved worktree receives implicit write access.
 
 ### `coterie status`
 
@@ -961,7 +1019,8 @@ Coterie never automatically deletes a dirty, unintegrated, running, lost, or
 ambiguously owned assignment worktree. Use `status`, `prime`, `logs`, and
 `events --json` to inspect durable state, and retry an uncertain mutation with
 the same operation ID. After `coterie stop` completes, a later foreground launch
-creates a new active run; the stopped run's durable state is retained.
+creates a new active run; the stopped run's durable state is retained. Use
+`run list` and `run recover` before launching to continue that retained run.
 
 ## Trust model
 

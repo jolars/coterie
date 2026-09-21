@@ -380,7 +380,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Retire an exited agent's unfinished assignment, snapshot preserved Git state, and record a recovery handoff. Supply reported validation_evidence and unfinished_steps with text and source references in report; omitted evidence remains unknown. Full handoffs are available through assignment_show. Requires task:recover. Reuse operation_id and identical arguments on retry.",
+      "description": "Retire an exited agent's unfinished assignment, snapshot preserved Git state, and record a recovery handoff. Supply reported validation_evidence and unfinished_steps with text and source references in report; omitted evidence remains unknown. Full handoffs are available through assignment_show. Requires task:recover and an active run. For a stopped run, ask the operator to use coterie run list and coterie run recover <run-id> --reason TEXT, then launch a fresh session. Active-run reconnects cannot reactivate stopped runs or revive credentials. Reuse operation_id and identical arguments on retry.",
       "inputSchema": {
         "$defs": {
           "AssignmentId": {

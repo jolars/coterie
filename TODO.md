@@ -465,11 +465,11 @@ foreground session `cs-01M2RDNP2KQ80Z4CQ3RSZW7Y9H`, generation 1.
 Observed September 21, 2026 in Milestone 6 run
 `cr-01M325FW0XP0N03DW97X5EDQ66`: a completed `run.stop` left one closed task,
 three unfinished assignments, and seven open tasks. Their records and worktrees
-were preserved, but a later launch created an empty run. The current CLI and
-MCP tools cannot reopen a stopped run; `task recover` requires an active run.
+were preserved, but a later launch created an empty run. At the time, the CLI and
+MCP tools could not reopen a stopped run; `task recover` requires an active run.
 The shutdown record does not establish who requested the stop.
 
-- [ ] **High: Provide explicit recovery of work from a stopped run.** Let the
+- [x] **High: Provide explicit recovery of work from a stopped run.** Let the
   operator discover retained runs and select one for continuation without
   manually editing the database or active-run index. Define in `DESIGN.md`
   whether continuation reactivates the run or imports its work into a new run.
@@ -483,6 +483,16 @@ The shutdown record does not establish who requested the stop.
   Test explicit and idle shutdown, an existing replacement run, policy and
   lease conflicts, dirty or staged work, interrupted recovery, and idempotent
   retries through validation and accepted task closure.
+  `run list` now discovers retained runs, and operator-only `run recover`
+  reactivates the selected run under its saved policy with fresh sessions.
+  [The recovery contract](docs/cli-contract.md#coterie-run-recover) defines
+  lease and ownership checks, provenance, and replay of both recovery and the
+  preceding stop. Explicit and idle shutdown tests continue dirty and staged
+  work through fresh assignments, integration, validation, and accepted closure,
+  preserving source files, index bytes, reports, and transcript references.
+  Crash matrices cover 70 startup and retirement boundaries and six dirty-work
+  recovery boundaries, each recovered twice. `task check` passed with 557 tests
+  and 25 skips; real-provider tests remain opt-in and were not run.
 
 ### M7 gate
 

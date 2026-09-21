@@ -15,7 +15,13 @@ pub(super) async fn run(
         Err(error) => return Err(error),
     }
     let mut store = open_configuration_store(directories, entry.run_id)?;
-    store.has_pending_migrations()?;
+    if !store.has_pending_migrations()?
+        && let Some(result) = store.transaction(|r| {
+            r.recovered_shutdown_result(entry.run_id, operation_id)
+        })?
+    {
+        return Ok(result);
+    }
     let primary = store.transaction(|repositories| {
         let caller = repositories.project(entry.project_id)?;
         if !caller.is_some_and(|stored| {
@@ -46,6 +52,7 @@ pub(super) async fn run(
         &primary_project.canonical_path,
         &crate::cli::config::Overrides::default(),
         Some(operation_id),
+        None,
     )?;
     let result = await_shutdown(
         directories,
