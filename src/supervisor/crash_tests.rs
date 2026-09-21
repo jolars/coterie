@@ -1465,20 +1465,6 @@ fn runtime_child(root: &Path, mode: &str, case: &str) {
         operator,
     ));
     injection::disarm();
-    if let Err(SupervisorError::SocketIo {
-        action: "validate stale",
-        path,
-        source,
-    }) = &result
-    {
-        assert!(mode.starts_with("recover"));
-        assert_eq!(source.kind(), io::ErrorKind::PermissionDenied);
-        assert!(fs::symlink_metadata(path).unwrap().file_type().is_socket());
-        assert!(source.to_string().contains("0600"));
-        // A crash before chmod leaves an unverifiable socket. Recovery must
-        // report it and preserve it, rather than weakening private-file checks.
-        return;
-    }
     result.unwrap();
     assert!(
         ActiveRunIndex::new(&directories)

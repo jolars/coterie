@@ -36,7 +36,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::{UnixListener, UnixSocket, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep};
@@ -1706,23 +1706,42 @@ async fn serve_with_overrides(
             )
         })?;
     }
-    crate::fault::point("socket.bind.before");
-    let listener = UnixListener::bind(&socket_path).map_err(|source| {
+    let socket = UnixSocket::new_stream().map_err(|source| {
         SupervisorError::SocketIo {
-            action: "bind",
+            action: "create",
             path: socket_path.clone(),
             source,
         }
     })?;
-    crate::fault::point("socket.bind.after");
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600))
+    // Linux derives the bound inode's mode from the socket descriptor. Secure
+    // it before bind so recovery clients never observe a public socket.
+    nix::sys::stat::fchmod(
+        &socket,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|source| SupervisorError::SocketIo {
+        action: "secure",
+        path: socket_path.clone(),
+        source: source.into(),
+    })?;
+    crate::fault::point("socket.bind.before");
+    socket
+        .bind(&socket_path)
         .map_err(|source| SupervisorError::SocketIo {
-            action: "secure",
+            action: "bind",
             path: socket_path.clone(),
             source,
         })?;
-
+    crate::fault::point("socket.bind.after");
     crate::fault::point("socket.permissions.after");
+    let listener =
+        socket
+            .listen(1024)
+            .map_err(|source| SupervisorError::SocketIo {
+                action: "listen on",
+                path: socket_path.clone(),
+                source,
+            })?;
     let owned_socket =
         crate::private_fs::socket(&socket_path).map_err(|source| {
             SupervisorError::SocketIo {
@@ -7226,6 +7245,46 @@ mod tests {
             drop(reader);
             crate::private_fs::database(&database, false).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn supervisor_socket_is_private_as_soon_as_it_is_bound() {
+        use crate::project::{CoterieDirectories, DiscoveredProject};
+
+        let fixture = TestDirectory::new();
+        let project_path = fixture.join("project");
+        fs::create_dir(&project_path).unwrap();
+        let project = DiscoveredProject::discover(&project_path).unwrap();
+        let active = entry(&project.canonical_path);
+        let directories = CoterieDirectories::from_base_directories(
+            &fixture.0,
+            fixture.join("state"),
+        )
+        .unwrap();
+        let socket = directories.socket_path(active.run_id);
+        let observed_socket = socket.clone();
+        let (bound, ready) = oneshot::channel();
+        let _guard =
+            crate::fault::injection::on_point("socket.bind.after", move || {
+                // Recovery clients can discover the existing index before
+                // startup has a chance to change the socket's permissions.
+                crate::private_fs::check_socket(&observed_socket).unwrap();
+                bound.send(()).unwrap();
+            });
+        let operator = async {
+            ready.await.unwrap();
+            let mut client =
+                SupervisorClient::connect_operator_at(&socket, &active)
+                    .await
+                    .unwrap();
+            client.shutdown(OperationId::generate()).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            super::serve(active.clone(), project, directories),
+            operator,
+        );
+        result.unwrap();
+        assert!(!socket.exists());
     }
 
     #[test]

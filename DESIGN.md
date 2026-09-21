@@ -646,6 +646,11 @@ The supervisor communicates through a Unix-domain socket under
 project identity. This is disposable coordination metadata, not project
 registration or configuration.
 
+On Linux, the supervisor sets its socket descriptor to mode `0600` before
+binding the runtime path. A recovery client must never observe a socket that
+still needs its permissions tightened, and a crash immediately after binding
+must leave a private socket that normal stale-socket recovery can inspect.
+
 For a Git project, the identity includes both the canonical Git common directory
 and the current worktree identity. Two linked worktrees from the same repository
 therefore do not accidentally share one active run. A canonical directory
