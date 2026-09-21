@@ -460,6 +460,30 @@ foreground session `cs-01M2RDNP2KQ80Z4CQ3RSZW7Y9H`, generation 1.
   current updates. `task check` passed with 543 tests and 24 skips; the updated
   real-provider regression remains opt-in and was not run.
 
+### Diplodocus stopped-run recovery follow-up
+
+Observed September 21, 2026 in Milestone 6 run
+`cr-01M325FW0XP0N03DW97X5EDQ66`: a completed `run.stop` left one closed task,
+three unfinished assignments, and seven open tasks. Their records and worktrees
+were preserved, but a later launch created an empty run. The current CLI and
+MCP tools cannot reopen a stopped run; `task recover` requires an active run.
+The shutdown record does not establish who requested the stop.
+
+- [ ] **High: Provide explicit recovery of work from a stopped run.** Let the
+  operator discover retained runs and select one for continuation without
+  manually editing the database or active-run index. Define in `DESIGN.md`
+  whether continuation reactivates the run or imports its work into a new run.
+  Preserve task dependencies, accepted results, reports, transcript references,
+  and recovery provenance. Use fresh authenticated sessions and validate
+  project leases, saved policy, and assignment ownership; never revive stale
+  credentials or grant implicit write access to preserved worktrees. Keep
+  source files and indexes unchanged when transferring selected changes into
+  fresh assignments. Make CLI and MCP diagnostics distinguish active-run
+  reconnects from stopped-run recovery and explain the supported next step.
+  Test explicit and idle shutdown, an existing replacement run, policy and
+  lease conflicts, dirty or staged work, interrupted recovery, and idempotent
+  retries through validation and accepted task closure.
+
 ### M7 gate
 
 - [ ] The full design criterion succeeds end to end, including the two-project
