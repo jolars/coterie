@@ -148,8 +148,19 @@ pub(crate) fn database(path: &Path, create: bool) -> io::Result<File> {
 }
 
 pub(crate) fn check_socket(path: &Path) -> io::Result<()> {
+    validate_socket(&fs::symlink_metadata(path)?, path)
+}
+
+fn validate_socket(metadata: &Metadata, path: &Path) -> io::Result<()> {
     use std::os::unix::fs::FileTypeExt;
-    let metadata = fs::symlink_metadata(path)?;
+    // Recovery can unlink the socket between path lookup and metadata capture.
+    // Treat the vanished inode as missing so clients can retry recovery.
+    if metadata.file_type().is_socket() && metadata.nlink() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("socket {} has been unlinked", path.display()),
+        ));
+    }
     if !metadata.file_type().is_socket()
         || metadata.uid() != geteuid().as_raw()
         || metadata.nlink() != 1
@@ -214,6 +225,86 @@ mod tests {
             .expect_err("an unlinked inode must not be accepted");
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
         drop(file);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unlinked_socket_is_missing_instead_of_insecure() {
+        let root = std::env::temp_dir()
+            .join(format!("coterie-unlinked-{}", crate::id::RunId::generate()));
+        directory(&root).unwrap();
+        let path = root.join("supervisor.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let inode = socket(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+
+        // A path lookup can resolve the inode before recovery unlinks it and
+        // return its metadata afterward. Pin it to reproduce that observation.
+        let metadata = inode.metadata().unwrap();
+        assert_eq!(metadata.nlink(), 0);
+        let error = validate_socket(&metadata, &path)
+            .expect_err("an unlinked socket must not be accepted");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        drop(inode);
+        drop(listener);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn socket_validation_refuses_unsafe_paths_without_modification() {
+        let root = std::env::temp_dir()
+            .join(format!("coterie-socket-{}", crate::id::RunId::generate()));
+        directory(&root).unwrap();
+        let path = root.join("supervisor.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        for mode in [0o644, 0o666] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+                .unwrap();
+            assert_eq!(
+                check_socket(&path).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(
+                fs::symlink_metadata(&path).unwrap().mode() & 0o7777,
+                mode
+            );
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        check_socket(&path).unwrap();
+
+        let link = root.join("link");
+        fs::hard_link(&path, &link).unwrap();
+        assert_eq!(
+            check_socket(&path).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs::symlink_metadata(&path).unwrap().nlink(), 2);
+        fs::remove_file(&link).unwrap();
+        symlink(&path, &link).unwrap();
+        assert_eq!(
+            check_socket(&link).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), path);
+
+        let regular_path = root.join("regular");
+        let regular = open(&regular_path, true, true).unwrap();
+        for candidate in [&regular_path, &root] {
+            assert_eq!(
+                check_socket(candidate).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+        fs::remove_file(&regular_path).unwrap();
+        assert_eq!(
+            validate_socket(&regular.metadata().unwrap(), &regular_path)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        drop(regular);
+        drop(listener);
         fs::remove_dir_all(root).unwrap();
     }
 
