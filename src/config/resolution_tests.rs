@@ -744,25 +744,116 @@ fn numeric_limits_are_checked_at_boundaries_for_each_layer() {
 }
 
 #[test]
-fn all_permission_combinations_obey_the_partial_order() {
-    let mut profiles = Vec::new();
-    for filesystem in [
-        FilesystemPolicy::ReadOnly,
-        FilesystemPolicy::WorkspaceWrite,
-        FilesystemPolicy::ProjectWrite,
-    ] {
-        for network in [NetworkPolicy::Deny, NetworkPolicy::ProviderDefault] {
-            for approvals in
-                [ApprovalPolicy::Never, ApprovalPolicy::Interactive]
-            {
-                profiles.push(PermissionProfile {
-                    filesystem,
-                    network,
-                    approvals,
-                });
+fn automatic_review_resolves_only_as_explicit_interactive_policy() {
+    let fixture = Fixture::new();
+    let automatic = CUSTOM.replace(
+        "approvals = \"never\"",
+        "approvals = 'interactive'\napproval_reviewer = 'auto-review'",
+    );
+    fixture.write("config.toml", &automatic);
+    let effective = fixture.load().expect("automatic review should resolve");
+    let value = serde_json::to_value(&effective).unwrap();
+    assert_eq!(
+        value["roles"]["coordinator"]["permission_profile"]["approval_reviewer"],
+        "auto-review"
+    );
+    let snapshot = RunConfiguration::new(effective.clone());
+    let restored: RunConfiguration =
+        serde_json::from_str(&serde_json::to_string(&snapshot).unwrap())
+            .unwrap();
+    assert!(restored.valid(&snapshot.fingerprint()));
+    assert!(restored.differences(&effective).is_empty());
+    fixture.write("config.toml", &automatic.replace("auto-review", "user"));
+    let human = fixture.load().unwrap();
+    assert!(!snapshot.differences(&human).is_empty());
+    assert_ne!(
+        snapshot.fingerprint(),
+        RunConfiguration::new(human).fingerprint()
+    );
+    fixture.write(
+        "config.toml",
+        &automatic.replace("approvals = 'interactive'", "approvals = 'never'"),
+    );
+    assert!(fixture.load().is_err());
+}
+
+#[test]
+fn unrestricted_access_requires_operator_archetype_selection() {
+    let fixture = Fixture::new();
+    let unrestricted = CUSTOM
+        .replace("filesystem = \"read-only\"", "filesystem = 'unrestricted'")
+        .replace("network = \"deny\"", "network = 'provider-default'");
+    fixture.write("config.toml", &unrestricted);
+    assert!(fixture.load().is_ok());
+    let definition =
+        unrestricted.replace("archetype = \"global:custom@1\"", "");
+    fixture.write("config.toml", &definition);
+    fixture.write("coterie.toml", "archetype = 'global:custom@1'");
+    assert!(matches!(
+        fixture.load(),
+        Err(ConfigError::Invalid {
+            layer: ConfigLayer::Project,
+            ..
+        })
+    ));
+    assert!(
+        load(
+            &fixture.locations(),
+            &OperatorOverrides {
+                archetype: Some("global:custom@1".into()),
+                ..Default::default()
             }
-        }
-    }
+        )
+        .is_ok()
+    );
+    fixture.write(
+        "config.toml",
+        &unrestricted
+            .replace("network = 'provider-default'", "network = 'deny'"),
+    );
+    assert!(fixture.load().is_err());
+    fixture.write(
+        "config.toml",
+        &unrestricted
+            .replace("workspace = \"project\"", "workspace = 'read-only'"),
+    );
+    assert!(fixture.load().is_err());
+}
+
+#[test]
+fn unrestricted_example_requires_explicit_selection() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "config.toml",
+        include_str!("../../examples/config/unrestricted.toml"),
+    );
+    assert_eq!(
+        fixture.load().unwrap().archetype.reference,
+        "builtin:standard@1"
+    );
+    let effective = load(
+        &fixture.locations(),
+        &OperatorOverrides {
+            archetype: Some("global:unrestricted@1".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        effective.roles["operator"].permission_profile.filesystem,
+        FilesystemPolicy::Unrestricted
+    );
+    assert_eq!(
+        effective.roles["operator"]
+            .permission_profile
+            .approval_reviewer,
+        ApprovalReviewer::AutoReview
+    );
+}
+
+#[test]
+fn all_permission_combinations_obey_the_partial_order() {
+    let profiles = super::policy_tests::profiles();
     for a in &profiles {
         assert!(a.no_more_permissive_than(*a));
         for b in &profiles {
@@ -776,21 +867,9 @@ fn all_permission_combinations_obey_the_partial_order() {
                     assert!(a.no_more_permissive_than(*c));
                 }
             }
-            let expected = matches!(
-                (a.filesystem, b.filesystem),
-                (FilesystemPolicy::ReadOnly, _)
-                    | (
-                        FilesystemPolicy::ProjectWrite,
-                        FilesystemPolicy::ProjectWrite,
-                    )
-                    | (
-                        FilesystemPolicy::WorkspaceWrite,
-                        FilesystemPolicy::WorkspaceWrite,
-                    )
-            ) && !(a.network == NetworkPolicy::ProviderDefault
-                && b.network == NetworkPolicy::Deny)
-                && !(a.approvals == ApprovalPolicy::Interactive
-                    && b.approvals == ApprovalPolicy::Never);
+            let expected = super::policy_tests::authority(*a)
+                & !super::policy_tests::authority(*b)
+                == 0;
             assert_eq!(a.no_more_permissive_than(*b), expected);
             let mut global: GlobalConfig = toml::from_str(CUSTOM).unwrap();
             for (name, value) in [("safe", b), ("candidate", a)] {
@@ -800,6 +879,7 @@ fn all_permission_combinations_obey_the_partial_order() {
                         filesystem: Some(value.filesystem),
                         network: Some(value.network),
                         approvals: Some(value.approvals),
+                        approval_reviewer: Some(value.approval_reviewer),
                     },
                 );
             }

@@ -12,7 +12,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    ConfigSchemaVersion, EffectiveConfig, PermissionProfile, RoleMode,
+    ApprovalPolicy, ApprovalReviewer, ConfigSchemaVersion, EffectiveConfig,
+    FilesystemPolicy, NetworkPolicy, PermissionProfile, RoleMode,
 };
 
 /// Portable requirements describe policy demands without probing installed providers.
@@ -20,7 +21,33 @@ use super::{
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProviderRoleRequirement {
     mode: RoleMode,
-    permission_profile: PermissionProfile,
+    permission_profile: PortablePermissionProfile,
+}
+
+/// Preserve the historical lock representation for the default reviewer.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PortablePermissionProfile {
+    filesystem: FilesystemPolicy,
+    network: NetworkPolicy,
+    approvals: ApprovalPolicy,
+    #[serde(default, skip_serializing_if = "is_user")]
+    approval_reviewer: ApprovalReviewer,
+}
+
+fn is_user(reviewer: &ApprovalReviewer) -> bool {
+    *reviewer == ApprovalReviewer::User
+}
+
+impl From<PermissionProfile> for PortablePermissionProfile {
+    fn from(profile: PermissionProfile) -> Self {
+        Self {
+            filesystem: profile.filesystem,
+            network: profile.network,
+            approvals: profile.approvals,
+            approval_reviewer: profile.approval_reviewer,
+        }
+    }
 }
 
 type ProviderRequirements =
@@ -77,7 +104,7 @@ impl ConfigLock {
                     name.clone(),
                     ProviderRoleRequirement {
                         mode: role.mode,
-                        permission_profile: effective.permission_profile,
+                        permission_profile: effective.permission_profile.into(),
                     },
                 );
             }
@@ -91,6 +118,20 @@ impl ConfigLock {
             "roles": config.roles,
             "providers": providers,
         });
+        for profile in portable["archetype"]["permission_profiles"]
+            .as_object_mut()
+            .expect("profile map")
+            .values_mut()
+        {
+            omit_default_reviewer(profile);
+        }
+        for role in portable["roles"]
+            .as_object_mut()
+            .expect("role map")
+            .values_mut()
+        {
+            omit_default_reviewer(&mut role["permission_profile"]);
+        }
         // Disabled idle shutdown is the historical policy, so old snapshots
         // and locks retain their fingerprint after migration.
         if config.supervision.idle_timeout_seconds == 0 {
@@ -234,6 +275,15 @@ impl ConfigLock {
         // This attempt owns the temporary name. Never remove an existing lock during cleanup.
         let _ = fs::remove_file(&temporary);
         result.map_err(|source| io_error("write", path, source))
+    }
+}
+
+fn omit_default_reviewer(profile: &mut serde_json::Value) {
+    if profile["approval_reviewer"] == "user" {
+        profile
+            .as_object_mut()
+            .expect("profile object")
+            .remove("approval_reviewer");
     }
 }
 

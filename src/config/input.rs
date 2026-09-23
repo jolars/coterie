@@ -7,7 +7,8 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ApprovalPolicy, FilesystemPolicy, NetworkPolicy, RoleMode, WorkspacePolicy,
+    ApprovalPolicy, ApprovalReviewer, FilesystemPolicy, NetworkPolicy,
+    RoleMode, WorkspacePolicy,
 };
 
 /// The file format version, independent of the archetype's semantic version.
@@ -131,6 +132,7 @@ pub(crate) struct ProfileInput {
     pub(crate) filesystem: Option<FilesystemPolicy>,
     pub(crate) network: Option<NetworkPolicy>,
     pub(crate) approvals: Option<ApprovalPolicy>,
+    pub(crate) approval_reviewer: Option<ApprovalReviewer>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema, Serialize)]

@@ -5,6 +5,7 @@
   "generation": 0,
   "owned_reference": "refs/heads/coterie/cr-01ARZ3NDEKTSV4RRFFQ69G5FAV/ca-01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "permission_profile": {
+    "approval_reviewer": "user",
     "approvals": "never",
     "filesystem": "workspace-write",
     "network": "deny"

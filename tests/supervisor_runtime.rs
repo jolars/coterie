@@ -30,6 +30,9 @@ mod run_recovery;
 #[path = "supervisor_runtime/context.rs"]
 mod context;
 
+#[path = "supervisor_runtime/permissions.rs"]
+mod permissions;
+
 #[path = "supervisor_runtime/workspace_reuse.rs"]
 mod workspace_reuse;
 
@@ -45,11 +48,11 @@ if [ "$1" = "--version" ]; then
   exit 0
 fi
 if [ "$1" = "--help" ]; then
-  printf 'Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --ask-for-approval <APPROVAL_POLICY>\n'
+  printf 'Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE> [read-only, workspace-write, danger-full-access]\n  --approve-for-me\n  --ask-for-approval <APPROVAL_POLICY>\n'
   exit 0
 fi
 if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
-  printf 'Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --ask-for-approval <APPROVAL_POLICY>\n  --json\n'
+  printf 'Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE> [read-only, workspace-write, danger-full-access]\n  --approve-for-me\n  --ask-for-approval <APPROVAL_POLICY>\n  --json\n'
   exit 0
 fi
 if [ "${COTERIE_FAKE_MODE-}" = "contract" ]; then

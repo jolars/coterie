@@ -16,6 +16,7 @@ fn example() -> CommitHandoff {
             filesystem: crate::config::FilesystemPolicy::WorkspaceWrite,
             network: crate::config::NetworkPolicy::Deny,
             approvals: crate::config::ApprovalPolicy::Never,
+            approval_reviewer: crate::config::ApprovalReviewer::User,
         },
     }
 }

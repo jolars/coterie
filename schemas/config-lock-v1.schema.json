@@ -45,6 +45,14 @@
         "never"
       ]
     },
+    "ApprovalReviewer": {
+      "description": "Who evaluates eligible provider approval requests.",
+      "type": "string",
+      "enum": [
+        "user",
+        "auto-review"
+      ]
+    },
     "ConfigSchemaVersion": {
       "type": "integer",
       "const": 1
@@ -53,6 +61,7 @@
       "description": "Filesystem authority granted to a provider process.",
       "type": "string",
       "enum": [
+        "unrestricted",
         "project-write",
         "workspace-write",
         "read-only"
@@ -66,10 +75,13 @@
         "deny"
       ]
     },
-    "PermissionProfile": {
-      "description": "Provider sandbox policy referenced by a role.",
+    "PortablePermissionProfile": {
+      "description": "Preserve the historical lock representation for the default reviewer.",
       "type": "object",
       "properties": {
+        "approval_reviewer": {
+          "$ref": "#/$defs/ApprovalReviewer"
+        },
         "approvals": {
           "$ref": "#/$defs/ApprovalPolicy"
         },
@@ -95,7 +107,7 @@
           "$ref": "#/$defs/RoleMode"
         },
         "permission_profile": {
-          "$ref": "#/$defs/PermissionProfile"
+          "$ref": "#/$defs/PortablePermissionProfile"
         }
       },
       "additionalProperties": false,

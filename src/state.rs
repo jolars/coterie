@@ -142,6 +142,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "notification_receipts",
         sql: include_str!("state/migrations/0019_notification_receipts.sql"),
     },
+    Migration {
+        version: 20,
+        name: "approval_reviewers",
+        sql: include_str!("state/migrations/0020_approval_reviewers.sql"),
+    },
 ];
 
 #[derive(Debug)]
@@ -5574,9 +5579,15 @@ mod tests {
                     "SELECT state, receipt_state, received_at, event_cursor, message_cursor FROM notification_deliveries WHERE operation_id = ?1",
                     [SECOND_OPERATION_ID], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 ).unwrap();
+                // Deliveries created after migration 19 already track receipts.
+                let receipt_state = if prior_count < 19 {
+                    "legacy"
+                } else {
+                    "pending"
+                };
                 assert_eq!(
                     delivery,
-                    ("accepted".into(), "legacy".into(), None, 7, 3)
+                    ("accepted".into(), receipt_state.into(), None, 7, 3)
                 );
                 let scope = SessionScope {
                     run_id: RUN_ID.parse().unwrap(),

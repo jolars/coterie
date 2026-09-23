@@ -392,6 +392,42 @@ fn golden_provenance() -> [(std::path::PathBuf, String); 2] {
 }
 
 #[test]
+fn reviewer_defaults_and_explicit_includes_keep_distinct_provenance() {
+    let fixture = Fixture::new();
+    fixture.write("config.toml", CUSTOM);
+    let default = fixture.load().unwrap();
+    assert_complete(&default);
+    assert_source(
+        &default,
+        "roles.builder.permission_profile.approval_reviewer",
+        ConfigLayer::Compiled,
+        None,
+        "permission_profiles.safe.approval_reviewer",
+    );
+    fixture.write(
+        "config.toml",
+        &format!("includes = ['review.toml']\n{CUSTOM}"),
+    );
+    let include = fixture.write(
+        "review.toml",
+        "[permission_profiles.safe]\napproval_reviewer = 'user'",
+    );
+    let explicit = fixture.load().unwrap();
+    assert_complete(&explicit);
+    assert_source(
+        &explicit,
+        "roles.builder.permission_profile.approval_reviewer",
+        ConfigLayer::Global,
+        Some(&include),
+        "permission_profiles.safe.approval_reviewer",
+    );
+    assert_eq!(
+        ConfigLock::for_config(&default),
+        ConfigLock::for_config(&explicit)
+    );
+}
+
+#[test]
 fn provenance_matches_golden_contracts() {
     for (path, generated) in golden_provenance() {
         assert_eq!(

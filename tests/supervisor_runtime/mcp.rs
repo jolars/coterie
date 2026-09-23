@@ -569,12 +569,16 @@ fn installed_codex() -> PathBuf {
 #[test]
 #[ignore = "requires explicit opt-in, Codex authentication, and model access; exercises actual Coterie job launches"]
 fn installed_codex_jobs_use_mcp_and_preserve_the_sandbox() {
-    for profile in ["implementation", "inspect"] {
+    for (profile, automatic) in [
+        ("implementation", false),
+        ("inspect", false),
+        ("implementation", true),
+    ] {
         let fixture = TestEnvironment::new();
         let home = isolated_authentication(&fixture);
         fs::write(
             home.join("config.toml"),
-            "[sandbox_workspace_write]\nnetwork_access = true\n",
+            "default_permissions = ':danger-full-access'\napproval_policy = 'on-request'\napprovals_reviewer = 'user'\n",
         )
         .unwrap();
         let global = include_str!("../../examples/config/global.toml")
@@ -586,6 +590,11 @@ fn installed_codex_jobs_use_mcp_and_preserve_the_sandbox() {
                 "permission_profile = \"implementation\"",
                 &format!("permission_profile = \"{profile}\""),
             );
+        let global = if automatic {
+            global.replace("[permission_profiles.implementation]\nfilesystem = \"workspace-write\"\nnetwork = \"deny\"\napprovals = \"never\"", "[permission_profiles.implementation]\nfilesystem = 'workspace-write'\nnetwork = 'deny'\napprovals = 'interactive'\napproval_reviewer = 'auto-review'")
+        } else {
+            global
+        };
         let global = format!(
             "{global}\n[providers.real_codex]\ncommand = [{}]\n",
             serde_json::to_string(&installed_codex()).unwrap()
@@ -790,11 +799,11 @@ fn mcp_bounds_frames_rejects_invalid_requests_and_exits_on_eof() {
 fn installed_codex_foreground_uses_mcp_under_both_profiles() {
     use nix::pty::{Winsize, openpty};
     use nix::unistd::ttyname;
-    for profile in ["implementation", "inspect"] {
+    for profile in ["implementation", "inspect", "interactive"] {
         let fixture = TestEnvironment::new();
         let home = isolated_authentication(&fixture);
         fs::write(home.join("config.toml"), format!(
-            "check_for_update_on_startup = false\n[projects.{}]\ntrust_level = \"trusted\"\n",
+            "check_for_update_on_startup = false\ndefault_permissions = ':danger-full-access'\napprovals_reviewer = 'user'\n[projects.{}]\ntrust_level = \"trusted\"\n",
             serde_json::to_string(&fixture.project).unwrap()
         )).unwrap();
         let prompt = "Test Coterie's foreground MCP transport. Discover and call the Coterie prime tool. Then call new_operation_id and task_create with title=Foreground MCP verified, description=Authenticated foreground transport verified., project=primary, group=null, dependencies=[]. Do not spawn workers or run shell commands. After the tool succeeds, reply Done and wait.";
@@ -813,6 +822,10 @@ fn installed_codex_foreground_uses_mcp_under_both_profiles() {
                 "permission_profile = \"interactive\"",
                 &format!("permission_profile = \"{profile}\""),
             );
+        let global = global.replace(
+            "approvals = \"interactive\"",
+            "approvals = 'interactive'\napproval_reviewer = 'auto-review'",
+        );
         write_global(&fixture, &global);
         let pty = openpty(
             Some(&Winsize {

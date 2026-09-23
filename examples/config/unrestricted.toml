@@ -1,0 +1,19 @@
+# Include this trusted definition, then select it with --archetype or globally.
+schema_version = 1
+
+[permission_profiles.unrestricted]
+filesystem = "unrestricted"
+network = "provider-default"
+approvals = "interactive"
+approval_reviewer = "auto-review"
+
+[archetypes."global:unrestricted@1"]
+lead = "operator"
+
+[archetypes."global:unrestricted@1".roles.operator]
+provider = "codex"
+mode = "interactive"
+workspace = "project"
+permission_profile = "unrestricted"
+max_instances = 0
+capabilities = ["send:*", "task:*", "logs:*", "workspace:integrate"]

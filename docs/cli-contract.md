@@ -144,6 +144,11 @@ input field, and optional selector origin. It verifies an existing lock before
 emitting output. Provider commands are visible in effective configuration, with
 known credentials and Coterie tokens redacted before JSON encoding.
 
+Permission profiles support an independent `approval_reviewer` (`user` by
+default, or `auto-review`) and explicitly selected `unrestricted` filesystem
+access. The [permission guide](permissions.md) covers supported combinations,
+operator selection, project restrictions, provider checks, and upgrade behavior.
+
 ### `coterie config schema`
 
 ```console

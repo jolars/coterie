@@ -53,7 +53,8 @@ portable locks without starting a run or probing providers. Launches snapshot
 the resolved configuration, and recovery reuses that policy. Incompatible
 configuration changes require restoring the saved policy or stopping the run. See the
 [configuration command contract](docs/cli-contract.md#coterie-config-check)
-and [examples](examples/config).
+and [examples](examples/config). The [permission guide](docs/permissions.md)
+explains automatic approval review and explicitly selected unrestricted access.
 
 Closing the foreground leaves active workers running. Once every session has
 an observed exit and no operation is pending or uncertain, new runs stop after

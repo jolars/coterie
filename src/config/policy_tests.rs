@@ -2,21 +2,30 @@ use super::resolution_tests::{CUSTOM, Fixture};
 use super::resolver::EffectiveRole;
 use super::*;
 
-fn profiles() -> Vec<PermissionProfile> {
+pub(super) fn profiles() -> Vec<PermissionProfile> {
     let mut profiles = Vec::new();
     for filesystem in [
         FilesystemPolicy::ReadOnly,
         FilesystemPolicy::ProjectWrite,
         FilesystemPolicy::WorkspaceWrite,
+        FilesystemPolicy::Unrestricted,
     ] {
         for network in [NetworkPolicy::Deny, NetworkPolicy::ProviderDefault] {
-            for approvals in
-                [ApprovalPolicy::Never, ApprovalPolicy::Interactive]
+            if filesystem == FilesystemPolicy::Unrestricted
+                && network == NetworkPolicy::Deny
             {
+                continue;
+            }
+            for (approvals, approval_reviewer) in [
+                (ApprovalPolicy::Never, ApprovalReviewer::User),
+                (ApprovalPolicy::Interactive, ApprovalReviewer::User),
+                (ApprovalPolicy::Interactive, ApprovalReviewer::AutoReview),
+            ] {
                 profiles.push(PermissionProfile {
                     filesystem,
                     network,
                     approvals,
+                    approval_reviewer,
                 });
             }
         }
@@ -25,11 +34,12 @@ fn profiles() -> Vec<PermissionProfile> {
 }
 
 // Independent authority sets catch accidental total ordering of write scopes.
-fn authority(profile: PermissionProfile) -> u8 {
+pub(super) fn authority(profile: PermissionProfile) -> u8 {
     let filesystem = match profile.filesystem {
         FilesystemPolicy::ReadOnly => 0,
         FilesystemPolicy::ProjectWrite => 1,
         FilesystemPolicy::WorkspaceWrite => 2,
+        FilesystemPolicy::Unrestricted => 3,
     };
     filesystem
         | if profile.network == NetworkPolicy::ProviderDefault {
@@ -38,7 +48,10 @@ fn authority(profile: PermissionProfile) -> u8 {
             0
         }
         | if profile.approvals == ApprovalPolicy::Interactive {
-            8
+            match profile.approval_reviewer {
+                ApprovalReviewer::User => 8,
+                ApprovalReviewer::AutoReview => 16,
+            }
         } else {
             0
         }
@@ -155,6 +168,7 @@ fn with_profiles() -> GlobalConfig {
                 filesystem: Some(profile.filesystem),
                 network: Some(profile.network),
                 approvals: Some(profile.approvals),
+                approval_reviewer: Some(profile.approval_reviewer),
             },
         );
     }

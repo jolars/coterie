@@ -52,6 +52,14 @@
         "never"
       ]
     },
+    "ApprovalReviewer": {
+      "description": "Who evaluates eligible provider approval requests.",
+      "type": "string",
+      "enum": [
+        "user",
+        "auto-review"
+      ]
+    },
     "AssignmentBrief": {
       "description": "The ID is the stable reference accepted by `assignment show` / `assignment_show`.",
       "type": "object",
@@ -251,6 +259,7 @@
       "description": "Filesystem authority granted to a provider process.",
       "type": "string",
       "enum": [
+        "unrestricted",
         "project-write",
         "workspace-write",
         "read-only"
@@ -307,6 +316,9 @@
       "description": "Provider sandbox policy referenced by a role.",
       "type": "object",
       "properties": {
+        "approval_reviewer": {
+          "$ref": "#/$defs/ApprovalReviewer"
+        },
         "approvals": {
           "$ref": "#/$defs/ApprovalPolicy"
         },
@@ -321,7 +333,8 @@
       "required": [
         "filesystem",
         "network",
-        "approvals"
+        "approvals",
+        "approval_reviewer"
       ]
     },
     "PrimePage": {

@@ -121,6 +121,64 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_migration_preserves_custom_policy_and_legacy_fingerprints() {
+        let directory = std::env::temp_dir()
+            .join(format!("coterie-reviewer-{}", ulid::Ulid::generate()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = directory.join("state.sqlite3");
+        let connection = Connection::open(&database).unwrap();
+        connection.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, applied_at INTEGER NOT NULL DEFAULT (unixepoch())) STRICT;").unwrap();
+        for migration in &MIGRATIONS[..19] {
+            connection.execute_batch(migration.sql).unwrap();
+            connection.execute("INSERT INTO schema_migrations (version, name, source) VALUES (?1, ?2, ?3)", (migration.version, migration.name, migration.sql)).unwrap();
+        }
+        let expected = crate::config::resolve(
+            &toml::from_str(include_str!("../../examples/config/global.toml"))
+                .unwrap(),
+            &toml::from_str("[roles.builder]\npermission_profile = 'inspect'")
+                .unwrap(),
+            &Default::default(),
+        )
+        .unwrap();
+        let snapshot = RunConfiguration::new(expected.clone());
+        let fingerprint = snapshot.fingerprint();
+        let mut document = serde_json::to_value(snapshot).unwrap();
+        for profile in document["effective"]["archetype"]["permission_profiles"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            profile.as_object_mut().unwrap().remove("approval_reviewer");
+        }
+        for role in document["effective"]["roles"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+        {
+            role["permission_profile"]
+                .as_object_mut()
+                .unwrap()
+                .remove("approval_reviewer");
+        }
+        document["provenance"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|key, _| !key.ends_with(".approval_reviewer"));
+        let run = run();
+        connection.execute("INSERT INTO runs (id, status, created_at) VALUES (?1, 'active', 1)", [run.id]).unwrap();
+        connection.execute("INSERT INTO configuration_snapshots (run_id, scope, schema_version, fingerprint, document_json, created_at) VALUES (?1, 'run', 1, ?2, ?3, 1)", params![run.id, fingerprint, document.to_string()]).unwrap();
+        drop(connection);
+        for _ in 0..2 {
+            let mut store = Store::open(&database).unwrap();
+            assert_eq!(store.configuration(run.id).unwrap(), expected);
+            let stored: String = store.connection.query_row("SELECT fingerprint FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
+            assert_eq!(stored, fingerprint);
+            assert!(store.connection.execute("UPDATE configuration_snapshots SET fingerprint = 'changed'", []).is_err());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn current_schema_never_infers_missing_or_invalid_policy() {
         for damage in [
             "missing",
@@ -129,6 +187,7 @@ mod tests {
             "role",
             "document",
             "idle_policy",
+            "reviewer",
         ] {
             let mut store = Store::open_in_memory().unwrap();
             let run = run();
@@ -159,6 +218,9 @@ mod tests {
                                 .as_object_mut()
                                 .unwrap()
                                 .remove("idle_timeout_seconds");
+                        }
+                        "reviewer" => {
+                            document["effective"]["roles"]["lead"]["permission_profile"].as_object_mut().unwrap().remove("approval_reviewer");
                         }
                         _ => (),
                     }

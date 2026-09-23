@@ -1,5 +1,6 @@
 allowed_project_roots <- compiled:-:allowed_project_roots
 archetype.lead <- global:parts/first.toml:archetypes.global:custom@1.lead
+archetype.permission_profiles.safe.approval_reviewer <- compiled:-:permission_profiles.safe.approval_reviewer
 archetype.permission_profiles.safe.approvals <- global:parts/first.toml:permission_profiles.safe.approvals
 archetype.permission_profiles.safe.filesystem <- global:parts/first.toml:permission_profiles.safe.filesystem
 archetype.permission_profiles.safe.network <- global:parts/second.toml:permission_profiles.safe.network
@@ -24,11 +25,13 @@ limits.max_spawns_per_minute <- compiled:-:limits.max_spawns_per_minute
 providers.codex.command <- global:config.toml:providers.codex.command
 roles.builder.enabled <- project:coterie.toml:roles.builder.enabled
 roles.builder.max_instances <- operator:-:roles.builder.max_instances
+roles.builder.permission_profile.approval_reviewer <- compiled:-:permission_profiles.safe.approval_reviewer (selected by project:coterie.toml:roles.builder.permission_profile)
 roles.builder.permission_profile.approvals <- global:parts/first.toml:permission_profiles.safe.approvals (selected by project:coterie.toml:roles.builder.permission_profile)
 roles.builder.permission_profile.filesystem <- global:parts/first.toml:permission_profiles.safe.filesystem (selected by project:coterie.toml:roles.builder.permission_profile)
 roles.builder.permission_profile.network <- global:parts/second.toml:permission_profiles.safe.network (selected by project:coterie.toml:roles.builder.permission_profile)
 roles.coordinator.enabled <- compiled:-:roles.coordinator.enabled
 roles.coordinator.max_instances <- compiled:-:archetypes.global:custom@1.roles.coordinator.max_instances
+roles.coordinator.permission_profile.approval_reviewer <- compiled:-:permission_profiles.safe.approval_reviewer (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
 roles.coordinator.permission_profile.approvals <- global:parts/first.toml:permission_profiles.safe.approvals (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
 roles.coordinator.permission_profile.filesystem <- global:parts/first.toml:permission_profiles.safe.filesystem (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)
 roles.coordinator.permission_profile.network <- global:parts/second.toml:permission_profiles.safe.network (selected by global:parts/first.toml:archetypes.global:custom@1.roles.coordinator.permission_profile)

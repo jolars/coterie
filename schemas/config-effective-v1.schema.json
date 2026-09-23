@@ -37,6 +37,14 @@
         "never"
       ]
     },
+    "ApprovalReviewer": {
+      "description": "Who evaluates eligible provider approval requests.",
+      "type": "string",
+      "enum": [
+        "user",
+        "auto-review"
+      ]
+    },
     "ArchetypeDefinition": {
       "description": "A sealed, versioned declaration of roles and provider policy.",
       "type": "object",
@@ -185,6 +193,7 @@
       "description": "Filesystem authority granted to a provider process.",
       "type": "string",
       "enum": [
+        "unrestricted",
         "project-write",
         "workspace-write",
         "read-only"
@@ -209,6 +218,9 @@
       "description": "Provider sandbox policy referenced by a role.",
       "type": "object",
       "properties": {
+        "approval_reviewer": {
+          "$ref": "#/$defs/ApprovalReviewer"
+        },
         "approvals": {
           "$ref": "#/$defs/ApprovalPolicy"
         },
@@ -223,7 +235,8 @@
       "required": [
         "filesystem",
         "network",
-        "approvals"
+        "approvals",
+        "approval_reviewer"
       ]
     },
     "ProviderBinding": {

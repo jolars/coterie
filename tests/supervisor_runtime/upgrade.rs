@@ -53,6 +53,33 @@ fn historical_run(fixture: &TestEnvironment, version: i64) -> (PathBuf, Value) {
     }
     if version >= 11 {
         connection.execute_batch("INSERT INTO configuration_snapshots SELECT * FROM current.configuration_snapshots; DROP TRIGGER configuration_snapshots_are_append_only;").unwrap();
+        if version < 20 {
+            let document: String = connection.query_row("SELECT document_json FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
+            let mut snapshot: Value = serde_json::from_str(&document).unwrap();
+            for profile in
+                snapshot["effective"]["archetype"]["permission_profiles"]
+                    .as_object_mut()
+                    .unwrap()
+                    .values_mut()
+            {
+                profile.as_object_mut().unwrap().remove("approval_reviewer");
+            }
+            for role in snapshot["effective"]["roles"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+            {
+                role["permission_profile"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("approval_reviewer");
+            }
+            snapshot["provenance"]
+                .as_object_mut()
+                .unwrap()
+                .retain(|key, _| !key.ends_with(".approval_reviewer"));
+            connection.execute("UPDATE configuration_snapshots SET document_json = ?1 WHERE scope = 'run'", [snapshot.to_string()]).unwrap();
+        }
         if version < 13 {
             connection.execute_batch("UPDATE configuration_snapshots SET document_json = json_remove(document_json, '$.effective.supervision.idle_timeout_seconds', '$.provenance.\"supervision.idle_timeout_seconds\"');").unwrap();
         }
@@ -69,7 +96,7 @@ fn historical_run(fixture: &TestEnvironment, version: i64) -> (PathBuf, Value) {
 
 #[test]
 fn startup_upgrades_historical_snapshots_before_validation() {
-    for version in 10..=14 {
+    for version in 10..=19 {
         let fixture = TestEnvironment::new();
         let (database, task) = historical_run(&fixture, version);
         let index = fs::read(fixture.only_index_entry()).unwrap();
@@ -84,6 +111,10 @@ fn startup_upgrades_historical_snapshots_before_validation() {
             snapshot["effective"]["supervision"]["idle_timeout_seconds"],
             0
         );
+        assert_eq!(
+            snapshot["effective"]["roles"]["lead"]["permission_profile"]["approval_reviewer"],
+            "user"
+        );
         fixture.launch(&[]);
         let unchanged: String = connection.query_row("SELECT document_json FROM configuration_snapshots WHERE scope = 'run'", [], |row| row.get(0)).unwrap();
         assert_eq!(unchanged, document);
@@ -93,7 +124,7 @@ fn startup_upgrades_historical_snapshots_before_validation() {
 
 #[test]
 fn stop_upgrades_historical_snapshots_without_adopting_current_policy() {
-    for version in 10..=14 {
+    for version in 10..=19 {
         let fixture = TestEnvironment::new();
         let (database, task) = historical_run(&fixture, version);
         write_global(&fixture, "invalid configuration");

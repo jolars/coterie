@@ -245,6 +245,7 @@ pub(crate) fn resolve(
         &mut provenance,
         &archetype,
         global.archetypes.get(reference),
+        &global.permission_profiles,
         ConfigSource::new(selection_layer, "archetype"),
     );
     let roles = archetype
@@ -282,6 +283,7 @@ pub(crate) fn resolve(
         &mut effective,
         &project.roles,
         &profiles,
+        &global.permission_profiles,
         ConfigLayer::Project,
     )?;
     apply_limits(
@@ -295,6 +297,7 @@ pub(crate) fn resolve(
         &mut effective,
         &operator.roles,
         &profiles,
+        &global.permission_profiles,
         ConfigLayer::Operator,
     )?;
     for (name, role) in &effective.archetype.roles {
@@ -311,6 +314,19 @@ pub(crate) fn resolve(
                 "a read-only workspace requires an effective read-only filesystem permission profile",
             ));
         }
+    }
+    if effective.roles.values().any(|role| {
+        role.enabled
+            && role.permission_profile.filesystem
+                == FilesystemPolicy::Unrestricted
+    }) && operator.archetype.as_ref().or(global.archetype.as_ref())
+        != Some(reference)
+    {
+        return Err(ConfigError::invalid(
+            ConfigLayer::Project,
+            "archetype",
+            "unrestricted access requires selecting this archetype in trusted global configuration or with --archetype",
+        ));
     }
     Ok(effective)
 }
@@ -367,6 +383,16 @@ fn resolve_profiles(
         .map(|(name, input)| {
             let prefix = format!("permission_profiles.{name}");
             check_name(name, &prefix)?;
+            if input.filesystem == Some(FilesystemPolicy::Unrestricted)
+                && input.network == Some(NetworkPolicy::Deny) {
+                return Err(invalid_global(format!("{prefix}.network"),
+                    "unrestricted access disables the network sandbox; select provider-default or a sandboxed filesystem policy"));
+            }
+            if input.approval_reviewer == Some(ApprovalReviewer::AutoReview)
+                && input.approvals == Some(ApprovalPolicy::Never) {
+                return Err(invalid_global(format!("{prefix}.approval_reviewer"),
+                    "automatic review requires interactive approvals"));
+            }
             Ok((
                 name.clone(),
                 PermissionProfile {
@@ -382,6 +408,7 @@ fn resolve_profiles(
                         &input.approvals,
                         format!("{prefix}.approvals"),
                     )?,
+                    approval_reviewer: input.approval_reviewer.unwrap_or_default(),
                 },
             ))
         })
@@ -548,6 +575,7 @@ fn apply_roles(
     effective: &mut EffectiveConfig,
     restrictions: &BTreeMap<String, RoleRestriction>,
     profiles: &BTreeMap<String, PermissionProfile>,
+    profile_inputs: &BTreeMap<String, ProfileInput>,
     layer: ConfigLayer,
 ) -> Result<(), ConfigError> {
     for (name, restriction) in restrictions {
@@ -618,12 +646,22 @@ fn apply_roles(
             }
         }
         if let Some(profile) = &restriction.permission_profile {
-            for field in ["filesystem", "network", "approvals"] {
+            for field in
+                ["filesystem", "network", "approvals", "approval_reviewer"]
+            {
                 effective.provenance.insert(
                     format!("{prefix}.permission_profile.{field}"),
                     ValueProvenance {
                         source: ConfigSource::new(
-                            ConfigLayer::Global,
+                            if field == "approval_reviewer"
+                                && profile_inputs[profile]
+                                    .approval_reviewer
+                                    .is_none()
+                            {
+                                ConfigLayer::Compiled
+                            } else {
+                                ConfigLayer::Global
+                            },
                             format!("permission_profiles.{profile}.{field}"),
                         ),
                         selected_by: Some(ConfigSource::new(

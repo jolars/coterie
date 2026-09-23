@@ -158,6 +158,7 @@ pub(crate) struct PermissionProfile {
     pub(crate) filesystem: FilesystemPolicy,
     pub(crate) network: NetworkPolicy,
     pub(crate) approvals: ApprovalPolicy,
+    pub(crate) approval_reviewer: ApprovalReviewer,
 }
 
 /// Filesystem authority granted to a provider process.
@@ -166,6 +167,7 @@ pub(crate) struct PermissionProfile {
 )]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum FilesystemPolicy {
+    Unrestricted,
     ProjectWrite,
     WorkspaceWrite,
     ReadOnly,
@@ -189,6 +191,25 @@ pub(crate) enum NetworkPolicy {
 pub(crate) enum ApprovalPolicy {
     Interactive,
     Never,
+}
+
+/// Who evaluates eligible provider approval requests.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Deserialize,
+    Eq,
+    JsonSchema,
+    PartialEq,
+    Serialize,
+)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ApprovalReviewer {
+    #[default]
+    User,
+    AutoReview,
 }
 
 /// One concrete supervisor action to authorize.
@@ -319,6 +340,7 @@ pub(crate) fn builtin_standard() -> ArchetypeDefinition {
                     filesystem: FilesystemPolicy::ProjectWrite,
                     network: NetworkPolicy::ProviderDefault,
                     approvals: ApprovalPolicy::Interactive,
+                    approval_reviewer: crate::config::ApprovalReviewer::User,
                 },
             ),
             (
@@ -327,6 +349,7 @@ pub(crate) fn builtin_standard() -> ArchetypeDefinition {
                     filesystem: FilesystemPolicy::WorkspaceWrite,
                     network: NetworkPolicy::Deny,
                     approvals: ApprovalPolicy::Never,
+                    approval_reviewer: crate::config::ApprovalReviewer::User,
                 },
             ),
             (
@@ -335,6 +358,7 @@ pub(crate) fn builtin_standard() -> ArchetypeDefinition {
                     filesystem: FilesystemPolicy::ReadOnly,
                     network: NetworkPolicy::Deny,
                     approvals: ApprovalPolicy::Never,
+                    approval_reviewer: crate::config::ApprovalReviewer::User,
                 },
             ),
         ]),
@@ -424,6 +448,7 @@ mod tests {
                 filesystem: FilesystemPolicy::ProjectWrite,
                 network: NetworkPolicy::ProviderDefault,
                 approvals: ApprovalPolicy::Interactive,
+                approval_reviewer: crate::config::ApprovalReviewer::User,
             })
         );
         assert_eq!(
@@ -432,6 +457,7 @@ mod tests {
                 filesystem: FilesystemPolicy::WorkspaceWrite,
                 network: NetworkPolicy::Deny,
                 approvals: ApprovalPolicy::Never,
+                approval_reviewer: crate::config::ApprovalReviewer::User,
             })
         );
         assert_eq!(
@@ -440,6 +466,7 @@ mod tests {
                 filesystem: FilesystemPolicy::ReadOnly,
                 network: NetworkPolicy::Deny,
                 approvals: ApprovalPolicy::Never,
+                approval_reviewer: crate::config::ApprovalReviewer::User,
             })
         );
 

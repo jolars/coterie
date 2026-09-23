@@ -2,16 +2,27 @@
 
 use super::resolver::EffectiveRole;
 use super::{
-    ApprovalPolicy, FilesystemPolicy, NetworkPolicy, PermissionProfile,
-    RunLimits,
+    ApprovalPolicy, ApprovalReviewer, FilesystemPolicy, NetworkPolicy,
+    PermissionProfile, RunLimits,
 };
 
 impl PermissionProfile {
     pub(super) fn intersect(self, other: Self) -> Self {
+        let approvals = if self.approvals == other.approvals
+            && self.approval_reviewer == other.approval_reviewer
+        {
+            self.approvals
+        } else {
+            ApprovalPolicy::Never
+        };
         Self {
             // The two writable scopes may refer to different roots.
-            filesystem: if self.filesystem == other.filesystem {
+            filesystem: if self.filesystem == other.filesystem
+                || other.filesystem == FilesystemPolicy::Unrestricted
+            {
                 self.filesystem
+            } else if self.filesystem == FilesystemPolicy::Unrestricted {
+                other.filesystem
             } else {
                 FilesystemPolicy::ReadOnly
             },
@@ -20,10 +31,11 @@ impl PermissionProfile {
             } else {
                 NetworkPolicy::Deny
             },
-            approvals: if self.approvals == other.approvals {
-                self.approvals
+            approvals,
+            approval_reviewer: if approvals == ApprovalPolicy::Interactive {
+                self.approval_reviewer
             } else {
-                ApprovalPolicy::Never
+                ApprovalReviewer::User
             },
         }
     }

@@ -393,10 +393,33 @@ per-role ceiling, but run-wide limits still apply.
 
 Permission restrictions compare all components. Read-only filesystem access
 may replace either writable scope; project-write and workspace-write are
-incomparable. Network denial may replace provider-default access, and never
-requesting approvals may replace interactive approvals. Other increases or
+incomparable. Both writable scopes may replace unrestricted access. Network
+denial may replace provider-default access, and never requesting approvals may
+replace interactive approvals. Other increases or
 incomparable replacements are errors. Effective role settings remain separate
 from their unmodified archetype definition.
+
+Permission profiles independently select `approval_reviewer = "user"` or
+`"auto-review"`; omission means `"user"`. Interactive approvals use the selected
+reviewer. Automatic review with `approvals = "never"` is invalid. Human and
+automatic review are incomparable policies: a project may disable approvals,
+but cannot switch reviewers. Codex maps automatic review to `on-request` and
+`approvals_reviewer = "auto_review"`, preserving the selected sandbox.
+
+Trusted profiles may select `filesystem = "unrestricted"`. Codex maps this to
+`danger-full-access`, removing both filesystem and network sandbox boundaries,
+so this profile requires `network = "provider-default"`. Approval policy and
+reviewer remain independent. A read-only role cannot use unrestricted access.
+If any enabled role has unrestricted access, its selected archetype must match
+an explicit global default or the operator's `--archetype` selection. A project
+cannot activate unrestricted operation merely by selecting a globally defined
+archetype. No built-in archetype grants unrestricted access.
+
+Migration 20 records the historical `user` reviewer in saved profiles and their
+provenance. Portable locks omit the default reviewer, retaining historical
+fingerprints; automatic review contributes to the fingerprint. Missing reviewer
+fields in current-schema snapshots are errors. Internal RPC protocol 15 carries
+the reviewer so older supervisors cannot silently omit the selected policy.
 
 Policy intersection retains shared permissions, requires both role policies to
 enable a role, and takes the smaller capacity or run limit. An omitted role
@@ -1751,7 +1774,11 @@ sufficiently capable same-UID process may inspect other processes or
 user-readable runtime files. Strong isolation requires a future hardened mode
 using separate operating-system identities, user namespaces, or containers.
 
-The ordinary provider sandbox remains mandatory policy, not an optimization.
+The ordinary provider sandbox is the default policy. Only an explicitly
+operator-selected unrestricted profile disables it; failures never authorize
+an automatic retry with broader access. Unrestricted processes can access other
+workspaces and same-user runtime state, so the supervisor's logical ownership
+checks do not provide host isolation for them.
 `read-only` is advertised only when the selected provider can enforce it.
 Workspace isolation prevents concurrent Git changes from colliding; it does not
 by itself restrict filesystem or network access.

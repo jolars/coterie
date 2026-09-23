@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::{ArchetypeDefinition, ArchetypeInput, ConfigLayer};
+use super::{ArchetypeDefinition, ArchetypeInput, ConfigLayer, ProfileInput};
 
 /// Field paths use dots; definition names cannot contain dots.
 pub(crate) type Provenance = BTreeMap<String, ValueProvenance>;
@@ -93,6 +93,7 @@ pub(super) fn record_archetype(
     provenance: &mut Provenance,
     archetype: &ArchetypeDefinition,
     input: Option<&ArchetypeInput>,
+    profiles: &BTreeMap<String, ProfileInput>,
     selector: ConfigSource,
 ) {
     let prefix = format!("archetypes.{}", archetype.reference);
@@ -118,6 +119,17 @@ pub(super) fn record_archetype(
                 &format!("permission_profiles.{name}"),
                 layer,
             );
+            if profiles[name].approval_reviewer.is_none() {
+                provenance.insert(
+                    format!(
+                        "archetype.permission_profiles.{name}.approval_reviewer"
+                    ),
+                    ValueProvenance::direct(
+                        ConfigLayer::Compiled,
+                        format!("permission_profiles.{name}.approval_reviewer"),
+                    ),
+                );
+            }
         }
         for (name, role) in &input.roles {
             for (field, absent) in [
@@ -150,7 +162,8 @@ pub(super) fn record_archetype(
             [&format!("archetype.roles.{name}.permission_profile")]
             .source
             .clone();
-        for field in ["filesystem", "network", "approvals"] {
+        for field in ["filesystem", "network", "approvals", "approval_reviewer"]
+        {
             let mut origin = provenance[&format!(
                 "archetype.permission_profiles.{}.{field}",
                 role.permission_profile

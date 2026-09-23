@@ -223,6 +223,13 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 
 ### M5 gate
 
+- [x] Support independent approval reviewers and explicitly operator-selected
+  unrestricted profiles. Preserve historical policy and fingerprints through
+  migration and test provider capability checks and recovery.
+  `NEXTEST_TEST_THREADS=4 task check` passes (567 tests passed, 25 skipped).
+  Authenticated provider checks remain opt-in. See the
+  [permission guide](docs/permissions.md).
+
 - [x] Lattice and property tests prove that an untrusted project override can
   never increase authority or a resource ceiling. See the [policy
   tests](src/config/policy_tests.rs) for intersection laws, combined

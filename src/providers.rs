@@ -36,7 +36,8 @@ use tokio::time::{Instant, sleep_until};
 
 use crate::auth::{AgentToken, SessionScope};
 use crate::config::{
-    ApprovalPolicy, FilesystemPolicy, NetworkPolicy, PermissionProfile,
+    ApprovalPolicy, ApprovalReviewer, FilesystemPolicy, NetworkPolicy,
+    PermissionProfile,
 };
 use crate::id::{ProjectId, TaskId};
 
@@ -76,6 +77,8 @@ pub(crate) enum ProviderCapability {
     FilesystemSandbox,
     NetworkSandbox,
     ApprovalPolicy,
+    AutomaticApprovalReview,
+    UnrestrictedAccess,
     Interrupt,
     Termination,
     TranscriptStreaming,
@@ -94,6 +97,8 @@ impl fmt::Display for ProviderCapability {
             Self::FilesystemSandbox => "filesystem sandbox enforcement",
             Self::NetworkSandbox => "network sandbox enforcement",
             Self::ApprovalPolicy => "approval policy enforcement",
+            Self::AutomaticApprovalReview => "automatic approval review",
+            Self::UnrestrictedAccess => "explicit unrestricted access",
             Self::Interrupt => "interrupt",
             Self::Termination => "termination",
             Self::TranscriptStreaming => "transcript streaming",
@@ -1843,6 +1848,20 @@ fn codex_capabilities(
     if interactive && interactive_help.contains("--ask-for-approval") {
         capabilities.insert(ProviderCapability::ApprovalPolicy);
     }
+    if interactive
+        && job
+        && both_contain("--config")
+        && both_contain("--approve-for-me")
+    {
+        capabilities.insert(ProviderCapability::AutomaticApprovalReview);
+    }
+    if interactive
+        && job
+        && both_contain("--sandbox")
+        && both_contain("danger-full-access")
+    {
+        capabilities.insert(ProviderCapability::UnrestrictedAccess);
+    }
     capabilities
 }
 
@@ -1856,6 +1875,7 @@ fn apply_codex_permission_profile(
             "workspace-write"
         }
         FilesystemPolicy::ReadOnly => "read-only",
+        FilesystemPolicy::Unrestricted => "danger-full-access",
     };
     let approvals = match profile.approvals {
         ApprovalPolicy::Interactive => "on-request",
@@ -1867,7 +1887,13 @@ fn apply_codex_permission_profile(
         .arg("--config")
         .arg(format!("approval_policy=\"{approvals}\""));
     if profile.approvals == ApprovalPolicy::Interactive {
-        command.arg("--config").arg("approvals_reviewer=\"user\"");
+        let reviewer = match profile.approval_reviewer {
+            ApprovalReviewer::User => "user",
+            ApprovalReviewer::AutoReview => "auto_review",
+        };
+        command
+            .arg("--config")
+            .arg(format!("approvals_reviewer=\"{reviewer}\""));
     }
     if profile.network == NetworkPolicy::Deny {
         command
@@ -1998,6 +2024,8 @@ pub(crate) mod fake {
                     ProviderCapability::FilesystemSandbox,
                     ProviderCapability::NetworkSandbox,
                     ProviderCapability::ApprovalPolicy,
+                    ProviderCapability::AutomaticApprovalReview,
+                    ProviderCapability::UnrestrictedAccess,
                     ProviderCapability::Interrupt,
                     ProviderCapability::Termination,
                     ProviderCapability::TranscriptStreaming,
@@ -2351,6 +2379,38 @@ mod tests {
     }
 
     #[test]
+    fn codex_probes_each_optional_permission_control_in_both_modes() {
+        let interactive = "Usage: codex --config --sandbox danger-full-access --ask-for-approval --approve-for-me";
+        let job = "Usage: codex exec --config --sandbox danger-full-access --approve-for-me";
+        for (marker, capability) in [
+            (
+                "--approve-for-me",
+                ProviderCapability::AutomaticApprovalReview,
+            ),
+            ("danger-full-access", ProviderCapability::UnrestrictedAccess),
+        ] {
+            assert!(
+                super::codex_capabilities(interactive, job)
+                    .contains(&capability)
+            );
+            assert!(
+                !super::codex_capabilities(
+                    &interactive.replace(marker, ""),
+                    job
+                )
+                .contains(&capability)
+            );
+            assert!(
+                !super::codex_capabilities(
+                    interactive,
+                    &job.replace(marker, "")
+                )
+                .contains(&capability)
+            );
+        }
+    }
+
+    #[test]
     fn codex_probe_does_not_claim_missing_permission_controls() {
         const INTERACTIVE_HELP: &str = "Usage: codex [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --ask-for-approval <APPROVAL_POLICY>\n";
         const JOB_HELP: &str = "Usage: codex exec [OPTIONS] [PROMPT]\n  --config <key=value>\n  --cd <DIR>\n  --sandbox <SANDBOX_MODE>\n  --json\n";
@@ -2642,6 +2702,56 @@ mod tests {
                 .is_some_and(|value| value.starts_with("cot1_"))
         );
         assert_eq!(variables["COTERIE_TASK_ID"], None);
+    }
+
+    #[test]
+    fn codex_permission_controls_preserve_independent_policy() {
+        let provider = CodexProvider::new(["codex"]);
+        for (filesystem, network, sandbox) in [
+            ("project-write", "deny", "workspace-write"),
+            ("workspace-write", "deny", "workspace-write"),
+            ("read-only", "deny", "read-only"),
+            ("unrestricted", "provider-default", "danger-full-access"),
+        ] {
+            let mut specification = specification();
+            specification.permission_profile = serde_json::from_value(serde_json::json!({
+                "filesystem": filesystem, "network": network,
+                "approvals": "interactive", "approval_reviewer": "auto-review",
+            })).expect("the permission profile should deserialize");
+            let environment = job_environment();
+            let interactive = super::InteractiveEnvironment {
+                project_id: environment.project_id,
+                primary_project_root: environment.primary_project_root.clone(),
+                role: environment.role.clone(),
+                socket_path: environment.socket_path.clone(),
+                token: AgentToken::generate().unwrap(),
+            };
+            for command in [
+                provider
+                    .interactive_command(&specification, &interactive)
+                    .unwrap(),
+                provider.job_command(&specification, &environment).unwrap(),
+            ] {
+                let arguments = arguments_without_mcp(&command);
+                assert!(
+                    arguments
+                        .windows(2)
+                        .any(|pair| pair == ["--sandbox", sandbox])
+                );
+                assert!(arguments.windows(2).any(|pair| pair
+                    == ["--config", "approval_policy=\"on-request\""]));
+                assert!(arguments.windows(2).any(|pair| pair
+                    == ["--config", "approvals_reviewer=\"auto_review\""]));
+                assert_eq!(
+                    arguments.iter().any(|arg| *arg
+                        == "sandbox_workspace_write.network_access=false"),
+                    network == "deny"
+                );
+                assert!(!arguments.iter().any(|arg| *arg
+                    == "--approve-for-me"
+                    || *arg == "--dangerously-bypass-approvals-and-sandbox"));
+            }
+        }
     }
 
     #[test]
@@ -3300,7 +3410,7 @@ mod tests {
             })
             .unwrap();
         let bootstrap: String = serde_json::from_str(bootstrap).unwrap();
-        assert!(bootstrap.contains("Selected permission profile: {\"filesystem\":\"workspace-write\",\"network\":\"deny\",\"approvals\":\"never\"}"));
+        assert!(bootstrap.contains("Selected permission profile: {\"filesystem\":\"workspace-write\",\"network\":\"deny\",\"approvals\":\"never\",\"approval_reviewer\":\"user\"}"));
         assert!(bootstrap.contains("missing or inaccessible"));
         assert!(bootstrap.contains("do not bypass the sandbox"));
         assert!(bootstrap.contains("Never print tokens"));

@@ -19,6 +19,7 @@ use super::{ExitCategory, RenderError};
 #[derive(Clone, Debug, Default, Args)]
 pub(crate) struct Overrides {
     /// Select a trusted, versioned archetype for the run or configuration command.
+    /// Required for unrestricted operation unless selected as the global default.
     #[arg(long, global = true)]
     archetype: Option<String>,
     /// Bound simultaneously active agents within trusted global policy.

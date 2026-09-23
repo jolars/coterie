@@ -12,6 +12,14 @@
       ],
       "type": "string"
     },
+    "ApprovalReviewer": {
+      "description": "Who evaluates eligible provider approval requests.",
+      "enum": [
+        "user",
+        "auto-review"
+      ],
+      "type": "string"
+    },
     "AssignmentId": {
       "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
       "type": "string"
@@ -19,6 +27,7 @@
     "FilesystemPolicy": {
       "description": "Filesystem authority granted to a provider process.",
       "enum": [
+        "unrestricted",
         "project-write",
         "workspace-write",
         "read-only"
@@ -37,6 +46,9 @@
       "additionalProperties": false,
       "description": "Provider sandbox policy referenced by a role.",
       "properties": {
+        "approval_reviewer": {
+          "$ref": "#/$defs/ApprovalReviewer"
+        },
         "approvals": {
           "$ref": "#/$defs/ApprovalPolicy"
         },
@@ -50,7 +62,8 @@
       "required": [
         "filesystem",
         "network",
-        "approvals"
+        "approvals",
+        "approval_reviewer"
       ],
       "type": "object"
     },

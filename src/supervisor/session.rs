@@ -7,7 +7,9 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::auth::{AgentToken, SessionScope, TokenGenerationError};
-use crate::config::{NetworkPolicy, PermissionProfile};
+use crate::config::{
+    ApprovalReviewer, FilesystemPolicy, NetworkPolicy, PermissionProfile,
+};
 use crate::id::{AssignmentId, ProjectId, SessionId, TaskId};
 use crate::providers::{
     JobEnvironment, LaunchMode, LaunchSpecification, LifecycleState, Provider,
@@ -1355,6 +1357,10 @@ pub(crate) fn required_permission_capabilities(
         Some(ProviderCapability::FilesystemSandbox),
         network,
         Some(ProviderCapability::ApprovalPolicy),
+        (permission_profile.approval_reviewer == ApprovalReviewer::AutoReview)
+            .then_some(ProviderCapability::AutomaticApprovalReview),
+        (permission_profile.filesystem == FilesystemPolicy::Unrestricted)
+            .then_some(ProviderCapability::UnrestrictedAccess),
     ]
     .into_iter()
     .flatten()
@@ -2137,6 +2143,50 @@ mod tests {
                 .expect(
                     "failed preflight must not create durable launch intent",
                 );
+        }
+    }
+
+    #[test]
+    fn optional_permission_controls_are_required_before_recording_launch_intent()
+     {
+        for (capability, profile) in [
+            (
+                ProviderCapability::AutomaticApprovalReview,
+                serde_json::json!({
+                    "filesystem": "workspace-write", "network": "deny", "approvals": "interactive", "approval_reviewer": "auto-review",
+                }),
+            ),
+            (
+                ProviderCapability::UnrestrictedAccess,
+                serde_json::json!({
+                    "filesystem": "unrestricted", "network": "provider-default", "approvals": "never", "approval_reviewer": "user",
+                }),
+            ),
+        ] {
+            let directory = TestDirectory::new();
+            let mut store = store_with_run(&directory);
+            let mut requested = launch(RUN_ID.parse().unwrap());
+            requested.permission_profile =
+                serde_json::from_value(profile).unwrap();
+            let provider = FakeProvider::new([FakeScript::new([])])
+                .without_capability(capability);
+            let mut supervisor =
+                AgentSessionSupervisor::new(provider, &directory.0);
+            assert!(matches!(
+                supervisor.launch(&mut store, &requested),
+                Err(super::AgentSessionError::MissingCapability { .. })
+            ));
+            assert!(supervisor.provider.launches().is_empty());
+            store
+                .transaction(|repositories| {
+                    assert!(
+                        repositories
+                            .session(requested.scope.session_id)?
+                            .is_none()
+                    );
+                    Ok(())
+                })
+                .unwrap();
         }
     }
 

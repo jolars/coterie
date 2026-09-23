@@ -88,6 +88,14 @@
         "never"
       ]
     },
+    "ApprovalReviewer": {
+      "description": "Who evaluates eligible provider approval requests.",
+      "type": "string",
+      "enum": [
+        "user",
+        "auto-review"
+      ]
+    },
     "ArchetypeInput": {
       "type": "object",
       "properties": {
@@ -116,6 +124,7 @@
       "description": "Filesystem authority granted to a provider process.",
       "type": "string",
       "enum": [
+        "unrestricted",
         "project-write",
         "workspace-write",
         "read-only"
@@ -168,6 +177,17 @@
     "ProfileInput": {
       "type": "object",
       "properties": {
+        "approval_reviewer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalReviewer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "approvals": {
           "anyOf": [
             {

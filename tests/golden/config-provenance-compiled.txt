@@ -1,11 +1,14 @@
 allowed_project_roots <- compiled:-:allowed_project_roots
 archetype.lead <- builtin:-:archetypes.builtin:standard@1.lead
+archetype.permission_profiles.interactive.approval_reviewer <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.approval_reviewer
 archetype.permission_profiles.interactive.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.approvals
 archetype.permission_profiles.interactive.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.filesystem
 archetype.permission_profiles.interactive.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.network
+archetype.permission_profiles.review.approval_reviewer <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.approval_reviewer
 archetype.permission_profiles.review.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.approvals
 archetype.permission_profiles.review.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.filesystem
 archetype.permission_profiles.review.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.network
+archetype.permission_profiles.worker.approval_reviewer <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.approval_reviewer
 archetype.permission_profiles.worker.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.approvals
 archetype.permission_profiles.worker.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.filesystem
 archetype.permission_profiles.worker.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.network
@@ -37,16 +40,19 @@ limits.max_spawns_per_minute <- compiled:-:limits.max_spawns_per_minute
 providers.codex.command <- compiled:-:providers.codex.command
 roles.lead.enabled <- compiled:-:roles.lead.enabled
 roles.lead.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.lead.max_instances
+roles.lead.permission_profile.approval_reviewer <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.approval_reviewer (selected by builtin:-:archetypes.builtin:standard@1.roles.lead.permission_profile)
 roles.lead.permission_profile.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.approvals (selected by builtin:-:archetypes.builtin:standard@1.roles.lead.permission_profile)
 roles.lead.permission_profile.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.filesystem (selected by builtin:-:archetypes.builtin:standard@1.roles.lead.permission_profile)
 roles.lead.permission_profile.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.interactive.network (selected by builtin:-:archetypes.builtin:standard@1.roles.lead.permission_profile)
 roles.reviewer.enabled <- compiled:-:roles.reviewer.enabled
 roles.reviewer.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.reviewer.max_instances
+roles.reviewer.permission_profile.approval_reviewer <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.approval_reviewer (selected by builtin:-:archetypes.builtin:standard@1.roles.reviewer.permission_profile)
 roles.reviewer.permission_profile.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.approvals (selected by builtin:-:archetypes.builtin:standard@1.roles.reviewer.permission_profile)
 roles.reviewer.permission_profile.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.filesystem (selected by builtin:-:archetypes.builtin:standard@1.roles.reviewer.permission_profile)
 roles.reviewer.permission_profile.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.review.network (selected by builtin:-:archetypes.builtin:standard@1.roles.reviewer.permission_profile)
 roles.worker.enabled <- compiled:-:roles.worker.enabled
 roles.worker.max_instances <- builtin:-:archetypes.builtin:standard@1.roles.worker.max_instances
+roles.worker.permission_profile.approval_reviewer <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.approval_reviewer (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
 roles.worker.permission_profile.approvals <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.approvals (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
 roles.worker.permission_profile.filesystem <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.filesystem (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
 roles.worker.permission_profile.network <- builtin:-:archetypes.builtin:standard@1.permission_profiles.worker.network (selected by builtin:-:archetypes.builtin:standard@1.roles.worker.permission_profile)
