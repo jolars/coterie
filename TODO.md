@@ -501,6 +501,88 @@ The shutdown record does not establish who requested the stop.
   recovery boundaries, each recovered twice. `task check` passed with 557 tests
   and 25 skips; real-provider tests remain opt-in and were not run.
 
+### Diplodocus Milestone 6 coordination follow-ups
+
+Observed September 23, 2026 in run `cr-01M36CJ6S3PH09F9VXEKTD8JFG`,
+foreground session `cs-01M36CJ6XPDPFZZDZT03SSKED1`, generation 0. The run
+eventually accepted the identity, output-safety, shared-record, and startup
+fixes; the user stopped further milestone work after several hours. Real
+implementation defects, late review findings, and excessive lead coordination
+also contributed. These observations do not establish a supervisor crash,
+lost work, or a recurrence of the September 17 notification bug.
+
+The running executable was
+`/nix/store/7jg2ks84rcw4g1sskp99vxvj4fv03h4w-coterie-0.2.0/bin/coterie`,
+SHA-256 `61a2c146475a013db87585e84972a9e31e7081ebb0246b8dacf0292c7e1a0d6a`.
+Worker policy was `workspace-write`, network denied, approvals never. Recover
+the incident provider version and saved supervision policy before attributing
+the exits to a particular limit; current defaults are not the run snapshot.
+
+- [ ] **High: Diagnose worker exits and expose approaching job deadlines.**
+  Two workers exited without `finish`: identity assignment
+  `ca-01M36FNAC4A27GGYTQXC4WYPF2` left 12 dirty paths, while startup assignment
+  `ca-01M36JGZR6AZE6AY7DR21R0GJV` had already verified reviewed commit
+  `b2be3b29ceb122ce01594128891f4b74ff5c562f` and a clean worktree. Their
+  recovery records were created 3,689 and 3,683 seconds after assignment
+  creation, respectively; these are recovery intervals, not observed exit
+  times. The current default `job_timeout_seconds = 3600` and the supervisor's
+  elapsed-session check make deadline expiry during coordination a concrete
+  hypothesis. Inspect normalized process-control and exit events and the saved
+  policy to confirm or reject it. The lead's `events` and `status` requests
+  were denied because those views are operator-only; transcript tails ended
+  after a successful tool call and an empty poll, without a final report.
+  Expose authorized exit reasons, deadline/remaining time, and an actionable
+  warning before a worker waiting on review or a commit reaches its limit.
+  Test active work, pending handoffs, timeout termination, and unknown exits.
+  Any deadline extension or changed accounting needs an explicit design and
+  authority contract; neither silence nor provider exit means task completion.
+- [ ] **High: Reduce recovery work after an acknowledged commit.** The startup
+  worker sent its full commit and cleanliness verification in
+  `cm-01M36NXRC6JAMKTZFQX1J9HHVD`, then exited before submission. The supported
+  recovery path required a new worker/worktree, copying the same reviewed
+  production changes, validation, another commit handoff, and submission.
+  Scope a durable handoff state or explicitly authorized completion path in
+  `DESIGN.md` that can avoid this repeated transfer when the exact reviewed
+  commit is already retained. Preserve generation fencing, source files and
+  index, independent review, target validation, and explicit task acceptance.
+  Regress exits before commit, after commit, after acknowledgement, and around
+  `finish`, including dirty work, stale evidence, and repeated recovery.
+  This is a follow-up to the existing
+  [commit handoff](docs/linked-worktree-commits.md), not evidence of lost commits.
+- [ ] **Medium: Make validation handoffs schedulable before expensive work.**
+  Workers could edit and run some direct Cargo checks, but documented devenv
+  entry encountered Nix daemon or fetcher-lock denials; some runtime checks
+  also lacked kernels or permitted loopback access. Git metadata access was a
+  separate restriction. Consequently, the lead became the validation and
+  commit queue for otherwise parallel tasks. Extend the existing
+  [environment workflow](docs/validation-environments.md) with a concise
+  assignment preflight and visible validation owner/pending state. Record
+  required commands, declared inputs, actual policy, and failed versus blocked
+  checks once, then route the supported handoff without repeated denied probes.
+  Bind reusable evidence to the exact source and relevant environment; edits,
+  recovery onto a new base, or integration still require appropriate checks.
+  Do not solve this by widening worker permissions or skipping required tests.
+- [ ] **Medium: Show useful progress separately from coordination activity.**
+  The lead inbox reached sequence 161, but engine and cache implementation had
+  not started. Expose elapsed time and recorded waits for review, validation,
+  commits, and recovery alongside accepted tasks and unresolved dependencies.
+  Make that bounded summary available through the coordinator's authorized
+  views so it can explain delays and propose a stopping point sooner.
+  Test that messages, polls, and repeated reviews cannot appear as completed
+  implementation or release dependencies. Preserve agent judgment about
+  scope and scheduling; do not derive semantic progress from token counts.
+- [ ] **Medium: Audit delayed notices during a long active foreground turn.**
+  Many notices with distinct delivery IDs arrived during this run. After
+  closeout, receipt of `co-01M36Q89NJ8RRSK4XNNHM8279Y` succeeded and the next
+  poll was empty at inbox 161/progress 887. This establishes one delayed notice,
+  not an infinite loop or a failure of the existing receipt gate. Correlate
+  eligible event cursors with queue attempts, provider acceptance, receipt,
+  and actual foreground consumption before proposing a fix. Extend the
+  [notification regression](docs/notification-loop.md) to long implementation
+  turns that also read updates through tools, user status/scope changes, and
+  final closeout. Keep real-provider coverage opt-in; preserve coalescing,
+  idempotent receipt, separate inbox acknowledgement, and user stop instructions.
+
 ### M7 gate
 
 - [ ] The full design criterion succeeds end to end, including the two-project
