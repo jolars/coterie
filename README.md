@@ -193,6 +193,8 @@ binaries and a shell installer to the GitHub release.
 
 ## Project documentation
 
+- [`docs/demo.md`](docs/demo.md) is a self-guided research
+  claim review demo using a disposable Git project.
 - [`DESIGN.md`](DESIGN.md) defines the intended product behavior and safety
   boundaries.
 - [`TODO.md`](TODO.md) defines implementation order and milestone gates.

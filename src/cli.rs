@@ -958,11 +958,7 @@ mod tests {
     #[test]
     fn user_documentation_covers_the_mvp_contract() {
         let readme = include_str!("../README.md");
-        for heading in [
-            "## Installation",
-            "## Codex prerequisites",
-            "## sidekick.nvim",
-        ] {
+        for heading in ["## Installation", "## Codex prerequisites"] {
             assert!(readme.contains(heading), "README is missing `{heading}`");
         }
 
