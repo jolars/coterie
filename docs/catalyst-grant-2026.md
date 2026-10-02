@@ -86,10 +86,10 @@ report](https://github.com/jolars/coterie/blob/main/docs/field-report-normreg-mu
 describes a LaTeX and Python research run with validated tasks, tracked
 contributions, independent proof review, and recovery after a worker exited. It
 also documents coordination friction and a scientific framing error by the lead
-agent. This is internal field evidence, not a controlled study. A
-[self-guided demo](https://github.com/jolars/coterie/blob/main/docs/demo.md)
-uses a public example to show Coterie's current workflow. The grant would add
-an export linking manuscript changes to inspectable evidence.
+agent. This is internal field evidence, not a controlled study. A [self-guided
+demo](https://github.com/jolars/coterie/blob/main/docs/demo.md) uses a public
+example to show Coterie's current workflow. The grant would add an export
+linking manuscript changes to inspectable evidence.
 
 ## 6. ALTERNATIVES AND COMPETITORS
 

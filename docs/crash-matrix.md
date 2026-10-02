@@ -2,18 +2,18 @@
 
 Stopped-run recovery adds `runtime-run-recovery` and `recover-run` scenarios.
 They interrupt lease validation, the transaction that records `run.recovered`
-and reactivates the run, index and socket publication, and later retirement.
-The dirty-work scenario retains staged, unstaged, and untracked changes and
-compares raw source index bytes. Every crash is recovered twice; the second
-retry must leave database rows and retained files unchanged. Runtime recovery
-keeps the selected run ID, both attached projects, and the original task, with
-exactly one recovery event.
+and reactivates the run, index and socket publication, and later retirement. The
+dirty-work scenario retains staged, unstaged, and untracked changes and compares
+raw source index bytes. Every crash is recovered twice; the second retry must
+leave database rows and retained files unchanged. Runtime recovery keeps the
+selected run ID, both attached projects, and the original task, with exactly one
+recovery event.
 
 The M4 crash matrix lives in
 [`src/supervisor/crash_tests.rs`](../src/supervisor/crash_tests.rs). It runs in
 the ordinary test suite, using temporary real Git repositories, SQLite files,
-Unix sockets, deterministic providers, and a local executable that exercises
-the Codex adapter without invoking Codex or a model.
+Unix sockets, deterministic providers, and a local executable that exercises the
+Codex adapter without invoking Codex or a model.
 
 Each scenario first records its boundary sequence. The harness repeats the
 scenario in a fresh subprocess for **every occurrence** of each boundary,
@@ -25,36 +25,36 @@ successful injection.
 The harness then opens the surviving state in a replacement process and runs
 recovery twice. Separate matrices interrupt recovery itself after incomplete
 workspace creation, uncertain provider launch, Git checkout, and socket
-publication. The boundary inventory test requires every declared injection
-point to have a scenario.
+publication. The boundary inventory test requires every declared injection point
+to have a scenario.
 
-| Boundary | Scenarios | Required evidence |
-| --- | --- | --- |
-| Database migrations and commits | Initialization with the immutable configuration snapshot, legacy policy upgrades, task creation with a dependency and group, atomic claim and assignment creation, submission, closure (including external integration overrides), messages, acknowledgments, lifecycle observations, and shutdown | SQLite integrity and foreign keys remain valid. Uncommitted mutations roll back, committed operation IDs replay, and correlated records and events agree. |
-| Provider launch | Fake and actual subprocess launch, capability probes, stdout reader setup, foreground launch claims, and process observations | At most one provider execution per session, verified by a separate executable's launch ledger. Ambiguous launches retain their task and workspace and become `unknown`. |
-| Provider output and exit | Event receipt, JSONL ingestion, malformed-frame quarantine, process reaping, and foreground exit reporting | Already stored output survives, incomplete tails remain readable, and provider exit never closes a task. |
-| Foreground notification | Delivery-intent commit, queue spawn, command outcome, durable observation, and receipt transaction | An independent queue ledger records at most one attempt. Repeated recovery preserves uncertain delivery state, never retransmits the notice, and leaves inbox acknowledgement explicit. Receipt and coalescing cursors commit atomically. |
-| Process control | Durable shutdown and control phases, interrupt, terminate, and kill | Control intent precedes delivery. An independent signal ledger detects repeated delivery, and replacement processes never signal an unproved process. |
-| Idle shutdown | Eligibility check, durable intent, commit, and ordinary shutdown completion | An interrupted idle stop either rolls back or resumes its recorded intent. Repeated recovery stops the run once and preserves unfinished tasks. |
-| Offline stop recovery | Existing-state validation, lease acquisition, shutdown intent commit, socket publication, and retirement | Recovery uses the saved policy, blocks launches before reconciliation, and retires the same run once. Repeated recovery preserves the completed operation and creates no replacement run. |
-| Worktree creation | Parent directories, owned references, worktree creation, and database observations | Exactly one owned worktree and reference remain. Recovery reuses recorded identities and preserves worker commits and repository instructions. |
-| Integration | Fast-forward, rebase, and explicit merge plans, intermediate rebased commit creation, individual checkout progress callbacks, commit creation, reference advancement, and database observations | Completed integrations have the expected target commit and one reference advancement. Partial changes that cannot be safely completed remain inspectable with an `unknown` operation and a diagnostic. |
-| Submission correction | Database mutation intent, result writes, and commit | Before commit, replacement rolls back in full. After commit, retries return the recorded correction exactly once. Both submission records, descendant commits, worktree ownership, and the submitted task survive repeated recovery. |
-| Interrupted assignment retirement and continuation | Recovery mutation intent, result writes, commit, and the subsequent spawn's claim, workspace, and launch boundaries | Retirement is atomic and replayable. The original dirty worktree, commits, session, and history survive. A continuation has exactly one explicit source link and an independent worktree; repeating reconciliation does not relaunch an uncertain provider or alter the source. |
-| Transcripts | Private directory and file creation, append, and sync | The stored prefix is preserved exactly, and a partial final JSONL frame is never repeated by recovery. |
-| Project attachment | Durable intent, lease acquisition, project record, and index publication | Retries retain one project identity and alias. Conflicts remain visible. A second recovery changes neither records nor coordination files. |
-| Runtime coordination | Directory permissions, lease acquisition and publication, socket creation and permissions, temporary index writes, sync, rename, retirement, and lease release | A stopped run retires its secondary indexes, primary index, and socket and releases all leases. An unverifiable socket is reported and preserved. |
+  | Boundary                                           | Scenarios                                                                                                                                                                                                                                                                                          | Required evidence                                                                                                                                                                                                                                                               |
+  | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | Database migrations and commits                    | Initialization with the immutable configuration snapshot, legacy policy upgrades, task creation with a dependency and group, atomic claim and assignment creation, submission, closure (including external integration overrides), messages, acknowledgments, lifecycle observations, and shutdown | SQLite integrity and foreign keys remain valid. Uncommitted mutations roll back, committed operation IDs replay, and correlated records and events agree.                                                                                                                       |
+  | Provider launch                                    | Fake and actual subprocess launch, capability probes, stdout reader setup, foreground launch claims, and process observations                                                                                                                                                                      | At most one provider execution per session, verified by a separate executable's launch ledger. Ambiguous launches retain their task and workspace and become `unknown`.                                                                                                         |
+  | Provider output and exit                           | Event receipt, JSONL ingestion, malformed-frame quarantine, process reaping, and foreground exit reporting                                                                                                                                                                                         | Already stored output survives, incomplete tails remain readable, and provider exit never closes a task.                                                                                                                                                                        |
+  | Foreground notification                            | Delivery-intent commit, queue spawn, command outcome, durable observation, and receipt transaction                                                                                                                                                                                                 | An independent queue ledger records at most one attempt. Repeated recovery preserves uncertain delivery state, never retransmits the notice, and leaves inbox acknowledgement explicit. Receipt and coalescing cursors commit atomically.                                       |
+  | Process control                                    | Durable shutdown and control phases, interrupt, terminate, and kill                                                                                                                                                                                                                                | Control intent precedes delivery. An independent signal ledger detects repeated delivery, and replacement processes never signal an unproved process.                                                                                                                           |
+  | Idle shutdown                                      | Eligibility check, durable intent, commit, and ordinary shutdown completion                                                                                                                                                                                                                        | An interrupted idle stop either rolls back or resumes its recorded intent. Repeated recovery stops the run once and preserves unfinished tasks.                                                                                                                                 |
+  | Offline stop recovery                              | Existing-state validation, lease acquisition, shutdown intent commit, socket publication, and retirement                                                                                                                                                                                           | Recovery uses the saved policy, blocks launches before reconciliation, and retires the same run once. Repeated recovery preserves the completed operation and creates no replacement run.                                                                                       |
+  | Worktree creation                                  | Parent directories, owned references, worktree creation, and database observations                                                                                                                                                                                                                 | Exactly one owned worktree and reference remain. Recovery reuses recorded identities and preserves worker commits and repository instructions.                                                                                                                                  |
+  | Integration                                        | Fast-forward, rebase, and explicit merge plans, intermediate rebased commit creation, individual checkout progress callbacks, commit creation, reference advancement, and database observations                                                                                                    | Completed integrations have the expected target commit and one reference advancement. Partial changes that cannot be safely completed remain inspectable with an `unknown` operation and a diagnostic.                                                                          |
+  | Submission correction                              | Database mutation intent, result writes, and commit                                                                                                                                                                                                                                                | Before commit, replacement rolls back in full. After commit, retries return the recorded correction exactly once. Both submission records, descendant commits, worktree ownership, and the submitted task survive repeated recovery.                                            |
+  | Interrupted assignment retirement and continuation | Recovery mutation intent, result writes, commit, and the subsequent spawn's claim, workspace, and launch boundaries                                                                                                                                                                                | Retirement is atomic and replayable. The original dirty worktree, commits, session, and history survive. A continuation has exactly one explicit source link and an independent worktree; repeating reconciliation does not relaunch an uncertain provider or alter the source. |
+  | Transcripts                                        | Private directory and file creation, append, and sync                                                                                                                                                                                                                                              | The stored prefix is preserved exactly, and a partial final JSONL frame is never repeated by recovery.                                                                                                                                                                          |
+  | Project attachment                                 | Durable intent, lease acquisition, project record, and index publication                                                                                                                                                                                                                           | Retries retain one project identity and alias. Conflicts remain visible. A second recovery changes neither records nor coordination files.                                                                                                                                      |
+  | Runtime coordination                               | Directory permissions, lease acquisition and publication, socket creation and permissions, temporary index writes, sync, rename, retirement, and lease release                                                                                                                                     | A stopped run retires its secondary indexes, primary index, and socket and releases all leases. An unverifiable socket is reported and preserved.                                                                                                                               |
 
 After recovery converges, every database table is compared, including events,
 credentials, operations, and reconciliation counters. Repository files, Git
 objects, references, reflogs, worktree administrative data, transcripts,
-coordination files, and the provider's ledgers must also remain unchanged on
-the next recovery pass. Explicit command attempts retain their attempt
-accounting; polling an unchanged reconciliation result creates no new attempt.
+coordination files, and the provider's ledgers must also remain unchanged on the
+next recovery pass. Explicit command attempts retain their attempt accounting;
+polling an unchanged reconciliation result creates no new attempt.
 
 The foreground-exit scenario waits for the provider adapter to prove process
-absence before comparing recovery passes. A crash before the wrapper's wait
-can leave the released provider exiting asynchronously; comparing during that
+absence before comparing recovery passes. A crash before the wrapper's wait can
+leave the released provider exiting asynchronously; comparing during that
 transition would mistake new evidence for a reconciliation side effect. A
 regression keeps a real fixture process alive and then unreaped to verify that
 neither its exit marker nor elapsed time satisfies this barrier.
@@ -62,8 +62,8 @@ neither its exit marker nor elapsed time satisfies this barrier.
 A recoverable state can require operator attention. For example, a crash during
 checkout can leave an index lock or a dirty target, and a crash between socket
 binding and permission changes can leave a socket that fails the private-mode
-check. The matrix requires a visible refusal and preservation of these resources,
-instead of relaxing the ownership or cleanup rules.
+check. The matrix requires a visible refusal and preservation of these
+resources, instead of relaxing the ownership or cleanup rules.
 
 Injection is armed explicitly inside the test binary and scoped to its test
 thread. Release builds contain no injection configuration, environment switch,
@@ -90,18 +90,18 @@ the injected crash cases.
 Crash subprocesses freeze the supervisor's wall clock at a fixed epoch. This
 keeps fsync latency and descheduling from advancing shutdown control phases
 between fault points. A regression forces a delay longer than the interrupt
-grace after intent commits and requires the same complete trace. The override
-is scoped to the test thread, and production deadlines remain unchanged.
+grace after intent commits and requires the same complete trace. The override is
+scoped to the test thread, and production deadlines remain unchanged.
 
 Runtime publication and retirement use a paused Tokio clock and a separate
-blocking operator task. The task prevents automatic clock advancement while
-real socket I/O is pending and keeps operator filesystem reads outside the
-supervisor's fault schedule. The typed handshake establishes readiness.
-Operator errors fail the child immediately, operator success still waits for
-retirement, and server completion cancels and joins pending operator work.
-Fixture RPCs use the existing 20-second subprocess watchdog instead of shorter
-nested RPC deadlines. Regressions cover these orderings and clock behavior;
-ordinary runtime tests continue to exercise production RPC deadlines.
+blocking operator task. The task prevents automatic clock advancement while real
+socket I/O is pending and keeps operator filesystem reads outside the
+supervisor's fault schedule. The typed handshake establishes readiness. Operator
+errors fail the child immediately, operator success still waits for retirement,
+and server completion cancels and joins pending operator work. Fixture RPCs use
+the existing 20-second subprocess watchdog instead of shorter nested RPC
+deadlines. Regressions cover these orderings and clock behavior; ordinary
+runtime tests continue to exercise production RPC deadlines.
 
 On September 13, 2026, acceptance on NixOS with 24 logical CPUs passed three
 default-parallel stress iterations of all 53 crash and clock tests, with no

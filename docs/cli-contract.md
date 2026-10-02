@@ -6,11 +6,11 @@ output, retry behavior, authentication, and process exit codes.
 ## Commands
 
 Generated `--help` output is authoritative for argument spelling. The reference
-below covers every implemented public command. Commands other than the foreground
-launch, `doctor`, `config`, and `run` require an active run and never create one as a side
-effect. Every subcommand accepts the global `--json` option; mutating run
-commands also accept
-`--operation-id <co-ULID>` as shown below.
+below covers every implemented public command. Commands other than the
+foreground launch, `doctor`, `config`, and `run` require an active run and never
+create one as a side effect. Every subcommand accepts the global `--json`
+option; mutating run commands also accept `--operation-id <co-ULID>` as shown
+below.
 
 ### `coterie`
 
@@ -23,17 +23,18 @@ the foreground Codex TUI. Codex inherits the working directory and terminal
 streams, so Coterie prints no wrapper response while the TUI owns the terminal.
 Coterie injects its orchestration bootstrap through Codex's
 `developer_instructions` setting, while leaving normal project instruction
-discovery—including `AGENTS.md`—intact. Configured role instructions are included
-in that provider bootstrap. Coterie configures a required stdio MCP server
-using the absolute path of its own binary. The bootstrap identifies the server
-and selected permission profile, calls `prime` through MCP, and directs agents
-to `tool_search` when the tools are deferred. Other orchestration actions also
-use MCP. The public CLI remains available to operators and ordinary processes.
+discovery—including `AGENTS.md`—intact. Configured role instructions are
+included in that provider bootstrap. Coterie configures a required stdio MCP
+server using the absolute path of its own binary. The bootstrap identifies the
+server and selected permission profile, calls `prime` through MCP, and directs
+agents to `tool_search` when the tools are deferred. Other orchestration actions
+also use MCP. The public CLI remains available to operators and ordinary
+processes.
 
 The bootstrap includes conditional guidance for any role coordinating delegated
 work: keep coordinating while work remains, unless the user pauses it. Command
-guidance follows the role's snapshotted capabilities, including custom roles.
-It directs agents through review, integration where needed, validation, and
+guidance follows the role's snapshotted capabilities, including custom roles. It
+directs agents through review, integration where needed, validation, and
 accepted task closure, and tells them to report blockers requiring user action.
 Roles lacking monitoring, integration, or closure authority must request help
 from the user or an authorized coordinator for those actions.
@@ -42,26 +43,27 @@ Check `prime.notifications` while coordinating. When it is `automatic`, handle
 current results and inbox messages, then end the turn if only waiting for
 delegated work. Coterie queues a notification when new durable updates arrive.
 Use `progress` with `--wait 0` to inspect updates. Otherwise, use the fallback
-`progress --after <progress_cursor> --wait 5 --json` when `task:read` is granted.
-Start without `--after`, save each `next_cursor`,
-and drain pages while `has_more` is true, including empty pages. On each cycle,
-including after a timeout, read `inbox --after <inbox_cursor> --json` using its
-separate cursor (initially 0), handle the messages, then acknowledge the handled
-cursor with `inbox ack`. Progress does not read or acknowledge messages. Inspect
-current tasks with `prime` and full result details with `task show`; provider exit and submission are
-not task acceptance. Integrate with `workspace:integrate` and close with
-`task:close` only after their respective review and validation conditions pass.
+`progress --after <progress_cursor> --wait 5 --json` when `task:read` is
+granted. Start without `--after`, save each `next_cursor`, and drain pages while
+`has_more` is true, including empty pages. On each cycle, including after a
+timeout, read `inbox --after <inbox_cursor> --json` using its separate cursor
+(initially 0), handle the messages, then acknowledge the handled cursor with
+`inbox ack`. Progress does not read or acknowledge messages. Inspect current
+tasks with `prime` and full result details with `task show`; provider exit and
+submission are not task acceptance. Integrate with `workspace:integrate` and
+close with `task:close` only after their respective review and validation
+conditions pass.
 
 Automatic delivery uses capability-probed [Codex queue support](codex-queue.md).
 Only a fixed notification enters the provider conversation; worker content
 remains in the authenticated inbox and task views. Notifications preserve user
-pauses and restrictions and never grant authority or acknowledge messages.
-If queue delivery fails or becomes uncertain, Coterie suspends automatic
-delivery for that session and reports the polling fallback.
+pauses and restrictions and never grant authority or acknowledge messages. If
+queue delivery fails or becomes uncertain, Coterie suspends automatic delivery
+for that session and reports the polling fallback.
 
 Startup and recovery use a durable snapshot of the resolved run configuration.
-An incompatible file or operator override produces `invalid_configuration`
-(exit 3), identifying the run, snapshot fingerprint, and changed effective fields.
+An incompatible file or operator override produces `invalid_configuration` (exit
+3), identifying the run, snapshot fingerprint, and changed effective fields.
 Restore the original configuration and overrides, or stop the active run before
 starting with new policy. Provider command changes conflict even when a portable
 lock still verifies; provenance-only changes are compatible. Existing run
@@ -69,27 +71,28 @@ commands and foreground process control remain available if files change.
 
 A supervisor keeps running the executable that started it after Coterie is
 upgraded. If its RPC protocol differs from the current CLI, startup and run
-commands fail with `unavailable` (exit 7) and recovery guidance. Use the matching
-Coterie executable to inspect the run with `status`, then explicitly stop it
-with `stop` when ready. On Linux, `ps -eo pid,args` shows the executable and run
-ID for each `coterie __supervisor` process. For Nix installations, this is normally
-the original `/nix/store/.../bin/coterie` path. Invoke that
+commands fail with `unavailable` (exit 7) and recovery guidance. Use the
+matching Coterie executable to inspect the run with `status`, then explicitly
+stop it with `stop` when ready. On Linux, `ps -eo pid,args` shows the executable
+and run ID for each `coterie __supervisor` process. For Nix installations, this
+is normally the original `/nix/store/.../bin/coterie` path. Invoke that
 executable from the affected project directory. After stopping, launch the
 current `coterie` to create a new run. The stopped run retains its tasks,
 transcripts, and workspaces, including unfinished work. Coterie does not
 automatically stop an incompatible supervisor or discard its socket and index.
 
-Startup, `run recover`, `config`, and `doctor` accept these configuration options:
+Startup, `run recover`, `config`, and `doctor` accept these configuration
+options:
 
-| Option | Effective setting |
-| --- | --- |
-| `--archetype REFERENCE` | A trusted versioned archetype. |
-| `--max-concurrent-agents N` | Simultaneously active agent ceiling. |
-| `--max-agents-per-run N` | Total agent ceiling. |
-| `--max-spawns-per-minute N` | Explicit spawns in a rolling 60-second window. |
-| `--role ROLE.enabled=true\|false` | Enable or disable a declared role. |
-| `--role ROLE.max_instances=N` | Active instances of a declared role. |
-| `--role ROLE.permission_profile=NAME` | A trusted permission profile. |
+  | Option                                | Effective setting                              |
+  | ------------------------------------- | ---------------------------------------------- |
+  | `--archetype REFERENCE`               | A trusted versioned archetype.                 |
+  | `--max-concurrent-agents N`           | Simultaneously active agent ceiling.           |
+  | `--max-agents-per-run N`              | Total agent ceiling.                           |
+  | `--max-spawns-per-minute N`           | Explicit spawns in a rolling 60-second window. |
+  | `--role ROLE.enabled=true\|false`     | Enable or disable a declared role.             |
+  | `--role ROLE.max_instances=N`         | Active instances of a declared role.           |
+  | `--role ROLE.permission_profile=NAME` | A trusted permission profile.                  |
 
 Repeat `--role` to set multiple fields; the last assignment to a field wins.
 Overrides may restore project restrictions only within trusted global and
@@ -110,11 +113,11 @@ global configuration can change it; zero disables automatic shutdown. Project
 configuration and CLI overrides cannot change it. Durable events reset the
 timer, read-only commands do not, and supervisor recovery starts a fresh full
 interval. Idle shutdown records `reason: "idle_timeout"` in a
-`run.shutdown_changed` event and follows the same retention and retirement
-rules as `stop`. A later launch starts a new run unless the operator first
-selects the retained run with `run recover`. Existing runs migrated from
-before this setting retain disabled idle shutdown and their original portable
-fingerprint; their saved policy must still match when reconnecting.
+`run.shutdown_changed` event and follows the same retention and retirement rules
+as `stop`. A later launch starts a new run unless the operator first selects the
+retained run with `run recover`. Existing runs migrated from before this setting
+retain disabled idle shutdown and their original portable fingerprint; their
+saved policy must still match when reconnecting.
 
 ### `coterie config check`
 
@@ -123,10 +126,10 @@ coterie config check [--json]
 ```
 
 Configuration commands run without an active run, runtime directories, or an
-installed provider. They discover the project root and resolve compiled defaults,
-trusted global configuration and includes, the selected archetype, and project
-restrictions, followed by bounded operator overrides. `schema` does not discover
-a project or read configuration.
+installed provider. They discover the project root and resolve compiled
+defaults, trusted global configuration and includes, the selected archetype, and
+project restrictions, followed by bounded operator overrides. `schema` does not
+discover a project or read configuration.
 
 `check` validates configuration and verifies `coterie.lock` if present. Its JSON
 data contains `archetype`, the portable `fingerprint`, and `lock` (`absent` or
@@ -138,11 +141,11 @@ data contains `archetype`, the portable `fingerprint`, and `lock` (`absent` or
 coterie config show [--effective] [--provenance] [--json]
 ```
 
-`show` returns `effective`, `fingerprint`, and `lock`; adding
-`--provenance` includes a field-to-origin map with source layer, source file,
-input field, and optional selector origin. It verifies an existing lock before
-emitting output. Provider commands are visible in effective configuration, with
-known credentials and Coterie tokens redacted before JSON encoding.
+`show` returns `effective`, `fingerprint`, and `lock`; adding `--provenance`
+includes a field-to-origin map with source layer, source file, input field, and
+optional selector origin. It verifies an existing lock before emitting output.
+Provider commands are visible in effective configuration, with known credentials
+and Coterie tokens redacted before JSON encoding.
 
 Permission profiles support an independent `approval_reviewer` (`user` by
 default, or `auto-review`) and explicitly selected `unrestricted` filesystem
@@ -177,11 +180,12 @@ the old lock is invalid or mismatched. Locks record the archetype, configuration
 schema, compatible Coterie version range, enabled roles' provider mode and
 permission requirements, and a SHA-256 fingerprint. Commands and arguments,
 environment values, allowed project roots, provenance paths, project identity,
-and installed provider versions are excluded. The digest includes the complete selected archetype,
-effective roles, limits, supervision policy, and provider requirements. The
-[configuration design](../DESIGN.md#declarative-configuration) specifies canonical
-encoding; the [example lock](../examples/config/coterie.lock) corresponds to the
-global and project examples in that directory.
+and installed provider versions are excluded. The digest includes the complete
+selected archetype, effective roles, limits, supervision policy, and provider
+requirements. The [configuration design](../DESIGN.md#declarative-configuration)
+specifies canonical encoding; the [example
+lock](../examples/config/coterie.lock) corresponds to the global and project
+examples in that directory.
 
 The lock is bounded to 1 MiB and published by syncing a private temporary file,
 renaming it atomically, and syncing the directory. Existing symlinks, hard
@@ -193,10 +197,10 @@ command does not allocate an orchestration operation ID or mutate run state.
 Invalid configuration, unreadable inputs, malformed locks, and mismatches use
 `invalid_configuration` (exit 3). A mismatch lists the affected lock fields and
 suggests restoring the configuration or reviewing its files and running
-`coterie config lock`. A Coterie version mismatch also suggests using a compatible
-release. `check` and `show` never modify a lock. Human validation and creation
-messages go to standard output; human effective reports are pretty JSON.
-Failures use standard error and leave standard output empty.
+`coterie config lock`. A Coterie version mismatch also suggests using a
+compatible release. `check` and `show` never modify a lock. Human validation and
+creation messages go to standard output; human effective reports are pretty
+JSON. Failures use standard error and leave standard output empty.
 
 ### `coterie run list`
 
@@ -206,11 +210,12 @@ coterie run list --json
 
 These commands require the operator channel. `list` reads retained run databases
 attached to the current project, including runs whose active indexes have been
-retired. It does not start a supervisor or create runtime state. Its `runs` array
-is ordered by run ID. Entries report `run_id`, recorded `status`, `primary_root`
-and lossless `primary_root_bytes`, `created_at`, `stopped_at`, and task counts.
-An `active` record is desired state, not proof that its supervisor is alive.
-The [list schema](../schemas/cli-run-list-v1.schema.json) is generated from Rust.
+retired. It does not start a supervisor or create runtime state. Its `runs`
+array is ordered by run ID. Entries report `run_id`, recorded `status`,
+`primary_root` and lossless `primary_root_bytes`, `created_at`, `stopped_at`,
+and task counts. An `active` record is desired state, not proof that its
+supervisor is alive. The [list schema](../schemas/cli-run-list-v1.schema.json)
+is generated from Rust.
 
 ### `coterie run recover`
 
@@ -221,20 +226,21 @@ coterie
 ```
 
 `recover` reactivates the selected stopped run, preserving its task graph,
-accepted results, reports, transcripts, and assignment identities. It starts
-the supervisor; the subsequent foreground launch creates a fresh authenticated
+accepted results, reports, transcripts, and assignment identities. It starts the
+supervisor; the subsequent foreground launch creates a fresh authenticated
 session. It never imports work into a replacement run or renews old credentials.
 Run it from any attached project, using the original configuration overrides
 when needed. Policy is resolved from the saved primary root.
 
 Recovery checks the saved policy and current locks, every project identity and
-lease, observed process exits and revoked credentials, resolved resource intents,
-and retained assignment ownership. Restore changed policy before retrying
-(`invalid_configuration`, exit 3). Explicitly stop a replacement run first;
-conflicting indexes, held leases, incomplete shutdown, and uncertain ownership
-produce `conflict` (exit 5). Unsafe state or a missing database is never replaced
-with an empty run. Provider inspection failures remain errors. Diagnostics from
-the recovery supervisor preserve their stable error code and operation ID.
+lease, observed process exits and revoked credentials, resolved resource
+intents, and retained assignment ownership. Restore changed policy before
+retrying (`invalid_configuration`, exit 3). Explicitly stop a replacement run
+first; conflicting indexes, held leases, incomplete shutdown, and uncertain
+ownership produce `conflict` (exit 5). Unsafe state or a missing database is
+never replaced with an empty run. Provider inspection failures remain errors.
+Diagnostics from the recovery supervisor preserve their stable error code and
+operation ID.
 
 The [recovery schema](../schemas/cli-run-recover-v1.schema.json) reports the run
 and recovery operation, previous stop operation and time, recovery time, and
@@ -242,8 +248,8 @@ next step. `run.recovered` records the operator's reason and prior shutdown
 evidence. Reactivation commits before any index is published. Retry interrupted
 recovery with the same run ID, operation ID, and reason. Exact retries return
 the original result, even after accepted task closure or another stop, and do
-not reactivate a subsequently stopped run. A new continuation after another
-stop requires a new operation ID. Different arguments under the same ID conflict.
+not reactivate a subsequently stopped run. A new continuation after another stop
+requires a new operation ID. Different arguments under the same ID conflict.
 Replaying the preceding `stop` operation likewise returns its original result
 without stopping the continued run. Use a new operation ID to stop it again.
 
@@ -271,17 +277,17 @@ coterie doctor [--json]
 ```
 
 Inspect supervisor reachability, the project lease and index, runtime file
-ownership and permissions, database integrity and migrations, pending operations,
-unfinished assignments, uncertain sessions, task cycles, transcript accessibility
-and incomplete tails, and worktree ownership. The `supervisor` check verifies
-the operator-channel handshake. The `provider` checks probe the installed Codex
-version, CLI capabilities, and MCP configuration support without launching a
-model session. Neither proves authenticated agent access.
+ownership and permissions, database integrity and migrations, pending
+operations, unfinished assignments, uncertain sessions, task cycles, transcript
+accessibility and incomplete tails, and worktree ownership. The `supervisor`
+check verifies the operator-channel handshake. The `provider` checks probe the
+installed Codex version, CLI capabilities, and MCP configuration support without
+launching a model session. Neither proves authenticated agent access.
 Configuration and lock files are resolved and verified. An active run adds a
-`configuration_snapshot` check and a compatibility check against current effective
-values. These checks report errors without replacing the snapshot. Provider and
-connectivity checks use the saved policy when available; otherwise they use the
-current configuration and label active run policy as unverified.
+`configuration_snapshot` check and a compatibility check against current
+effective values. These checks report errors without replacing the snapshot.
+Provider and connectivity checks use the saved policy when available; otherwise
+they use the current configuration and label active run policy as unverified.
 
 Each enabled role has an `agent_connectivity` check with status `unavailable`,
 its role name in `subject`, and a message identifying the provider, mode, and
@@ -290,22 +296,23 @@ this status means **not verified**, even if a separate agent call has succeeded.
 It does not mean the bridge failed. Without a valid configuration or snapshot,
 one check with a null subject explains that prerequisite.
 
-Each foreground session without an observed exit also has a `foreground_terminal`
-check, with its session ID in `subject`. Doctor compares startup evidence (PID,
-Linux boot identity, process start time, user ID, and inherited PTY identity) with
-the process and input pinned through procfs. A verified, linked Linux PTY reports
-`ok`, even if its editor view is hidden. A verified surviving process whose PTY
-has closed reports `warning` and identifies a stranded foreground session.
-Missing or exited processes also report `warning`. Missing startup evidence,
-changed ownership or input, possible PID reuse, inaccessible procfs, and
-unsupported terminals report `unavailable`; durable `running` state is not proof
-of health. Schema migration 15 leaves existing sessions without startup evidence
-unverified. These checks never read terminal input or change terminal settings.
+Each foreground session without an observed exit also has a
+`foreground_terminal` check, with its session ID in `subject`. Doctor compares
+startup evidence (PID, Linux boot identity, process start time, user ID, and
+inherited PTY identity) with the process and input pinned through procfs. A
+verified, linked Linux PTY reports `ok`, even if its editor view is hidden. A
+verified surviving process whose PTY has closed reports `warning` and identifies
+a stranded foreground session. Missing or exited processes also report
+`warning`. Missing startup evidence, changed ownership or input, possible PID
+reuse, inaccessible procfs, and unsupported terminals report `unavailable`;
+durable `running` state is not proof of health. Schema migration 15 leaves
+existing sessions without startup evidence unverified. These checks never read
+terminal input or change terminal settings.
 
-For a stranded foreground session, run `coterie stop` to request bounded shutdown
-before relaunching. If shutdown cannot verify process exit, preserve the run and
-its work for operator inspection. Doctor does not signal a process or repair the
-session automatically.
+For a stranded foreground session, run `coterie stop` to request bounded
+shutdown before relaunching. If shutdown cannot verify process exit, preserve
+the run and its work for operator inspection. Doctor does not signal a process
+or repair the session automatically.
 
 To check access in a running session, call `prime` through that agent's Coterie
 MCP tools. If operator access succeeds but the MCP call fails, inspect the
@@ -318,16 +325,18 @@ changes permissions, signals a process, or removes work. If the supervisor is
 unreachable, it opens an existing private database read-only. Insecure or
 ambiguous paths remain untouched. A successful diagnostic report exits 0 even
 when individual checks report `warning`, `error`, or `unavailable`; inspect the
-`report.checks` statuses. An inability to run the command uses the ordinary error
-contract. The [doctor report schema](../schemas/doctor-report-v1.schema.json) is
-generated from its Rust type.
+`report.checks` statuses. An inability to run the command uses the ordinary
+error contract. The [doctor report
+schema](../schemas/doctor-report-v1.schema.json) is generated from its Rust
+type.
 
 Launch `coterie` to attempt conservative recovery of an indexed run. Recovery
 requires the exclusive project lease, an existing private run database, and
 matching durable project identity. It replaces a socket only after a refused
 connection proves that the socket is stale. A held lease, responsive mismatched
 socket, missing database, or inconsistent index must remain for inspection.
-Stopped runs retire only their coordination metadata; their durable work remains.
+Stopped runs retire only their coordination metadata; their durable work
+remains.
 
 ### `coterie whoami`
 
@@ -347,13 +356,13 @@ coterie prime [--after-task <task-id>] [--limit <1..50>] [--json]
 Reconstruct identity, projects, peers, compact tasks and assignment summaries,
 ready task IDs, and authorized commands. The default task limit is 20. Continue
 with `--after-task` set to `next_task` while `has_more` is true. `current_task`
-pins the caller's latest assigned task on every page, including after submission,
-failure, and closure; `active_task` is null once the caller's assignment ends.
-Refresh from the beginning after transitions. `ready_tasks` contains IDs from the
-displayed task page, not a complete run-wide ready queue.
+pins the caller's latest assigned task on every page, including after
+submission, failure, and closure; `active_task` is null once the caller's
+assignment ends. Refresh from the beginning after transitions. `ready_tasks`
+contains IDs from the displayed task page, not a complete run-wide ready queue.
 
-Text previews contain `text`, `total_bytes`, and `truncated`. Full details remain
-available through `task show` and `assignment show` using each summary's ID.
+Text previews contain `text`, `total_bytes`, and `truncated`. Full details
+remain available through `task show` and `assignment show` using each summary's ID.
 `notifications` describes this caller's foreground delivery: `automatic`,
 `pending_binding`, `unavailable`, or `uncertain`. Operator and background
 callers report `unavailable`. A queue success means the provider accepted the
@@ -364,17 +373,19 @@ and `generation`; it is null for operator callers. Compare this scope with a
 queued notification before acting, and ignore notices from another generation.
 `unresolved_dependencies` contains up to eight IDs, with `omitted_dependencies`
 counting the rest; task details include the complete unresolved list.
-`next_action` identifies a recorded prerequisite such as `wait_for_dependencies`,
-`inspect_provider`, `spawn_continuation`, `review_and_integrate`, or
-`validate_and_close`. It does not verify process liveness, grant permission,
-judge a report, or replace explicit acceptance. Consult the capability list,
-assignment session state, recovery reference, and commit handoff as appropriate.
+`next_action` identifies a recorded prerequisite such as
+`wait_for_dependencies`, `inspect_provider`, `spawn_continuation`,
+`review_and_integrate`, or `validate_and_close`. It does not verify process
+liveness, grant permission, judge a report, or replace explicit acceptance.
+Consult the capability list, assignment session state, recovery reference, and
+commit handoff as appropriate.
 
 The compact task section has a 64 KiB serialized JSON budget; the page shortens
 before exceeding it. Run identity, projects, peers, command guidance, and active
 commit handoffs are separate metadata. See the [bounds and measurement
-fixture](context-inspection.md), [typed response schema](../schemas/cli-prime-v1.schema.json),
-and [example](../examples/prime.json).
+fixture](context-inspection.md), [typed response
+schema](../schemas/cli-prime-v1.schema.json), and
+[example](../examples/prime.json).
 
 `commit_handoffs` lists active writable worktree assignments requiring a
 coordinator commit. Each entry contains `assignment_id`, `agent_id`, `task_id`,
@@ -419,41 +430,41 @@ The response contains `run_id`, `changes`, `next_cursor`, `has_more`, and
 `timed_out`. Each change contains a durable sequence and one of these `kind`
 values:
 
-| Kind | Fields |
-| --- | --- |
-| `task` | `task_id`, `project_id`, `status` |
-| `assignment` | `assignment_id`, `task_id`, `agent_id`, `state` |
-| `assignment_session` | `assignment_id`, `task_id`, `agent_id`, `session_id` |
-| `agent` | `agent_id`, `generation`, `state` |
-| `session` | `session_id`, `agent_id`, `generation`, `state` |
+  | Kind                 | Fields                                               |
+  | -------------------- | ---------------------------------------------------- |
+  | `task`               | `task_id`, `project_id`, `status`                    |
+  | `assignment`         | `assignment_id`, `task_id`, `agent_id`, `state`      |
+  | `assignment_session` | `assignment_id`, `task_id`, `agent_id`, `session_id` |
+  | `agent`              | `agent_id`, `generation`, `state`                    |
+  | `session`            | `session_id`, `agent_id`, `generation`, `state`      |
 
 These are historical changes, not a current-state snapshot. Apply them in
 sequence order. Task `submitted` and assignment `completed` describe a
-submission; agent or session `exited` describes provider lifecycle independently.
-Task acceptance is recorded by task `closed`. Task titles, descriptions,
-results, message bodies, paths, provider details, and raw event payloads are
-excluded. An example containing submission and exit records is
+submission; agent or session `exited` describes provider lifecycle
+independently. Task acceptance is recorded by task `closed`. Task titles,
+descriptions, results, message bodies, paths, provider details, and raw event
+payloads are excluded. An example containing submission and exit records is
 [`examples/progress.json`](../examples/progress.json).
 
 Omitting `--after` starts at sequence zero. Save the opaque returned cursor and
-pass it unchanged on the next invocation. It is bound to this run and caller,
-so a different agent, the operator, or a replacement run cannot reuse it. A
-renewed session for the same agent may reuse it after authenticating with its
-new credentials. A malformed, mismatched, or future cursor returns
+pass it unchanged on the next invocation. It is bound to this run and caller, so
+a different agent, the operator, or a replacement run cannot reuse it. A renewed
+session for the same agent may reuse it after authenticating with its new
+credentials. A malformed, mismatched, or future cursor returns
 `invalid_argument` (exit 2). A cursor grants no authority. Deliberately reusing
 one repeats the same historical changes while the durable log remains unchanged.
 
 The default limit is 100 changes. Each page scans at most 256 event rows and
 contains less than 64 KiB, regardless of task or event body size. Excluded
 events advance the cursor without exposing their contents. Continue while
-`has_more` is true, even if `changes` is empty. It means the scan has not reached
-the durable high-water mark observed by this request.
+`has_more` is true, even if `changes` is empty. It means the scan has not
+reached the durable high-water mark observed by this request.
 
 `--wait` defaults to zero seconds. A positive value waits only when caught up,
 returning on the next change, the availability of another page, or the requested
 deadline. The supervisor remains able to process mutations and provider
-observations during the wait, and every poll checks current authorization.
-An expired wait succeeds with an empty page and `timed_out: true`. An ordinary
+observations during the wait, and every poll checks current authorization. An
+expired wait succeeds with an empty page and `timed_out: true`. An ordinary
 nonwaiting empty page has `timed_out: false`. Transport failure returns
 `unavailable` (exit 7), with no acknowledgement or cursor mutation. Reconnect
 explicitly to the same run and resume with the last printed cursor. Progress
@@ -489,19 +500,19 @@ and its primary root; launch or recover the foreground from that primary root.
 coterie project attach <path> [--alias <name>] [--operation-id <id>] [--json]
 ```
 
-Attach a canonical Git worktree or non-Git directory to an existing run. Relative
-paths resolve from the caller's directory. Symlinks resolve before authorization;
-linked Git worktrees have distinct identities. The alias defaults to the canonical
-root's directory name and accepts ASCII letters, digits, underscores, and hyphens.
-An identity can have only one alias within a run. Attachment preserves repository
-files, including dirty work and `AGENTS.md`.
+Attach a canonical Git worktree or non-Git directory to an existing run.
+Relative paths resolve from the caller's directory. Symlinks resolve before
+authorization; linked Git worktrees have distinct identities. The alias defaults
+to the canonical root's directory name and accepts ASCII letters, digits,
+underscores, and hyphens. An identity can have only one alias within a run.
+Attachment preserves repository files, including dirty work and `AGENTS.md`.
 
 Agents need `project:attach` and a root beneath a trusted global
 `allowed_project_roots` entry. This global-only array defaults to empty, accepts
 absolute existing directories, and resolves symlinks when configuration loads.
 Its canonical values are snapshotted with the run and excluded from portable
-locks. Changing it requires resolving the run's configuration conflict.
-An operator can explicitly attach outside the allowlist; the event records that
+locks. Changing it requires resolving the run's configuration conflict. An
+operator can explicitly attach outside the allowlist; the event records that
 authorization and the resolved identity.
 
 JSON returns the operation ID and `data.project`, using the same project fields
@@ -530,29 +541,30 @@ coterie assignment show <assignment-id> [--after <byte-offset>]
   [--revision <hash>] [--limit <1..65536>] [--json]
 ```
 
-Read full stored detail documents with operator authority or `task:read`.
-Task details contain the unabridged task and every assignment ID. Assignment
-details contain the full report, workspace identity with native path bytes,
-and recovery links involving that assignment. These are recorded facts and
-agent reports, not fresh filesystem or validation probes.
+Read full stored detail documents with operator authority or `task:read`. Task
+details contain the unabridged task and every assignment ID. Assignment details
+contain the full report, workspace identity with native path bytes, and recovery
+links involving that assignment. These are recorded facts and agent reports, not
+fresh filesystem or validation probes.
 
 Pages default to 16 KiB of UTF-8 document text and extend by at most three bytes
 to keep a character whole. Concatenate `text` values before decoding the JSON
 document. To continue, pass `next_cursor` as `--after` and retain `revision`.
-`total_bytes` measures the full document and `eof` identifies its last page.
-The SHA-256 revision prevents mixing documents changed by a transition or
+`total_bytes` measures the full document and `eof` identifies its last page. The
+SHA-256 revision prevents mixing documents changed by a transition or
 resubmission: a mismatch returns `conflict` (exit 5), requiring a fresh read at
 zero without the old revision. Missing revisions for nonzero cursors, invalid
 bounds, and offsets outside the document or inside a character return
-`invalid_argument` (exit 2). Missing IDs return `not_found` (exit 4), and missing
-authority returns `permission_denied` (exit 6). Reconnects reauthenticate every
-read; stale credentials remain rejected.
+`invalid_argument` (exit 2). Missing IDs return `not_found` (exit 4), and
+missing authority returns `permission_denied` (exit 6). Reconnects
+reauthenticate every read; stale credentials remain rejected.
 
 MCP names these tools `task_show` and `assignment_show`, using `task_id` or
 `assignment_id`, `after`, `revision`, and `limit`. Both CLI views expose the
-same page fields. Generated contracts cover the [page envelope](../schemas/cli-detail-v1.schema.json),
-[task document](../schemas/task-detail-v1.schema.json), and
-[assignment document](../schemas/assignment-detail-v1.schema.json).
+same page fields. Generated contracts cover the [page
+envelope](../schemas/cli-detail-v1.schema.json), [task
+document](../schemas/task-detail-v1.schema.json), and [assignment
+document](../schemas/assignment-detail-v1.schema.json).
 
 ### `coterie task create`
 
@@ -582,11 +594,11 @@ coterie task close <task-id> --summary <text>
   [--operation-id <co-ULID>]
 ```
 
-Close a submitted task after explicit validation. A submitted worktree task
-must have a recorded successful integration. The summary and exact assignment
-and target commits remain in the closed result. If a precondition fails, correct
-it and use a new operation ID because the rejected attempt is itself durable.
-The operator or an agent with `task:close` may call this mutation.
+Close a submitted task after explicit validation. A submitted worktree task must
+have a recorded successful integration. The summary and exact assignment and
+target commits remain in the closed result. If a precondition fails, correct it
+and use a new operation ID because the rejected attempt is itself durable. The
+operator or an agent with `task:close` may call this mutation.
 
 ### `coterie task resubmit`
 
@@ -598,17 +610,17 @@ coterie task resubmit --assignment <assignment-id>
 ```
 
 Supersede an incorrect, unintegrated Git submission after validating and
-committing the correction. Requires the operator channel or `task:resubmit`;
-the built-in lead has this capability through `task:*`. Workers without it
-send the assignment ID and both commit IDs to an authorized coordinator.
+committing the correction. Requires the operator channel or `task:resubmit`; the
+built-in lead has this capability through `task:*`. Workers without it send the
+assignment ID and both commit IDs to an authorized coordinator.
 
 Both commit arguments require full lowercase commit IDs. `--expected-result`
 must match the current recorded result, and `--result` must be the clean owned
 worktree tip and a descendant of that result. The task remains `submitted`;
 integration, validation, and closure still release its dependencies. Ownership,
 claims, workspace paths, and Git references remain unchanged. The append-only
-`task.resubmitted` event retains the previous result and assignment summary,
-the replacement, the reason, and the original timestamps. Original submission
+`task.resubmitted` event retains the previous result and assignment summary, the
+replacement, the reason, and the original timestamps. Original submission
 operations and events remain available, and ancestry preserves their commits.
 
 An integrated result, a closed task, or any recorded integration intent blocks
@@ -640,16 +652,16 @@ revoked credentials, and its workspace must have verified ownership. Unresolved
 launch, process-control, or integration intent blocks recovery. An unknown,
 lost, or merely quarantined session is insufficient. Inspect `doctor` and wait
 for verified inactivity before retrying; recovery never stops a provider.
-Admission requires a normalized provider exit event and a fresh adapter check
-of the recorded identity. An exact exited observation or confirmed absence
-after that recorded exit qualifies; absence alone does not establish an exit.
+Admission requires a normalized provider exit event and a fresh adapter check of
+the recorded identity. An exact exited observation or confirmed absence after
+that recorded exit qualifies; absence alone does not establish an exit.
 
 One transaction releases the old assignment and claim, reopens the same task,
 and records `task.recovered` with the reason, actor, and preserved source.
 Original summaries, session history, transcripts, staged and unstaged files,
 untracked files, commits, and references remain intact. Late observations and
-output from the retired session are fenced. Recovery does not authorize
-cleanup or further writes to the source worktree.
+output from the retired session are fenced. Recovery does not authorize cleanup
+or further writes to the source worktree.
 
 Recovery also records an immutable Git snapshot without writing or refreshing
 the source index. `handoff` contains counts, HEAD, the observation time, the
@@ -661,28 +673,28 @@ Each path has display text and native bytes. Ignored files are excluded;
 limit the observation. The snapshot describes recovery time, not current Git
 state. Historical recoveries have no handoff snapshot.
 
-The optional `report` has `validation_evidence` and `unfinished_steps` arrays
-of `{ "text": "...", "source": "..." }`. Both strings must be nonempty.
-Identify validation commands, working directories, selected policies, outcomes,
-and blocked checks in the text. Reference the original message ID, transcript
-session and byte cursor, report, or artifact in `source`. See the
-[report example](../examples/recovery-report.json) and
-[typed input schema](../schemas/recovery-report-v1.schema.json).
-These are reported statements and references supplied by the recovering caller;
-Coterie does not verify their claims, resolve the references, or execute them.
-An absent report means evidence is unknown. It does not establish successful
-validation or an empty remaining workload. Report access uses ordinary
-`task:read` visibility and does not grant access to another agent's inbox or logs.
+The optional `report` has `validation_evidence` and `unfinished_steps` arrays of
+`{ "text": "...", "source": "..." }`. Both strings must be nonempty. Identify
+validation commands, working directories, selected policies, outcomes, and
+blocked checks in the text. Reference the original message ID, transcript
+session and byte cursor, report, or artifact in `source`. See the [report
+example](../examples/recovery-report.json) and [typed input
+schema](../schemas/recovery-report-v1.schema.json). These are reported
+statements and references supplied by the recovering caller; Coterie does not
+verify their claims, resolve the references, or execute them. An absent report
+means evidence is unknown. It does not establish successful validation or an
+empty remaining workload. Report access uses ordinary `task:read` visibility and
+does not grant access to another agent's inbox or logs.
 
 Use ordinary `spawn` with a worktree role for the reopened task. The new
 assignment receives a fresh worktree and an immutable `assignment.continued`
 link to the retired source. Inspect `prime` and the full handoff with
-`assignment show <source-id>`, port useful changes from the
-preserved path, validate, commit, and finish normally. Files are not copied
-automatically. Dependencies remain blocked until the continued task is
-integrated, validated, and closed. Repeated recovery retains the entire chain.
-Other workspace kinds and already submitted assignments are outside this
-command; submitted corrections use `task resubmit`.
+`assignment show <source-id>`, port useful changes from the preserved path,
+validate, commit, and finish normally. Files are not copied automatically.
+Dependencies remain blocked until the continued task is integrated, validated,
+and closed. Repeated recovery retains the entire chain. Other workspace kinds
+and already submitted assignments are outside this command; submitted
+corrections use `task resubmit`.
 
 An empty reason returns `invalid_argument` (exit 2). Recovery precondition
 failures return `conflict` (exit 5) without consuming the operation ID. Correct
@@ -694,9 +706,9 @@ refuses new recovery mutations.
 JSON data contains `task_id`, `assignment_id`, `session_id`, `project_id`,
 `generation`, `workspace_path`, `workspace_path_bytes`, `base_commit`, `reason`,
 `continuation_assignment_id`, and `handoff` (absent for historical recoveries).
-The continuation field is null at retirement;
-`prime` reports the subsequent assignment once spawned. The display path may
-replace invalid UTF-8; the byte array retains the exact native path. The typed
+The continuation field is null at retirement; `prime` reports the subsequent
+assignment once spawned. The display path may replace invalid UTF-8; the byte
+array retains the exact native path. The typed
 [schema](../schemas/cli-recover-v1.schema.json) and
 [example](../examples/recover.json) are checked by tests. Regenerate them with
 `cargo test regenerate_recovery_contract -- --ignored`.
@@ -713,11 +725,11 @@ Read a complete assignment report, workspace identity, recovery links, and
 `reported` evidence and unfinished steps, with the operation ID, source
 assignment, reporter, and recording time. Its `recoveries` entry retains the
 source's full preserved path and base commit. Retries and later task transitions
-do not change the recorded handoff. See the
-[handoff guide](recovery-handoffs.md).
-Pagination, revision checks, authority, and diagnostics follow
-[`task show`](#coterie-task-show). Use the source or continuation assignment ID
-from `prime.recoveries` to inspect the corresponding preserved history.
+do not change the recorded handoff. See the [handoff
+guide](recovery-handoffs.md). Pagination, revision checks, authority, and
+diagnostics follow [`task show`](#coterie-task-show). Use the source or
+continuation assignment ID from `prime.recoveries` to inspect the corresponding
+preserved history.
 
 ### `coterie spawn`
 
@@ -732,8 +744,8 @@ worktree; a `reviewer` receives an enforceable read-only workspace. The operator
 or an agent with `spawn:<role>` may call this mutation.
 
 Workers run as supervised `codex exec --json` jobs. Validated JSONL frames are
-appended to the session transcript as they arrive; malformed or oversized
-frames quarantine the session instead of being treated as successful work.
+appended to the session transcript as they arrive; malformed or oversized frames
+quarantine the session instead of being treated as successful work.
 
 ### Operator closure override
 
@@ -760,15 +772,16 @@ permission error (exit 6). Resolve the diagnostic and retry rejected preflight
 with the same operation ID, or use a new ID when changing a recorded request.
 
 The closure result retains `assignment_result` and `validation_summary` and adds
-[`operator_override`](../schemas/cli-closure-override-v1.schema.json), containing
-`assignment_id`, `project_id`, `base_commit`, `result_commit`, `target_reference`,
-`target_commit`, `reason`, and `validation_summary`. The lifecycle event records
-the same evidence with actor `operator`. There is no `integration` result or
-`workspace.integrated` event. Coterie records the operator's acceptance, not a
-proof of patch equivalence. It preserves the workspace and its integration
-metadata, commits, and references; the override grants no cleanup authority.
-Dependencies release only once the closure commits. A successful retry returns
-the original result even after later Git changes, without duplicating events.
+[`operator_override`](../schemas/cli-closure-override-v1.schema.json),
+containing `assignment_id`, `project_id`, `base_commit`, `result_commit`,
+`target_reference`, `target_commit`, `reason`, and `validation_summary`. The
+lifecycle event records the same evidence with actor `operator`. There is no
+`integration` result or `workspace.integrated` event. Coterie records the
+operator's acceptance, not a proof of patch equivalence. It preserves the
+workspace and its integration metadata, commits, and references; the override
+grants no cleanup authority. Dependencies release only once the closure commits.
+A successful retry returns the original result even after later Git changes,
+without duplicating events.
 
 ### `coterie workspace integrate`
 
@@ -792,16 +805,16 @@ captures the target branch and tip, and preflights any merge without changing
 the target. Rebase also checks every replayed commit before checkout, refusing
 intermediate conflicts even when the final diff merges cleanly. Applying the
 plan uses a compare-and-set reference update, so a changed target, conflict, or
-ambiguous history is refused without resolution.
-Checkout preserves ignored files, including files that collide with the result.
-Assume-unchanged or skip-worktree index flags cause a conflict diagnostic because
-they prevent proof of cleanliness. A redirected Git working directory or a
-symlink substituted into an owned workspace path also blocks integration.
+ambiguous history is refused without resolution. Checkout preserves ignored
+files, including files that collide with the result. Assume-unchanged or
+skip-worktree index flags cause a conflict diagnostic because they prevent proof
+of cleanliness. A redirected Git working directory or a symlink substituted into
+an owned workspace path also blocks integration.
 
 The success response records the strategy, target reference, base commit, result
-commit, target commit before integration, and resulting target commit. Integration does
-not remove the worktree or its owned reference. The operator or an agent with
-`workspace:integrate` may call this mutation.
+commit, target commit before integration, and resulting target commit.
+Integration does not remove the worktree or its owned reference. The operator or
+an agent with `workspace:integrate` may call this mutation.
 
 Reuse the operation ID and original arguments when retrying. The saved strategy
 survives supervisor restarts. Historical integration plans retain `merge` after
@@ -836,14 +849,14 @@ retry replays its recorded outcome even if the worktree later changes.
 
 Ignored untracked files do not block completion, and a clean worktree needs no
 new commit. Review and non-code assignments may therefore report successful
-validation without making a commit. Project and read-only assignments keep
-their existing submission behavior. `finish --status failed` preserves dirty
-work and remains available when an assignment cannot be completed.
+validation without making a commit. Project and read-only assignments keep their
+existing submission behavior. `finish --status failed` preserves dirty work and
+remains available when an assignment cannot be completed.
 
 After successful completion there is no active assignment for a new `finish`
 operation. Use `task resubmit` through an authorized coordinator to correct an
-unintegrated submission. Replaying the original successful `finish` retains
-its original submission result after a correction.
+unintegrated submission. Replaying the original successful `finish` retains its
+original submission result after a correction.
 
 ### `coterie send`
 
@@ -885,29 +898,28 @@ coterie logs <agent-id-or-name> [--session <session-id>] [--after <byte-offset>]
 
 Read the latest provider transcript visible to the caller. The operator may
 inspect any agent. An agent may inspect itself and any role allowed by its
-`logs:*` capabilities. Reads return at most 65,536 bytes by default, plus up to three bytes to keep a
-UTF-8 character whole, with a
-`start_cursor` and `next_cursor` byte offsets, `total_bytes`, `session_id`, `eof`,
-`terminal`, `partial_head`, and `incomplete_tail`.
-Resume using both the returned session and cursor to avoid switching to a newer
-session. A cursor beyond the file length is refused, including after truncation.
-Incomplete final JSONL frames remain visible as transcript data and do not imply
-success. Invalid UTF-8 is displayed with replacement characters; cursors always
-count stored bytes.
+`logs:*` capabilities. Reads return at most 65,536 bytes by default, plus up to
+three bytes to keep a UTF-8 character whole, with a `start_cursor` and
+`next_cursor` byte offsets, `total_bytes`, `session_id`, `eof`, `terminal`,
+`partial_head`, and `incomplete_tail`. Resume using both the returned session
+and cursor to avoid switching to a newer session. A cursor beyond the file
+length is refused, including after truncation. Incomplete final JSONL frames
+remain visible as transcript data and do not imply success. Invalid UTF-8 is
+displayed with replacement characters; cursors always count stored bytes.
 
 Use `logs <agent> --tail --limit 4096` to reach recent raw activity without
 draining earlier bootstrap or serialized context. `--tail` conflicts with
-`--after`; MCP uses `tail: true` with `after: 0`. `partial_head` explicitly marks
-a first line that starts mid-frame. Tail mode seeks to the end of the same
+`--after`; MCP uses `tail: true` with `after: 0`. `partial_head` explicitly
+marks a first line that starts mid-frame. Tail mode seeks to the end of the same
 checked file and changes no stored bytes. It reports recent output, not semantic
-activity. Full transcripts remain available with `--after 0`. The
-[logs schema](../schemas/cli-logs-v1.schema.json) is generated from the typed view.
+activity. Full transcripts remain available with `--after 0`. The [logs
+schema](../schemas/cli-logs-v1.schema.json) is generated from the typed view.
 
 `--follow` applies tail selection only to the first read, pins the returned
-session, and emits subsequent cursor pages until its terminal
-observation and end of file. A terminal page may contain no new bytes. A missing
-transcript at offset zero represents no captured output; `doctor` distinguishes
-missing background output from inherited foreground terminal streams.
+session, and emits subsequent cursor pages until its terminal observation and
+end of file. A terminal page may contain no new bytes. A missing transcript at
+offset zero represents no captured output; `doctor` distinguishes missing
+background output from inherited foreground terminal streams.
 
 ### `coterie events`
 
@@ -928,10 +940,10 @@ inspection is operator-only.
 `--follow` emits nonempty pages as they become available and drains the stopped
 run through a final empty page before exiting. Operator followers reconnect to
 the same run for up to five seconds after a transient disconnect, without
-starting a supervisor or switching to a replacement run. If shutdown retires
-the socket before the next poll,
-operator followers read final immutable pages from the same stopped run. A
-longer outage returns a diagnostic; resume with the last printed cursor. Agent transcript followers can resume explicitly after a
+starting a supervisor or switching to a replacement run. If shutdown retires the
+socket before the next poll, operator followers read final immutable pages from
+the same stopped run. A longer outage returns a diagnostic; resume with the last
+printed cursor. Agent transcript followers can resume explicitly after a
 disconnect with their session and byte cursor.
 
 ### `coterie stop`
@@ -947,14 +959,14 @@ verified survivors after 2.5 seconds. The foreground wrapper controls its own
 child. Unknown processes are never signaled by PID alone.
 
 The five-second deadline covers process control and terminal observation. A
-timeout returns `unavailable` (exit 7), leaves the run active, and keeps launches
-blocked. Inspect `events --json` and retry with the same operation ID to recheck
-progress. Retries and supervisor restarts retain the original deadline. When
-all processes are proved terminal, Coterie reconciles workspace observations,
-marks the run stopped, and retires its socket and project indexes before releasing
-the leases. It preserves unfinished tasks, claims, draining assignments,
-transcripts, worktrees, and owned references. Only the operator may call this
-mutation.
+timeout returns `unavailable` (exit 7), leaves the run active, and keeps
+launches blocked. Inspect `events --json` and retry with the same operation ID
+to recheck progress. Retries and supervisor restarts retain the original
+deadline. When all processes are proved terminal, Coterie reconciles workspace
+observations, marks the run stopped, and retires its socket and project indexes
+before releasing the leases. It preserves unfinished tasks, claims, draining
+assignments, transcripts, worktrees, and owned references. Only the operator may
+call this mutation.
 
 ## Recovery
 
@@ -974,22 +986,22 @@ or provider-session resume. The injected bootstrap directs the lead to
 Closing the editor terminal sends `SIGHUP`. Coterie bounds foreground cleanup
 after this signal, `SIGTERM`, or `SIGQUIT`: it forwards the signal, sends
 `SIGTERM` after the saved interrupt grace if needed, and sends `SIGKILL` at the
-foreground shutdown deadline if the child still has not exited. Defaults are
-250 milliseconds and 2.5 seconds. Repeated signals do not reset the deadlines.
-The wrapper reaps the provider and records its exit before returning, allowing
-a later foreground launch. `SIGINT` alone remains an interrupt without a
+foreground shutdown deadline if the child still has not exited. Defaults are 250
+milliseconds and 2.5 seconds. Repeated signals do not reset the deadlines. The
+wrapper reaps the provider and records its exit before returning, allowing a
+later foreground launch. `SIGINT` alone remains an interrupt without a
 forced-exit deadline.
 
-After a supervisor crash, the next foreground launch reconnects when possible
-or restarts the same run from its database, lease, and index. Startup removes a
+After a supervisor crash, the next foreground launch reconnects when possible or
+restarts the same run from its database, lease, and index. Startup removes a
 stale owned socket, republishes the same run and project identities, repairs a
 workspace whose durable creation intent was interrupted, resumes incomplete
 spawn and integration operations, and rechecks session state. Each external
 operation records its reconciliation state, attempts, last error, and last
 attempt time. A vanished worker becomes `lost`; a process Coterie cannot prove
-belongs to the recorded run and generation remains `unknown` and is neither adopted nor
-killed. Tasks, dependencies, operations, messages, events, transcripts, and
-recoverable workspaces remain available.
+belongs to the recorded run and generation remains `unknown` and is neither
+adopted nor killed. Tasks, dependencies, operations, messages, events,
+transcripts, and recoverable workspaces remain available.
 
 Sessions, assignments, workspaces, and integration intents retain their owning
 run and generation. Replacing a session fences its old credentials, queued
@@ -999,21 +1011,21 @@ remains available for inspection. Recovery adopts a provider handle only when
 its provider identity and complete session scope match the current durable
 ownership; a PID alone does not establish that proof.
 
-The default restart policy allows three launch attempts within 60 seconds,
-with exponential retry delays starting at one second. Automatic retries require
-proof that the failed attempt created no process. Exhausting this budget
-quarantines the session and records `session.restart_limited`; repeated failures
-before a session can be prepared also stop after three attempts. Three failed
-foreground sessions in one window quarantine the latest session and block
-replacement for 60 seconds. Quarantine and retry accounting survive supervisor
-restarts. Workers that have already executed are left for the lead to inspect
-and recover, preserving the original task and workspace ownership.
+The default restart policy allows three launch attempts within 60 seconds, with
+exponential retry delays starting at one second. Automatic retries require proof
+that the failed attempt created no process. Exhausting this budget quarantines
+the session and records `session.restart_limited`; repeated failures before a
+session can be prepared also stop after three attempts. Three failed foreground
+sessions in one window quarantine the latest session and block replacement for
+60 seconds. Quarantine and retry accounting survive supervisor restarts. Workers
+that have already executed are left for the lead to inspect and recover,
+preserving the original task and workspace ownership.
 
 Provider probes time out after two seconds and cap each output stream at 1 MiB.
 Session startup times out after 30 seconds; background jobs have a one-hour
-execution limit. Foreground interactive sessions have no execution limit.
-These limits do not treat a quiet provider as idle or successful. Session
-timeouts use the interrupt, terminate, and kill phases described above and emit
+execution limit. Foreground interactive sessions have no execution limit. These
+limits do not treat a quiet provider as idle or successful. Session timeouts use
+the interrupt, terminate, and kill phases described above and emit
 `session.control_changed` events. Shutdown phases emit `run.shutdown_changed`.
 Handshake waits are bounded to five seconds, and ordinary RPC responses to ten
 seconds; the foreground process-control subscription remains a long poll.
@@ -1048,18 +1060,18 @@ bindings. Project configuration can only select trusted definitions and reduce
 authority or limits; explicit operator overrides remain within trusted bounds.
 Each run snapshots its resolved policy before launching providers. The initial
 foreground role uses the primary project with `project` or `read-only` workspace
-policy; task assignments own isolated worktrees. A `read-only` workspace requires
-a read-only filesystem profile. The following
-table describes the built-in default roles. Repository contents, `AGENTS.md`, task and message text,
+policy; task assignments own isolated worktrees. A `read-only` workspace
+requires a read-only filesystem profile. The following table describes the
+built-in default roles. Repository contents, `AGENTS.md`, task and message text,
 provider output, and agent behavior are untrusted data. Coterie passes provider
 arguments as arrays, never through `sh -c`, and performs its own repository
 operations with `git2`.
 
-| Role | Workspace | Codex filesystem | Network tools | Approvals |
-| --- | --- | --- | --- | --- |
-| Foreground `lead` | Primary project | Workspace write | Provider default | On request |
-| Background `worker` | Isolated task worktree | Workspace write | Disabled | Never |
-| Background `reviewer` | Task project | Read-only | Disabled | Never |
+  | Role                  | Workspace              | Codex filesystem | Network tools    | Approvals  |
+  | --------------------- | ---------------------- | ---------------- | ---------------- | ---------- |
+  | Foreground `lead`     | Primary project        | Workspace write  | Provider default | On request |
+  | Background `worker`   | Isolated task worktree | Workspace write  | Disabled         | Never      |
+  | Background `reviewer` | Task project           | Read-only        | Disabled         | Never      |
 
 Workspace isolation prevents concurrent Git changes from colliding, but it is
 not a security boundary by itself. Coterie probes Codex's actual command-line
@@ -1069,41 +1081,43 @@ and refuses to launch when a required control cannot be enforced.
 The foreground Codex process inherits the operator's terminal and ambient
 environment. Background Codex jobs start from an empty environment and receive
 only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `CODEX_HOME`, `OPENAI_API_KEY`,
-`__ETC_PROFILE_DONE`, and `__NIXOS_SET_ENVIRONMENT_DONE`
-when present, plus their `COTERIE_*` identity values and generated `COTERIE_BIN`.
-Jobs set the documented Codex [`allow_login_shell=false`](https://learn.chatgpt.com/docs/config-file/config-reference)
+`__ETC_PROFILE_DONE`, and `__NIXOS_SET_ENVIRONMENT_DONE` when present, plus
+their `COTERIE_*` identity values and generated `COTERIE_BIN`. Jobs set the
+documented Codex
+[`allow_login_shell=false`](https://learn.chatgpt.com/docs/config-file/config-reference)
 option so shell tools retain the inherited toolchain PATH. On NixOS, login
 initialization rebuilds PATH using `USER` to find the per-user profile and can
 discard devenv paths. The two inherited NixOS initialization markers prevent
 even non-login Bash and Fish from reloading that system environment. Missing
-markers are not fabricated. `USER`, `LOGNAME`, and `SHELL` support user-profile and
-shell discovery; they grant no authority. Other toolchain inputs, including
+markers are not fabricated. `USER`, `LOGNAME`, and `SHELL` support user-profile
+and shell discovery; they grant no authority. Other toolchain inputs, including
 arbitrary `NIX_*` or `CARGO_*` variables, remain excluded. Enter a development
 environment explicitly from the assigned workspace when its build requires it.
 
 Bootstrap distinguishes validation environment access from Git permissions.
-Record each validation command, working directory, selected policy, outcome,
-and diagnostic. Nix daemon denial and `.devenv` write denial are separate
-blockers; an inherited PATH or a successful Git handoff does not prove that
-checks passed. See [validation environments](validation-environments.md) for
-supported entry, coordinator reporting, and the opt-in NixOS regression.
+Record each validation command, working directory, selected policy, outcome, and
+diagnostic. Nix daemon denial and `.devenv` write denial are separate blockers;
+an inherited PATH or a successful Git handoff does not prove that checks passed.
+See [validation environments](validation-environments.md) for supported entry,
+coordinator reporting, and the opt-in NixOS regression.
 
-Provider bindings may use any valid configured name. Foreground startup, control,
-and exit observations validate that name against the saved interactive role,
-along with foreground process ownership and the current session generation.
-If startup acknowledgment fails after process creation, the wrapper terminates
-and reaps its child, reports the observed exit, and returns the startup error.
-Once that exit is recorded, ordinary `coterie stop` can complete shutdown.
+Provider bindings may use any valid configured name. Foreground startup,
+control, and exit observations validate that name against the saved interactive
+role, along with foreground process ownership and the current session
+generation. If startup acknowledgment fails after process creation, the wrapper
+terminates and reaps its child, reports the observed exit, and returns the
+startup error. Once that exit is recorded, ordinary `coterie stop` can complete
+shutdown.
 
 If the bootstrap executable cannot run, report its absolute path and the error
-to the operator. Supervisor socket permission errors return `unavailable`
-(exit 7), identify the failed socket, and direct the operator to inspect the
-selected permission profile and run `coterie doctor` outside the agent sandbox.
-Coterie does not broaden the sandbox or retry with different permissions.
-Neither diagnostic requires printing the session token or full environment.
+to the operator. Supervisor socket permission errors return `unavailable` (exit
+7), identify the failed socket, and direct the operator to inspect the selected
+permission profile and run `coterie doctor` outside the agent sandbox. Coterie
+does not broaden the sandbox or retry with different permissions. Neither
+diagnostic requires printing the session token or full environment.
 
-The Codex adapter requires version 0.153.4 or later, below 1.0.0, and probes
-its stdio MCP configuration support. Both launch modes configure
+The Codex adapter requires version 0.153.4 or later, below 1.0.0, and probes its
+stdio MCP configuration support. Both launch modes configure
 `coterie_<session-id>` to execute the private `__mcp` entrypoint. The bridge
 requires the complete agent environment and authenticates before exposing any
 tools; it never falls back to operator discovery. It forwards only the typed
@@ -1116,44 +1130,46 @@ The adapter explicitly approves only the catalog's named orchestration tools
 through Codex's per-tool settings. Those tools exercise Coterie capabilities
 already granted to the session, including in jobs with `approvals=never`.
 Provider command approval settings and filesystem/network restrictions are
-unchanged. New or unrelated MCP tools receive no approval through this list,
-and managed provider policy can still deny calls. Generated job configuration
+unchanged. New or unrelated MCP tools receive no approval through this list, and
+managed provider policy can still deny calls. Generated job configuration
 follows `exec`; placing it before `exec` did not expose the tools to the actual
 Codex 0.153.4 job when later job-specific overrides were present.
 
 Tools use MCP version `2025-06-18` and bounded JSON-RPC messages over stdio.
-Successful supervisor RPC results contain `schema_version=1` and the typed supervisor response
-in `data`, including its `result` discriminator. Failed operations return
-`isError=true` with the CLI's stable diagnostic envelope. Text content and
-`structuredContent` contain the same redacted value. `prime.commands` names the
-MCP operations. Mutations require a `co-ULID` operation ID; call
-`new_operation_id` once and retain the ID for retries with identical arguments.
-That local tool returns the allocated `operation_id` directly.
+Successful supervisor RPC results contain `schema_version=1` and the typed
+supervisor response in `data`, including its `result` discriminator. Failed
+operations return `isError=true` with the CLI's stable diagnostic envelope. Text
+content and `structuredContent` contain the same redacted value.
+`prime.commands` names the MCP operations. Mutations require a `co-ULID`
+operation ID; call `new_operation_id` once and retain the ID for retries with
+identical arguments. That local tool returns the allocated `operation_id`
+directly.
 
 On a matching automatic notice, `notification_received` takes its `delivery_id`
-and a new `operation_id`, then returns `data.result=foreground_notification_received`
-and `data.received`. A false receipt means the delivery is unknown, belongs to
-another session, is legacy or failed, or the session can no longer receive
-notifications. The tool cannot select a session or queue destination. Call
-`poll` after a successful receipt to read updates coalesced while the notice
-waited. Ordinary reads do not report receipt. Receipt does not acknowledge
-inbox messages, accept tasks, or resume paused work. Retrying the same receipt
-cannot release a later notice. This agent-only tool adds no public CLI command
-or exit code; the [notification contract](codex-queue.md) describes recovery.
+and a new `operation_id`, then returns
+`data.result=foreground_notification_received` and `data.received`. A false
+receipt means the delivery is unknown, belongs to another session, is legacy or
+failed, or the session can no longer receive notifications. The tool cannot
+select a session or queue destination. Call `poll` after a successful receipt to
+read updates coalesced while the notice waited. Ordinary reads do not report
+receipt. Receipt does not acknowledge inbox messages, accept tasks, or resume
+paused work. Retrying the same receipt cannot release a later notice. This
+agent-only tool adds no public CLI command or exit code; the [notification
+contract](codex-queue.md) describes recovery.
 
 The MCP client helpers reduce cursor and retry bookkeeping. `poll` returns
 `schema_version=1` and `data` containing `cursor`, `changes`, `messages`,
 `has_more`, and `timed_out`. Pass its cursor unchanged on the next call; it
-keeps progress and inbox positions separate and retains unhandled messages.
-It drains up to 16 progress pages or 100 changes, including empty pages with
+keeps progress and inbox positions separate and retains unhandled messages. It
+drains up to 16 progress pages or 100 changes, including empty pages with
 `has_more`. Repeat while more remain. `inbox_handled` accepts an operation ID
 and handled message IDs, rejecting gaps before acknowledging a prefix.
-`retry_mutation` resends the saved original request by operation ID. After bridge
-replacement, repeat the original tool with the same ID and identical arguments.
-These helpers preserve task acceptance and generation checks. Their errors use
-the same diagnostic envelope. See the [full contract and tests](client-bookkeeping.md)
-for reconnect behavior and bounds. The CLI's explicit cursor commands retain
-their existing output shapes and exit codes.
+`retry_mutation` resends the saved original request by operation ID. After
+bridge replacement, repeat the original tool with the same ID and identical
+arguments. These helpers preserve task acceptance and generation checks. Their
+errors use the same diagnostic envelope. See the [full contract and
+tests](client-bookkeeping.md) for reconnect behavior and bounds. The CLI's
+explicit cursor commands retain their existing output shapes and exit codes.
 
 The explicitly opted-in checks use the installed Codex provider. The MCP
 startup/call check uses App Server to exercise Codex's MCP client without a
@@ -1161,10 +1177,10 @@ model. The job check launches real workers through Coterie; the foreground check
 launches its real TUI in a PTY and observes the task created through MCP. Both
 exercise writable and read-only profiles and require model access. A separate
 check rejects invalid bridge authentication before App Server or `exec` starts
-model work. Tests copy local `auth.json` into private temporary homes and isolate
-Codex configuration. An absolute
-`XDG_RUNTIME_DIR` outside system temp directories and Python 3 are required for
-command sandbox probes. Ordinary CI skips all real-provider checks.
+model work. Tests copy local `auth.json` into private temporary homes and
+isolate Codex configuration. An absolute `XDG_RUNTIME_DIR` outside system temp
+directories and Python 3 are required for command sandbox probes. Ordinary CI
+skips all real-provider checks.
 
 ```console
 cargo test --test supervisor_runtime mcp::installed_codex_mcp_routes_authenticated_rpc -- --ignored --exact
@@ -1197,27 +1213,28 @@ cargo test nixos_actual_login_and_non_login_shells -- --ignored
 This launches local shells with temporary home directories; it does not invoke
 Codex or require model authentication.
 
-The raw Coterie token exists only in the session
-environment; the database stores a verifier. Coterie redacts the known token and passed `OPENAI_API_KEY` from controlled
-transcripts, request text stored in tasks and messages, and diagnostics. Streaming
-redaction retains possible credential prefixes across chunks and conceals an
-unfinished prefix on terminal observation. Token-shaped values are also redacted
-after a restart when the raw token is no longer in memory. Provider-managed
-storage and inherited foreground terminal streams remain outside this filter.
-Runtime directories must be owned by the current user with mode 0700; sockets,
-lease and index files, SQLite files, and transcripts require mode 0600. Coterie
-refuses symlinks, nonregular data files, hard-linked data files, and foreign
-ownership. Existing owned application directories may be tightened at startup;
-`doctor` reports their original permissions without changing them.
+The raw Coterie token exists only in the session environment; the database
+stores a verifier. Coterie redacts the known token and passed `OPENAI_API_KEY`
+from controlled transcripts, request text stored in tasks and messages, and
+diagnostics. Streaming redaction retains possible credential prefixes across
+chunks and conceals an unfinished prefix on terminal observation. Token-shaped
+values are also redacted after a restart when the raw token is no longer in
+memory. Provider-managed storage and inherited foreground terminal streams
+remain outside this filter. Runtime directories must be owned by the current
+user with mode 0700; sockets, lease and index files, SQLite files, and
+transcripts require mode 0600. Coterie refuses symlinks, nonregular data files,
+hard-linked data files, and foreign ownership. Existing owned application
+directories may be tightened at startup; `doctor` reports their original
+permissions without changing them.
 
 ## JSON output
 
 Programmatic commands selected with `--json` emit exactly one compact JSON
-object followed by a newline, except `events --follow` and `logs --follow`, which
-emit one such envelope per page. A successful response goes to standard output,
-and standard error remains empty. A failed response goes to standard error,
-and standard output remains empty for ordinary commands. If a follower fails
-after printing pages, those pages remain on standard output and the final
+object followed by a newline, except `events --follow` and `logs --follow`,
+which emit one such envelope per page. A successful response goes to standard
+output, and standard error remains empty. A failed response goes to standard
+error, and standard output remains empty for ordinary commands. If a follower
+fails after printing pages, those pages remain on standard output and the final
 diagnostic goes to standard error. Human-readable diagnostics also go to
 standard error, but do not share a stream with successful JSON.
 
@@ -1238,8 +1255,8 @@ A mutation success also contains the operation ID:
 {"schema_version":1,"operation_id":"co-01ARZ3NDEKTSV4RRFFQ69G5FAV","data":{"task_id":"ct-01ARZ3NDEKTSV4RRFFQ69G5FAV"}}
 ```
 
-An error places its stable code, human-readable message, and any
-error-specific fields under `error`. `details` is omitted when empty:
+An error places its stable code, human-readable message, and any error-specific
+fields under `error`. `details` is omitted when empty:
 
 ```json
 {"schema_version":1,"error":{"code":"invalid_argument","message":"task ID is invalid","details":{"argument":"task_id"}}}
@@ -1257,15 +1274,15 @@ The generated JSON Schemas are:
 
 ## Operation IDs
 
-Every mutating run command accepts the common
-`--operation-id <co-ULID>` option. If it is omitted, the CLI generates an
-operation ID before dispatch. The RPC request carries that ID, and every
-Coterie-rendered response after allocation returns it. The foreground launch
-uses its operation ID to prepare the durable session, but emits no wrapper
-response while Codex owns the terminal. A programmatic caller retries an
-uncertain mutation with the same ID. Read-only commands neither accept nor
-return an operation ID. Local configuration lock creation also has no operation
-ID; it uses explicit atomic file replacement as described above.
+Every mutating run command accepts the common `--operation-id <co-ULID>` option.
+If it is omitted, the CLI generates an operation ID before dispatch. The RPC
+request carries that ID, and every Coterie-rendered response after allocation
+returns it. The foreground launch uses its operation ID to prepare the durable
+session, but emits no wrapper response while Codex owns the terminal. A
+programmatic caller retries an uncertain mutation with the same ID. Read-only
+commands neither accept nor return an operation ID. Local configuration lock
+creation also has no operation ID; it uses explicit atomic file replacement as
+described above.
 
 New mutations retain a fingerprint of the original request separately from
 redacted request text, so retries survive provider credential changes. Older
@@ -1290,30 +1307,30 @@ ordinary error envelope without `operation_id`.
 Exit codes describe broad handling categories; `error.code` supplies the
 specific machine-readable cause.
 
-| Code | Category | Meaning |
-| ---: | --- | --- |
-| 0 | `success` | The command completed successfully. |
-| 1 | `internal` | Coterie encountered an internal failure or corrupt state. |
-| 2 | `usage` | A command-line argument or request value was invalid. |
-| 3 | `configuration` | Configuration was invalid or incompatible. |
-| 4 | `not_found` | A requested resource does not exist. |
-| 5 | `conflict` | Current state does not satisfy an operation precondition. |
-| 6 | `permission` | Authentication or authorization failed. |
-| 7 | `unavailable` | A required service or provider cannot currently respond. |
+  | Code | Category        | Meaning                                                   |
+  | ---: | --------------- | --------------------------------------------------------- |
+  |    0 | `success`       | The command completed successfully.                       |
+  |    1 | `internal`      | Coterie encountered an internal failure or corrupt state. |
+  |    2 | `usage`         | A command-line argument or request value was invalid.     |
+  |    3 | `configuration` | Configuration was invalid or incompatible.                |
+  |    4 | `not_found`     | A requested resource does not exist.                      |
+  |    5 | `conflict`      | Current state does not satisfy an operation precondition. |
+  |    6 | `permission`    | Authentication or authorization failed.                   |
+  |    7 | `unavailable`   | A required service or provider cannot currently respond.  |
 
 The versioned machine-readable table is
 [`cli-exit-codes-v1.json`](../tests/golden/cli-exit-codes-v1.json).
 
 The version 1 error codes map as follows:
 
-| Error code | Exit category |
-| --- | --- |
-| `invalid_argument` | `usage` |
-| `invalid_configuration` | `configuration` |
-| `not_found` | `not_found` |
-| `conflict` | `conflict` |
-| `unauthenticated` | `permission` |
-| `permission_denied` | `permission` |
-| `unavailable` | `unavailable` |
-| `corrupt_state` | `internal` |
-| `internal` | `internal` |
+  | Error code              | Exit category   |
+  | ----------------------- | --------------- |
+  | `invalid_argument`      | `usage`         |
+  | `invalid_configuration` | `configuration` |
+  | `not_found`             | `not_found`     |
+  | `conflict`              | `conflict`      |
+  | `unauthenticated`       | `permission`    |
+  | `permission_denied`     | `permission`    |
+  | `unavailable`           | `unavailable`   |
+  | `corrupt_state`         | `internal`      |
+  | `internal`              | `internal`      |

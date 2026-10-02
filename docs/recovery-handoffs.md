@@ -10,15 +10,15 @@ coterie
 
 This reactivates the original run and starts a fresh foreground session on the
 next launch. Tasks, dependencies, accepted results, messages, handoffs, and
-transcript references keep their identities. Stop any replacement run first
-and restore the selected run's saved configuration. Recovery acquires all
-project leases and verifies process exits and retained ownership before
-activation. Stale credentials remain revoked. The
-[CLI contract](cli-contract.md#coterie-run-recover) describes
-discovery, policy checks, provenance, and idempotent retries.
+transcript references keep their identities. Stop any replacement run first and
+restore the selected run's saved configuration. Recovery acquires all project
+leases and verifies process exits and retained ownership before activation.
+Stale credentials remain revoked. The [CLI
+contract](cli-contract.md#coterie-run-recover) describes discovery, policy
+checks, provenance, and idempotent retries.
 
-Reactivation leaves unfinished assignments preserved and draining. Continue
-them with the task recovery workflow below. Submitted tasks retain their normal
+Reactivation leaves unfinished assignments preserved and draining. Continue them
+with the task recovery workflow below. Submitted tasks retain their normal
 review, integration, and acceptance requirements.
 
 When a worker exits before submission, recover its task with a sourced report:
@@ -31,8 +31,8 @@ coterie task recover --assignment <source-id> --reason 'Exited before submission
 The operator or an agent with `task:recover` selects the report from available
 messages, logs, or artifacts. Coterie records that caller's identity. Every
 statement has a source reference, but references and claims are unverified
-reporter input. Messages and logs retain their existing read permissions.
-If evidence is unavailable, leave the report empty or omit it; the handoff
+reporter input. Messages and logs retain their existing read permissions. If
+evidence is unavailable, leave the report empty or omit it; the handoff
 explicitly has no reported evidence. Do not infer that checks passed.
 
 ## Reading the handoff
@@ -48,20 +48,20 @@ coterie assignment show <source-id> --json
 
 The continuation's own assignment ID also retrieves its source handoff.
 Concatenate `data.text` across pages before decoding JSON. Continue with
-`--after <next_cursor>` and `--revision <revision>` until `eof` is true. MCP uses
-`assignment_show` with the same fields. Reconnects authenticate again and retain
-the revision and cursor. The complete document contains:
+`--after <next_cursor>` and `--revision <revision>` until `eof` is true. MCP
+uses `assignment_show` with the same fields. Reconnects authenticate again and
+retain the revision and cursor. The complete document contains:
 
-| Field | Meaning |
-| --- | --- |
-| `recoveries` | Source path, exact path bytes, recorded base commit, reason, and continuation links. |
-| `recovery_handoffs[].mechanical` | Git observations recorded before retirement: HEAD, any unfinished Git operation, path lists, and inspection completeness. |
-| `recovery_handoffs[].reported` | Validation evidence and unfinished steps supplied by the recovering caller, each with its source reference. |
-| `operation_id`, `source_assignment_id`, `recorded_at`, `reported_by` | Provenance for each handoff. A null reporter denotes the operator. |
+  | Field                                                                | Meaning                                                                                                                   |
+  | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+  | `recoveries`                                                         | Source path, exact path bytes, recorded base commit, reason, and continuation links.                                      |
+  | `recovery_handoffs[].mechanical`                                     | Git observations recorded before retirement: HEAD, any unfinished Git operation, path lists, and inspection completeness. |
+  | `recovery_handoffs[].reported`                                       | Validation evidence and unfinished steps supplied by the recovering caller, each with its source reference.               |
+  | `operation_id`, `source_assignment_id`, `recorded_at`, `reported_by` | Provenance for each handoff. A null reporter denotes the operator.                                                        |
 
-The [full handoff example](../examples/recovery-handoff.json) and
-[report example](../examples/recovery-report.json) are checked against Rust
-types. The [assignment document schema](../schemas/assignment-detail-v1.schema.json)
+The [full handoff example](../examples/recovery-handoff.json) and [report
+example](../examples/recovery-report.json) are checked against Rust types. The
+[assignment document schema](../schemas/assignment-detail-v1.schema.json)
 defines the full output.
 
 Dirty paths are the union of observed, nonignored changes. Staged and unstaged
@@ -80,15 +80,15 @@ events without inventing snapshots: their handoff metadata is absent (null in
 
 Spawn a worktree role on the reopened task. The continuation inspects the
 preserved source and ports selected changes into its fresh worktree. Recovery
-does not copy files or grant writable ownership of the source, its index, or
-its references. Use the fresh assignment's normal coordinator-commit handoff,
-then submit. Review and integrate the submission, validate the integrated
-target, and explicitly close the task. Dependencies stay blocked until closure.
+does not copy files or grant writable ownership of the source, its index, or its
+references. Use the fresh assignment's normal coordinator-commit handoff, then
+submit. Review and integrate the submission, validate the integrated target, and
+explicitly close the task. Dependencies stay blocked until closure.
 
 Recovery stores the handoff, retires the assignment, and records its operation
-result in one transaction. Retry an uncertain outcome with the same operation
-ID and identical arguments, including the report. A successful retry returns
-the original observation and report without re-inspecting Git.
+result in one transaction. Retry an uncertain outcome with the same operation ID
+and identical arguments, including the report. A successful retry returns the
+original observation and report without re-inspecting Git.
 
 ## Verification
 

@@ -42,9 +42,9 @@ bypass run, session, generation, or workspace ownership checks.
 Suppose the review worktree was created at commit A and submits A unchanged,
 while the target advances to descendant B. Integration captures B and records
 `base_commit = result_commit = A` and
-`target_commit_before = target_commit = B`. The result is already reachable
-from B, so both the default `rebase` strategy and explicit `merge` strategy
-leave target HEAD at B and create no new commit. The review worktree stays at A.
+`target_commit_before = target_commit = B`. The result is already reachable from
+B, so both the default `rebase` strategy and explicit `merge` strategy leave
+target HEAD at B and create no new commit. The review worktree stays at A.
 Integration does not replace B's files with the older review tree.
 
 This no-op still performs the ordinary integration guards. Dirty target or
@@ -55,19 +55,19 @@ Inspect the diagnostic and reconcile any recorded intent using the ordinary
 integration recovery path; do not weaken guards or rewrite the submitted review
 to force acceptance.
 
-The coordinator judges whether a review of A satisfies the task after changes
-in B. A no-op integration record proves mechanical acceptance of the unchanged
-Git result; it does not prove that the reviewer examined B. Arrange any needed
+The coordinator judges whether a review of A satisfies the task after changes in B.
+A no-op integration record proves mechanical acceptance of the unchanged Git
+result; it does not prove that the reviewer examined B. Arrange any needed
 additional review and record the actual validation scope before closing.
 
 ## Regression coverage
 
-[Supervisor tests](../tests/supervisor_runtime/review_acceptance.rs) use temporary
-real Git repositories and deterministic providers to cover unchanged submission,
-premature closure rejection, no-op integration at the base and at a newer target,
-both strategies, dirty work preservation, explicit validation, idempotent retries,
-and dependency release only after closure. They compare target and assignment
-HEADs, file contents, and index bytes around integration.
+[Supervisor tests](../tests/supervisor_runtime/review_acceptance.rs) use
+temporary real Git repositories and deterministic providers to cover unchanged
+submission, premature closure rejection, no-op integration at the base and at a
+newer target, both strategies, dirty work preservation, explicit validation,
+idempotent retries, and dependency release only after closure. They compare
+target and assignment HEADs, file contents, and index bytes around integration.
 
 The `unchanged_integration_keeps_generation_and_target_motion_guards` test in
 [the Git backend](../src/workspace.rs) checks mismatched run and generation
@@ -82,6 +82,6 @@ cargo test --bin coterie unchanged_integration_keeps_generation_and_target_motio
 ```
 
 For sandbox or environment failures, report the exact command, working
-directory, policy, and diagnostic using the
-[validation handoff](validation-environments.md). A blocked check is not passing
-evidence and does not justify automatic task closure.
+directory, policy, and diagnostic using the [validation
+handoff](validation-environments.md). A blocked check is not passing evidence
+and does not justify automatic task closure.

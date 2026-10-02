@@ -8,9 +8,9 @@ scientific verification is claimed.
 
 ## Prepare a disposable project
 
-On Linux, install [Coterie and its Codex prerequisite](../README.md#installation)
-and authenticate Codex. Clone the source repository and create a fresh Git
-project from the demo fixture:
+On Linux, install [Coterie and its Codex
+prerequisite](../README.md#installation) and authenticate Codex. Clone the
+source repository and create a fresh Git project from the demo fixture:
 
 ```console
 git clone https://github.com/jolars/coterie.git
