@@ -897,12 +897,9 @@ fn installed_codex_foreground_uses_mcp_under_both_profiles() {
             if output.status.success() {
                 let prime: Value =
                     serde_json::from_slice(&output.stdout).unwrap();
-                if prime["data"]["tasks"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|task| task["title"] == "Foreground MCP verified")
-                {
+                if prime["data"]["tasks"].as_array().unwrap().iter().any(
+                    |task| task["title"]["text"] == "Foreground MCP verified",
+                ) {
                     break;
                 }
             }

@@ -16,11 +16,15 @@ fn idle_shutdown_retires_the_process_and_all_projects_and_preserves_tasks() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    wait_until("the supervisor socket", || {
+    // The socket appears before the run is indexed for operator discovery.
+    wait_until("the supervisor accepting operator requests", || {
         fixture
-            .runtime
-            .join(format!("coterie/{RUN_ID}.sock"))
-            .exists()
+            .command()
+            .args(["status", "--json"])
+            .output()
+            .unwrap()
+            .status
+            .success()
     });
     let library = fixture.root.join("library");
     fs::create_dir(&library).unwrap();

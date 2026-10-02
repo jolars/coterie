@@ -210,7 +210,7 @@ fn installed_codex_nixos_validation_environment_access() {
     let output_path = fixture.runtime.join("validation-worker.json");
     let argv = json!(["python3", probe, output_path]);
     let description = format!(
-        "This is an explicit NixOS validation-access regression fixture. Call prime and inbox through Coterie MCP. An authorized coordinator is available. Execute this trusted helper once from your assigned worktree, with a non-login shell and these exact argument-array entries: {argv}. It records independent validation, Nix daemon, and local/shared .devenv state probes. Permission denials are expected observations. Do not change permissions, retry blocked commands, edit tracked files, or stage/commit anything. Send coordinator a durable message containing VALIDATION_OBSERVED, your assignment ID, selected policy, and each probe's passed or blocked outcome and diagnostic. Then finish completed, summarizing the successful fixture validation and the blocked environment commands. A clean unchanged worktree can submit its base commit. Do not claim the blocked checks passed."
+        "This is an explicit NixOS validation-access regression fixture. Call prime and inbox through Coterie MCP. An authorized coordinator is available. Execute this trusted helper once from your assigned worktree, with a non-login shell and these exact argument-array entries: {argv}. It records independent validation, Nix daemon, and local/shared .devenv state probes. Permission denials are expected observations. Do not change permissions, retry blocked commands, edit tracked files, or stage/commit anything. Send coordinator a durable message containing VALIDATION_OBSERVED, your assignment ID, selected policy, and each probe's passed or blocked outcome and diagnostic. Include each exact probe name from the helper's observations object, including nix_daemon and devenv_local. Then finish completed, summarizing the successful fixture validation and the blocked environment commands. A clean unchanged worktree can submit its base commit. Do not claim the blocked checks passed."
     );
     let task = fixture.run_json(&[
         "task",
@@ -234,7 +234,7 @@ fn installed_codex_nixos_validation_environment_access() {
         .unwrap();
     assert_eq!(
         handoff["permission_profile"],
-        json!({"filesystem":"workspace-write", "network":"deny", "approvals":"never"})
+        json!({"filesystem":"workspace-write", "network":"deny", "approvals":"never", "approval_reviewer":"user"})
     );
     println!(
         "assignment: {assignment}; selected policy: {}",
@@ -283,7 +283,16 @@ fn installed_codex_nixos_validation_environment_access() {
     assert_denied(&report, "nix_daemon", "Operation not permitted");
     assert_denied(&report, "shared_state", "Read-only file system");
     assert_denied(&report, "devenv_shared", ".devenv");
-    assert_denied(&report, "devenv_local", "Operation not permitted");
+    // Newer devenv can reach Nix's fetcher-cache lock before the daemon.
+    let local_error = report["observations"]["devenv_local"]["stderr"]
+        .as_str()
+        .unwrap();
+    let diagnostic = if local_error.contains("/fetcher-locks/") {
+        "Read-only file system"
+    } else {
+        "Operation not permitted"
+    };
+    assert_denied(&report, "devenv_local", diagnostic);
     assert_eq!(fs::read(protected_state).unwrap(), state_before);
     assert_eq!(fs::read(repo.path().join("index")).unwrap(), index_before);
     assert_eq!(fs::read(repo.path().join("config")).unwrap(), config_before);

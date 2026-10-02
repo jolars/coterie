@@ -309,7 +309,7 @@ fn installed_codex_linked_worktree_commit_handoff_and_recovery() {
                 .unwrap();
             assert_eq!(
                 handoff["permission_profile"],
-                json!({"filesystem":"workspace-write", "network":"deny", "approvals":"never"})
+                json!({"filesystem":"workspace-write", "network":"deny", "approvals":"never", "approval_reviewer":"user"})
             );
             println!("handoff policy: {}", handoff["permission_profile"]);
             let workspace =

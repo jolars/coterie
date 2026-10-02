@@ -87,7 +87,7 @@ it does not establish that this was the cause in the original field run.
 | `nix --extra-experimental-features nix-command store info --store daemon --json` | Blocked; daemon connection reports `Operation not permitted`. |
 | Create/write workspace-local `.devenv/access-probe` | Passed. |
 | Write through the deliberate external `.devenv` symlink | Blocked; `Read-only file system`. |
-| `devenv --offline --no-tui shell -- python3 validate.py` in the local environment | Blocked; daemon access is still required. |
+| `devenv --offline --no-tui shell -- python3 validate.py` in the local environment | Blocked; Nix cache writes or daemon access are denied. |
 | The same entry command in the shared-state environment | Blocked; `.devenv` state is inaccessible. |
 
 The helper retains its own results independently of the agent's summary. The
@@ -129,3 +129,13 @@ rustdoc, dependency checks, release verification, and Nix evaluation with
 Two earlier runs at default concurrency exposed intermittent failures in the
 existing idle-startup and historical-upgrade tests. Both passed in isolation
 and in the complete four-thread run; their startup races remain a follow-up.
+
+On October 2, 2026, Codex 0.157.0 and devenv 2.4.0 on Linux 6.18.54 with
+Nix 2.34.8 preserved these access boundaries. Local devenv entry failed earlier:
+Nix could not open a lock under `~/.cache/nix/fetcher-locks` on the read-only
+filesystem. The independent daemon probe still reported `Operation not
+permitted`, and shared devenv state remained unwritable. The regression accepts
+either local entry diagnostic while requiring the separate daemon and state
+probes, successful validation with the prepared interpreter, and unchanged
+protected files. No additional worker permissions are needed to run that
+prepared validation command.
