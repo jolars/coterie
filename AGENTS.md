@@ -45,6 +45,9 @@ PTY, and sandbox behavior is implemented and tested.
 - `DESIGN.md` defines product behavior, trust boundaries, invariants, initial
   scope, and non-goals.
 - `TODO.md` defines implementation order and the gate for each milestone.
+- `website/` contains the public guide and reference. Keep it current with
+  released behavior; retain implementation evidence and incident history in
+  `docs/` rather than publishing it on the site.
 - Tests define implemented behavior. A checked roadmap item must have the tests
   required by its milestone.
 - Generated CLI, configuration, and JSON schemas must agree with their typed
@@ -66,6 +69,8 @@ M0 must establish these canonical commands:
 - `task lint`: run Clippy with all targets and features and deny warnings.
 - `task test`: run the test suite with `cargo nextest`.
 - `task docs`: build rustdoc with warnings denied.
+- `task docs:site`: build the public VitePress site and check its links and
+  public command coverage.
 - `task audit`: run dependency policy and vulnerability checks.
 - `task check`: run every required local and CI gate above.
 - `task coverage`: generate coverage without making a percentage the sole test
