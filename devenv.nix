@@ -14,6 +14,7 @@
     go-task
     nixfmt
     nodejs_24
+    pnpm_10
     sqlite
     taplo
   ];

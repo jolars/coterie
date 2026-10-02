@@ -49,6 +49,12 @@ tasks:
     cmds:
       - cargo doc --workspace --all-features --no-deps
 
+  docs:site:
+    desc: Build and validate the public documentation site.
+    cmds:
+      - pnpm install --frozen-lockfile --ignore-scripts
+      - pnpm docs:build
+
   audit:
     desc: Check vulnerabilities and dependency policy.
     cmds:
@@ -62,6 +68,7 @@ tasks:
       - task: lint
       - task: test
       - task: docs
+      - task: docs:site
       - task: audit
       - task: release:verify
       - task: nix:eval

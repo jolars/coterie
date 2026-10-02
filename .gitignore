@@ -11,6 +11,10 @@ devenv.local.yaml
 
 # Rust
 /target
+/node_modules/
+/website/.vitepress/cache/
+/website/.vitepress/dist/
+/website/public/schemas/
 
 # Coverage
 /lcov.info

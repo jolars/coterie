@@ -957,9 +957,12 @@ mod tests {
 
     #[test]
     fn user_documentation_covers_the_mvp_contract() {
-        let readme = include_str!("../README.md");
-        for heading in ["## Installation", "## Codex prerequisites"] {
-            assert!(readme.contains(heading), "README is missing `{heading}`");
+        let guide = include_str!("../website/guide/getting-started.md");
+        for heading in ["## Install Coterie", "## Prepare Codex"] {
+            assert!(
+                guide.contains(heading),
+                "Getting started is missing `{heading}`"
+            );
         }
 
         let contract = include_str!("../docs/cli-contract.md");
@@ -987,10 +990,14 @@ mod tests {
 
         assert_eq!(documented_commands, public_commands);
         for category in ExitCategory::ALL {
-            let row =
-                format!("| {} | `{}` |", category.code(), category.name());
+            let code = category.code().to_string();
+            let name = format!("`{}`", category.name());
             assert!(
-                contract.contains(&row),
+                contract.lines().any(|line| {
+                    let cells =
+                        line.split('|').map(str::trim).collect::<Vec<_>>();
+                    cells.len() >= 4 && cells[1] == code && cells[2] == name
+                }),
                 "CLI contract is missing exit category `{}`",
                 category.name()
             );
