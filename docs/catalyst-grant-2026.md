@@ -2,190 +2,166 @@
 
 ## 1. THE PROBLEM
 
-Computational researchers revise analysis code, numerical results, and
-manuscript text together. A request to investigate a claim can involve checking
-the literature, changing a proof or model, rerunning an experiment, and updating
-the paper. Today, researchers coordinate these steps across Git repositories,
-editors, terminals, and conversations with collaborators or AI assistants. A
-single coding agent can help with an individual step, but the researcher must
-still track dependencies, inspect competing edits, recover interrupted work, and
-establish which checks support the final result.
+Before approving a computational manuscript revision, a coauthor must establish
+which code, experiments, sources, and checks support the changed claims. This
+decision recurs whenever a revision changes both the analysis and the paper.
+Researchers using coding agents currently assemble that evidence across Git
+repositories, terminals, and conversations, while tracking dependencies,
+reviewing competing edits, and recovering interrupted work.
 
-For computational researchers who maintain code and a manuscript together and
-use coding agents, this problem can recur with each revision that changes both.
-It costs time spent coordinating and rechecking work, and it raises the risk of
-accepting a plausible but unverified result. I have not measured a general time
-or money cost. In one Coterie research run, four tasks---theory, literature
-review, numerical work, and independent proof review---were validated and
-closed, but the lead agent still spent substantial effort on handoffs and
-validation. That experience motivates a focused evaluation rather than a claim
-of productivity gains.
+This coordination costs time and risks accepting plausible but unsupported
+results. I have not measured a general time or money cost. In one Coterie
+research run, four tasks—theory, literature review, numerical work, and
+independent proof review—reached validated closure, but handoffs and validation
+still required substantial coordinator effort. The grant would test whether a
+consistent evidence record helps another researcher review the resulting
+manuscript changes.
 
 ## 2. YOUR WORKFLOW
 
-A researcher starts Coterie in an existing Git project containing analysis code
-and manuscript sources, then asks its lead agent to tackle a multi-step problem.
-The lead agent proposes bounded tasks, such as checking a claim, running a
-numerical pilot, and reviewing the resulting proof. Coterie records the tasks
-and dependencies, then launches authorized workers in separate Git workspaces.
-Workers edit files or produce reports and run available checks. Under the
-current sandboxed worktree policy, a worker who edits files asks an authorized
-coordinator to review and commit those changes before submitting the result. The
-lead agent examines reports and contributions, asks Coterie to integrate
-accepted changes under Git safety checks, validates the combined project, and
-closes the tasks. The researcher gets a Git revision and a durable record of the
-work, evidence, and decisions behind that revision.
+A researcher starts Coterie from a terminal in an existing Git project
+containing code and manuscript sources, then asks its lead agent to investigate
+a claim. The lead proposes bounded tasks, such as checking the literature,
+running an experiment, and reviewing the proof. Coterie records dependencies and
+launches authorized workers in separate Git workspaces. Workers edit files,
+produce reports, and run checks. Under the current sandboxed worktree policy,
+workers ask an authorized coordinator to review and commit edits before
+submission. The lead reviews contributions, requests integration under Git
+safety checks, validates the combined project, and closes tasks.
 
-Agents may plan, implement, test, and report within configured permissions.
-Coterie enforces task ownership, permissions, and guarded integration, and
-stores messages durably. It does not decide whether a scientific claim is
-correct. In the proposed research workflow, the researcher reviews the final
-evidence and may reject or approve the result, or redirect the work. The
-researcher launches Coterie from a terminal in the project's Git repository,
-using tools computational researchers already know. Coterie currently launches
-Codex as a separate agent program.
+Agents perform these steps within configured permissions. Coterie enforces
+ownership and integration rules and preserves messages; it does not judge
+scientific correctness. In the proposed workflow, a researcher examines the
+resulting Git revision and evidence record before approving the manuscript
+change, requesting more work, or rejecting it. Coterie currently runs on Linux
+and launches Codex as a separate program.
 
 ## 3. TRUST, AUDIT AND GOVERNANCE
 
-A researcher can inspect task histories, agent messages, transcripts, events,
-submitted commits, integration decisions, and validation reports. The record
-links file changes to tasks, agent assignments, workspaces, and Git commits. For
-each run, Coterie records the settings it used and where they came from. A
-worker's exit does not count as success, and an interrupted task remains visible
-so work can be recovered.
+Researchers can inspect task histories, messages, transcripts, commits,
+integration decisions, validation reports, and the settings used for each run. A
+worker's exit does not count as success. Interrupted work remains recoverable,
+and Coterie refuses unsafe Git operations when ownership or repository state is
+uncertain.
 
-Git workspaces separate contributions, but do not restrict an agent's access to
-the host. The standard worker profile uses Codex's sandbox to restrict writes
-and network access. Coterie checks provider support before launch and does not
-widen permissions when a task is blocked. A trusted operator can explicitly
-select an unrestricted profile. These controls do not yet isolate hostile
-processes running as the same Unix user. In disposable research projects, I
-would test cross-workspace file access, blocked network connections, and whether
-test credentials appear in records. I would record the selected policy, expected
-and observed behavior, failures, and fixes.
+The funded improvement would be a report template and export linking each
+manuscript change to its task, source references with cited passages, code and
+data versions, check commands and results, review comments, and acceptance
+decision. Missing evidence would be explicit. A sample report would follow one
+revised claim through these links. Sources and scientific claims still require
+human checking; Coterie does not authenticate external sources or verify
+conclusions.
 
-Git commits record changes to project files and link them to submitted work.
-Reports can point to the exact code and commit they evaluated. Literature
-sources and scientific claims still require explicit citations and human
-checking; Coterie does not currently authenticate external sources or verify
-scientific claims. I would test a more consistent way to attach source
-references and validation evidence to research tasks.
+Git workspaces separate contributions. Codex's sandbox restricts worker writes
+and network access, and Coterie checks provider support before launch. Only a
+trusted operator can select an unrestricted profile; blocked work does not
+authorize wider permissions. These controls do not isolate hostile processes
+running as the same Unix user.
 
-If an agent fails, reports uncertainty, or produces an unsound result, the
-researcher can inspect the record, request more work, decline to integrate its
-changes, or leave the task open. Coterie preserves recoverable work and refuses
-unsafe Git operations when ownership or repository state is uncertain. The
-researcher remains accountable for scientific conclusions and publication
-decisions.
+In disposable projects, I would test an unauthorized write to a sibling
+worktree, a prohibited network connection, and exposure of planted test
+credentials in records. The first two should be blocked and reported without
+widening permissions; any leaked test credential would count as a failure. I
+would also give a review agent a citation that does not support the manuscript
+claim: it should flag the mismatch and request human review. I would record
+policy, expected and observed outcomes, failures, and fixes. The researcher
+remains accountable for conclusions and publication.
 
 ## 4. TEAM
 
-I am Johan Larsson, a researcher in statistics and machine learning and the
-developer of Coterie. I built it to coordinate agents in research projects while
-keeping a clear record from each request to a reviewed result. My background
-spans statistical research, computational experiments, and research software. I
-am the sole developer. There are no collaborators or advisors at present.
+I am Johan Larsson, a researcher in statistics and machine learning and
+Coterie's sole developer. My background spans statistical research,
+computational experiments, and research software. I built Coterie to coordinate
+agents in my research while preserving a record from request to reviewed result.
+There are no collaborators or advisors at present.
 
 ## 5. WHERE YOU ARE TODAY
 
-Coterie is working open-source software in active development. In one Git
-project, it can launch a lead Codex agent, delegate to workers, keep tasks and
-messages across interruptions, isolate Git contributions, and support explicit
-integration, validation, and recovery. Source code and documentation are at
-https://github.com/jolars/coterie. Published version 0.2.0 includes the core
-operator loop; the current development build adds stopped-run recovery and
-explicit approval-review profiles. A polished public demo is not yet available.
+[Coterie](https://github.com/jolars/coterie) is working open-source software.
+Published version 0.2.0 includes the core operator loop; the development build
+adds stopped-run recovery and explicit approval-review profiles.
 
-I have used Coterie in a computational research project combining a LaTeX
-manuscript and Python experiments. In that field run, tasks were validated and
-closed, contributions were tracked, an independent review was recorded, and
-unfinished work was recovered after a worker exited. It also exposed
-coordination friction and an error in scientific framing by the lead agent. The
-field report is at
-https://github.com/jolars/coterie/blob/main/docs/field-report-normreg-multi.md.
-This is internal field evidence, not a controlled study. There are no external
-users or customers yet.
+My [field
+report](https://github.com/jolars/coterie/blob/main/docs/field-report-normreg-multi.md)
+describes a LaTeX and Python research run with validated tasks, tracked
+contributions, independent proof review, and recovery after a worker exited. It
+also documents coordination friction and a scientific framing error by the lead
+agent. This is internal field evidence, not a controlled study. There are no
+external users or customers yet. A polished demo is not available; the grant
+would produce a walkthrough with an inspectable evidence report.
 
 ## 6. ALTERNATIVES AND COMPETITORS
 
-Researchers today can coordinate agent-assisted work manually, using individual
-coding agents alongside Git branches, terminals, issue trackers, and their own
-notes. [OpenAI Codex](https://openai.com/codex/) and [GitHub
-Copilot](https://github.com/features/copilot) are established coding agents that
-also support parallel or delegated work. Researchers using them still need to
-connect a scientific question to the tasks, evidence, decisions, and manuscript
-changes that follow.
+The immediate alternative is manual coordination using coding agents, Git
+branches, issue trackers, and notes. [OpenAI Codex](https://openai.com/codex/)
+and [GitHub Copilot](https://github.com/features/copilot) are established
+commercial coding agents. [Gas Town](https://github.com/gastownhall/gastown) is
+a working open-source orchestration system with persistent tasks and workspaces
+and roughly 18,000 GitHub stars as of October 2026. These tools already preserve
+aspects of agent work. [FutureHouse](https://www.futurehouse.org/) is a
+nonprofit developing agents to automate scientific research.
 
-Open-source orchestration alternatives include [Gas Town](https://gastown.dev/),
-[Gas City](https://github.com/gastownhall/gascity),
-[Daintree](https://github.com/daintreehq/daintree),
-[FirstMate](https://github.com/kunchenguid/firstmate), and
-[Agetor](https://github.com/alamops/agetor). Gas Town and Gas City are working
-platforms with durable tasks and workspaces. Daintree and Agetor have released
-interfaces for supervising parallel coding agents; FirstMate is a public agent
-distribution built around a lead and crew. As of October 2026, public GitHub
-interest ranges from fewer than 100 stars for Daintree and Agetor to roughly
-18,000 for Gas Town and 7,400 for FirstMate. These tools already preserve or
-expose aspects of agent work. Their public examples chiefly concern software
-delivery, while Coterie's proposed pilot follows scientific claims through
-literature, analysis, manuscript changes, and independent review.
-
-Scientific-agent systems approach the problem from the other direction.
-[FutureHouse](https://www.futurehouse.org/), for example, develops agents for
-literature search, data analysis, and multi-step scientific discovery. Such
-systems aim to improve what an AI agent can do scientifically.
-
-Coterie instead focuses on the orchestration and provenance of computational
-research. Its unit of work is not simply a coding task: a research question may
-generate linked literature, theoretical, computational, manuscript, and
-independent-review tasks. Coterie's run database records their dependencies,
-assignments, messages, validation, and integration decisions. Git commits record
-file changes, and Coterie links submitted and integrated commits to the work
-that produced them. A researcher can inspect that record and reject a result
-before accepting it.
-
-The proposed project would test whether a research-oriented orchestration and
-evidence layer makes multi-agent work easier to review and reduces the effort
-required to establish how a computational research result was produced.
+Coterie's proposed contribution is a workflow in the researcher's existing Git
+project that connects literature, theory, experiments, and manuscript changes to
+independent review. The pilot would test whether its evidence record makes those
+changes easier for a coauthor to assess.
 
 ## 7. WHERE THIS GOES
 
-The near-term goal is a dependable workflow for computational research projects
-in which code, results, and writing evolve together. I would improve evidence
-capture and run a paired pilot with 16 computational researchers who already use
-coding agents. Each would attempt comparable, bounded revisions using Coterie
-and their usual agent and Git workflow, with the order alternated. I would
-measure the time they spend coordinating, then ask another researcher to trace
-each final manuscript change to the code, checks, and decisions that support it.
-The pilot would provide preliminary evidence on usability and traceability; its
-size would not support general productivity estimates. Longer term, Coterie
-could support more agent providers and carefully scoped connections to research
-tools, while keeping the project repository and human research judgment central.
+I would recruit 16 computational researchers who use Git and coding agents on
+Linux, through research software communities and academic contacts. Each would
+attempt two comparable revisions in prepared public research projects, using
+Coterie and their usual agent and Git workflow. Tasks would require a source
+check, a small experiment, and a manuscript change, with a two-hour limit each.
+I would counterbalance task assignment and workflow order and record tools and
+experience.
 
-Coterie is open source. There is no commercial plan or pricing at present. If a
-supported product becomes useful, research groups or institutions could be
-potential customers. The proposed grant work would first establish whether that
-need exists.
+Each participant would then review another participant's pair of results, with
+review order also counterbalanced. The primary outcome would be the proportion
+of revisions whose supporting sources, code, checks, and decisions the reviewer
+correctly identifies within 20 minutes per revision. I would score responses
+against a predefined rubric and the source files and records. Missing evidence
+and failed or incomplete runs would count as unsuccessful traces. Reviewers
+would know which workflow produced each record, a limitation of the comparison.
+Review time and coordination time would be secondary measures. An improvement
+over the usual workflow of at least 20 percentage points in successful traces,
+without more incorrect links, would support a larger study. This exploratory
+target would guide further evaluation; the pilot cannot establish general
+productivity gains.
+
+Eight weeks of my effort would span twelve calendar weeks. Weeks 1–4 would cover
+evidence export, task preparation, recruitment, and initial access-control
+assessment. Weeks 5–8 would cover the paired sessions and reviews. Weeks 9–12
+would cover fixes, reassessment, and a public report and demo. The report would
+include incomplete runs and recruitment shortfalls.
+
+Participant interviews would establish revision frequency, current coordination
+costs, and demand for continued use. Longer term, Coterie could support more
+providers and research tools. It is open source, with no pricing or commercial
+plan; research groups and institutions are potential customers for future
+support.
 
 ## 8. FIT WITH DIGITAL SCIENCE
 
-Coterie would support research writing and research integrity in computational
-projects by keeping manuscript changes connected to the code, experiments,
-reviews, and decisions that support them. The immediate audience is researchers
-and research software teams. Digital Science's experience with
-[Overleaf](https://www.digital-science.com/products/overleaf/) could help me
-recruit computational authors who keep LaTeX manuscripts and analysis code in
-Git. Together, we could test whether Coterie's evidence record answers the
-questions a coauthor asks before approving a manuscript revision. That pilot
-would guide any later connection to manuscript systems; none exists today.
+Coterie would support research writing and integrity for computational
+researchers and research software teams. It sits in their existing Git and
+terminal workflow. Digital Science's experience with
+[Overleaf](https://www.digital-science.com/products/overleaf/) could help
+recruit authors and shape the evidence a coauthor needs before approving a
+revision. There is no Overleaf integration today; the pilot would inform any
+later connection to manuscript systems.
 
 ## 9. BUDGET
 
-I would use up to £25,000: £12,000 for approximately eight weeks of my
-development and pilot coordination time to improve evidence capture, test
-sandbox boundaries, and prepare representative research tasks; £8,000 to pay 16
-researchers £500 each for two structured tasks and an evidence review; and
-£5,000 for an independent assessment of access controls and secret handling,
-plus a usability walkthrough, with written findings. This would let me test the
-workflow beyond my own projects and address the most consequential failures
-before wider use.
+Of the £25,000, I would allocate £11,000 to eight weeks of development and
+coordination, delivering the evidence export by week 4 and the report and demo
+by week 12. I would reserve £1,000 for capped agent usage during preparation and
+the pilot, and £8,000 to pay 16 researchers £500 each for two tasks and a paired
+evidence review by week 8.
+
+The remaining £5,000 would fund an assessor independent of development to test
+workspace and network restrictions, inspect secret handling, and conduct a
+usability walkthrough. The assessor would provide written findings before
+participant sessions and verify fixes by week 12. Recruitment would use unpaid
+community outreach, and tasks would use public materials. This funding would
+enable external evaluation and independent scrutiny beyond my own projects.
