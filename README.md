@@ -5,32 +5,31 @@
 [![docs.rs](https://img.shields.io/docsrs/coterie)](https://docs.rs/coterie)
 
 > [!WARNING]
-> Coterie is under active development. The single-project Codex and Git
-> operator loop is implemented, but the broader initial product target remains
+> Coterie is under active development. The single-project Codex and Git operator
+> loop is implemented, but the broader initial product target remains
 > incomplete.
 
 Coterie is a project-native Rust CLI for coordinating coding agents. It will
 keep orchestration mechanics, durable state, workspaces, and policy enforcement
-in one foreground program while agent harnesses remain out-of-process
-providers.
+in one foreground program while agent harnesses remain out-of-process providers.
 
 The current platform target is Linux, developed on NixOS and tested on Ubuntu.
 
-The current command slice can launch or reconnect to a durable local run,
-open its foreground Codex TUI, inspect durable state, create and close tasks,
-spawn Codex workers in isolated Git worktrees, finish assignments, exchange
-durable messages, read and follow transcripts and events, diagnose runtime state
-with `doctor`, attach canonical projects under unique aliases, explicitly
-integrate submitted Git worktrees through a guarded operation, and stop the run
-while preserving
-recoverable work. Run
-`coterie --help` for the generated command reference; see the [CLI
-contract](docs/cli-contract.md) for programmatic output and retry rules.
+The current command slice can launch or reconnect to a durable local run, open
+its foreground Codex TUI, inspect durable state, create and close tasks, spawn
+Codex workers in isolated Git worktrees, finish assignments, exchange durable
+messages, read and follow transcripts and events, diagnose runtime state with
+`doctor`, attach canonical projects under unique aliases, explicitly integrate
+submitted Git worktrees through a guarded operation, and stop the run while
+preserving recoverable work. Run `coterie --help` for the generated command
+reference; see the [CLI contract](docs/cli-contract.md) for programmatic output
+and retry rules.
 
 An authorized coordinator can correct an unintegrated Git submission with
 `coterie task resubmit`, naming both the recorded and corrected commits. Coterie
 preserves the original submission history and refuses replacement once an
-integration intent exists. See the [recovery command](docs/cli-contract.md#coterie-task-resubmit).
+integration intent exists. See the [recovery
+command](docs/cli-contract.md#coterie-task-resubmit).
 
 For a worker that exited before submission, `coterie task recover` retires its
 assignment after verifying inactivity and reopens the same task. A continuation
@@ -40,35 +39,37 @@ Recovery snapshots the preserved Git state. Supply sourced validation evidence
 and unfinished steps with `--report`; the continuation retrieves the complete
 [handoff](docs/recovery-handoffs.md) through `assignment show`.
 
-Writable worktree workers use an explicit
-[coordinator-commit handoff](docs/linked-worktree-commits.md). Bootstrap explains
-the Git metadata restriction before editing, and `prime.commit_handoffs` supplies
-the assignment context. Workers validate and request a commit through durable
-messages, then confirm the coordinator's commit before submitting.
+Writable worktree workers use an explicit [coordinator-commit
+handoff](docs/linked-worktree-commits.md). Bootstrap explains the Git metadata
+restriction before editing, and `prime.commit_handoffs` supplies the assignment
+context. Workers validate and request a commit through durable messages, then
+confirm the coordinator's commit before submitting.
 
 Configuration inspection supports `config check`,
 `config show --effective --provenance`, `config schema`, and explicit
 `config lock` creation. These commands resolve layered configuration and verify
 portable locks without starting a run or probing providers. Launches snapshot
 the resolved configuration, and recovery reuses that policy. Incompatible
-configuration changes require restoring the saved policy or stopping the run. See the
-[configuration command contract](docs/cli-contract.md#coterie-config-check)
-and [examples](examples/config). The [permission guide](docs/permissions.md)
+configuration changes require restoring the saved policy or stopping the run.
+See the [configuration command
+contract](docs/cli-contract.md#coterie-config-check) and
+[examples](examples/config). The [permission guide](docs/permissions.md)
 explains automatic approval review and explicitly selected unrestricted access.
 
-Closing the foreground leaves active workers running. Once every session has
-an observed exit and no operation is pending or uncertain, new runs stop after
-60 seconds of inactivity. Set `[supervision] idle_timeout_seconds` in trusted
+Closing the foreground leaves active workers running. Once every session has an
+observed exit and no operation is pending or uncertain, new runs stop after 60
+seconds of inactivity. Set `[supervision] idle_timeout_seconds` in trusted
 global configuration to change that interval, or set it to `0` to require
 `coterie stop`. Read-only polling does not keep an idle run alive. Shutdown
-retains tasks, transcripts, and workspaces; the next launch starts a new run.
-To continue a retained run, use `coterie run list`, then
+retains tasks, transcripts, and workspaces; the next launch starts a new run. To
+continue a retained run, use `coterie run list`, then
 `coterie run recover <run-id> --reason 'Continue retained work.'` before
 launching Coterie. Recovery preserves the original task graph and reports,
 checks saved policy and project leases, and requires fresh authenticated
 sessions. Interrupted assignments continue through `task recover` into fresh
-worktrees. See the [stopped-run recovery contract](docs/cli-contract.md#coterie-run-recover).
-Historical runs retain their saved policy with automatic shutdown disabled.
+worktrees. See the [stopped-run recovery
+contract](docs/cli-contract.md#coterie-run-recover). Historical runs retain
+their saved policy with automatic shutdown disabled.
 
 ## Installation
 
@@ -79,8 +80,8 @@ shell installer:
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/jolars/coterie/releases/latest/download/coterie-installer.sh | sh
 ```
 
-Releases provide glibc and static musl archives for x86-64 and ARM64 Linux.
-Each archive has a matching SHA-256 checksum and a GitHub build-provenance
+Releases provide glibc and static musl archives for x86-64 and ARM64 Linux. Each
+archive has a matching SHA-256 checksum and a GitHub build-provenance
 attestation. To verify a downloaded archive:
 
 ```console
@@ -126,8 +127,8 @@ nix run github:jolars/coterie
 
 At runtime, `XDG_RUNTIME_DIR` must name an absolute, existing directory owned by
 the current user with mode 0700. Coterie stores durable data beneath
-`$XDG_STATE_HOME/coterie`, or `$HOME/.local/state/coterie` when
-`XDG_STATE_HOME` is unset or relative.
+`$XDG_STATE_HOME/coterie`, or `$HOME/.local/state/coterie` when `XDG_STATE_HOME`
+is unset or relative.
 
 ## Codex prerequisites
 
@@ -137,20 +138,19 @@ client or authentication. Before starting Coterie:
 1. [Install Codex CLI](https://learn.chatgpt.com/docs/codex/cli) and make sure
    `codex` is on the `PATH` inherited by the terminal or editor.
 2. Run `codex` directly once and complete one of its offered sign-in methods.
-3. Run `codex --version` and confirm that it reports `codex-cli` version
-   0.153.4 or later, but earlier than 1.0.0.
+3. Run `codex --version` and confirm that it reports `codex-cli` version 0.153.4
+   or later, but earlier than 1.0.0.
 
 At launch, Coterie probes the installed version and the documented command-line
 features needed for an interactive TUI, `codex exec --json` jobs, startup
 instructions, working-directory selection, sandboxing, approvals, and the
-required stdio MCP bridge for agent orchestration. It fails
-closed with exit code 7 when the executable, version, or required capability is
-unavailable.
+required stdio MCP bridge for agent orchestration. It fails closed with exit
+code 7 when the executable, version, or required capability is unavailable.
 
 The MVP worker loop requires a clean, non-bare Git repository with at least one
-commit because the built-in `worker` role receives an isolated Git worktree.
-The foreground lead can open a non-Git directory, but spawning that role there
-fails instead of weakening its isolation.
+commit because the built-in `worker` role receives an isolated Git worktree. The
+foreground lead can open a non-Git directory, but spawning that role there fails
+instead of weakening its isolation.
 
 Start or reconnect to a run from the project:
 
@@ -158,32 +158,6 @@ Start or reconnect to a run from the project:
 cd my-project
 coterie
 ```
-
-## sidekick.nvim
-
-[sidekick.nvim](https://github.com/folke/sidekick.nvim) can launch Coterie as a
-custom CLI tool. Add the entry beneath `opts.cli.tools` in the plugin
-configuration:
-
-```lua
-{
-  "folke/sidekick.nvim",
-  opts = {
-    cli = {
-      tools = {
-        coterie = {
-          cmd = { "coterie" },
-        },
-      },
-    },
-  },
-}
-```
-
-Restart Neovim, or reload the configuration, then run `:checkhealth sidekick`
-and `:Sidekick cli show name=coterie focus=true`. Neovim must inherit a `PATH`
-containing both `coterie` and the compatible `codex` executable. Sidekick's CLI
-integration works independently of its optional Next Edit Suggestions feature.
 
 ## Development
 
@@ -196,15 +170,15 @@ task check
 
 The canonical maintainer commands are:
 
-| Command | Purpose |
-| --- | --- |
-| `task fmt` | Check Rust, TOML, and Nix formatting. |
-| `task lint` | Run Clippy with warnings denied and validate workflows. |
-| `task test` | Run tests with cargo-nextest. |
-| `task docs` | Build rustdoc with warnings denied. |
-| `task audit` | Check vulnerabilities, licenses, bans, and sources. |
-| `task check` | Run every required local and CI gate except coverage. |
-| `task coverage` | Generate an HTML coverage report without a threshold. |
+  | Command         | Purpose                                                 |
+  | --------------- | ------------------------------------------------------- |
+  | `task fmt`      | Check Rust, TOML, and Nix formatting.                   |
+  | `task lint`     | Run Clippy with warnings denied and validate workflows. |
+  | `task test`     | Run tests with cargo-nextest.                           |
+  | `task docs`     | Build rustdoc with warnings denied.                     |
+  | `task audit`    | Check vulnerabilities, licenses, bans, and sources.     |
+  | `task check`    | Run every required local and CI gate except coverage.   |
+  | `task coverage` | Generate an HTML coverage report without a threshold.   |
 
 Use `devenv test` to reproduce the clean-shell gate, including all configured
 pre-commit hooks.
@@ -232,9 +206,10 @@ binaries and a shell installer to the GitHub release.
 - [`docs/destructive-operations.md`](docs/destructive-operations.md) maps
   destructive operations to their ownership, inactivity, and recovery guards.
 - [`docs/validation-environments.md`](docs/validation-environments.md) explains
-  workspace validation, Nix and devenv access, and opt-in NixOS regression tests.
+  workspace validation, Nix and devenv access, and opt-in NixOS regression
+  tests.
 
 ## License
 
-Coterie is available under either the [MIT license](LICENSE-MIT) or the
-[Apache License 2.0](LICENSE-APACHE), at your option.
+Coterie is available under either the [MIT license](LICENSE-MIT) or the [Apache
+License 2.0](LICENSE-APACHE), at your option.
