@@ -55,6 +55,6 @@ jobs:
           token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - name: Run Versionary
-        uses: jolars/versionary@v1.4.1
+        uses: jolars/versionary@v1.6.0
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
