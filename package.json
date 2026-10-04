@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@10.23.0",
   "scripts": {
-    "docs:dev": "node scripts/prepare-website.mjs && vitepress dev website",
+    "docs:dev": "node scripts/prepare-website.mjs && vitepress dev website --host 127.0.0.1",
     "docs:build": "node scripts/prepare-website.mjs && vitepress build website && node scripts/check-website.mjs",
     "docs:preview": "vitepress preview website"
   },

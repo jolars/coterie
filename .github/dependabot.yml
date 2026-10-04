@@ -23,3 +23,15 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Europe/Stockholm
+    groups:
+      docs-dependencies:
+        patterns:
+          - "*"

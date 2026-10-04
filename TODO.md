@@ -593,6 +593,12 @@ the exits to a particular limit; current defaults are not the run snapshot.
 
 ## Future work to scope
 
+- [ ] Upgrade the documentation toolchain when stable VitePress supports a
+  patched Vite release. VitePress 1.6.4 requires Vite 5, while the four open
+  documentation alerts have fixes beginning with Vite 6.4.3 and esbuild 0.25.0.
+  Remove the scoped exceptions in `scripts/check-npm-audit.mjs` after the
+  upgrade. Verify a clean raw `pnpm audit`, the site build, and the development
+  and preview commands before closing this item.
 - [ ] Scope an optional transfer helper for the
   [research recovery handoff](docs/field-report-normreg-multi.md#3-recovery-preserved-work-but-required-a-manual-handoff).
   Require an explicit selection of changes, identify conflicts before applying
