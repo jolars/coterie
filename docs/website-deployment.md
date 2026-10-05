@@ -2,7 +2,12 @@
 
 The public site source is in `website/`. `task docs:site` installs its pinned pnpm dependencies, copies the generated JSON Schemas into the build input, and runs the VitePress production build with broken-link checking. `pnpm docs:dev` binds to `127.0.0.1`. Do not expose the development server to a network while the current Vite alerts remain open. `task check` includes the site build and the npm dependency audit. The existing `task docs` remains the rustdoc gate.
 
-The Pages workflow builds from the tag of a **published GitHub release** and sets `COTERIE_DOCS_REF` to that tag. Public links to repository evidence and examples then point to the same source version as the deployed pages. A main-branch push does not deploy the site. The first site deployment requires a release containing `website/` and its workflow; v0.2.0 predates them.
+The Pages workflow builds automatically from the tag of a **published GitHub
+release** and sets `COTERIE_DOCS_REF` to that tag. Public links to repository
+evidence and examples then point to the same source version as the deployed
+pages. For documentation updates between releases, manually dispatch the Docs
+workflow on `main`; that build links to the current `main` sources. A main-branch
+push alone does not deploy the site. v0.2.0 predates the site.
 
 ## One-time GitHub and DNS setup
 
