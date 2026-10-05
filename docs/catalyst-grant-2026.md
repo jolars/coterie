@@ -79,7 +79,10 @@ There are no collaborators or advisors at present.
 
 [Coterie](https://github.com/jolars/coterie) is working open-source software.
 Published version 0.2.0 includes the core operator loop; the development build
-adds stopped-run recovery and explicit approval-review profiles.
+adds stopped-run recovery and explicit approval-review profiles. The [public
+guide and reference](https://coterie.fyi/) explain installation, permissions,
+the operator workflow, and CLI commands. The site describes the development
+build, including capabilities not yet in the published release.
 
 My [field
 report](https://github.com/jolars/coterie/blob/main/docs/field-report-normreg-multi.md)
@@ -87,9 +90,9 @@ describes a LaTeX and Python research run with validated tasks, tracked
 contributions, independent proof review, and recovery after a worker exited. It
 also documents coordination friction and a scientific framing error by the lead
 agent. This is internal field evidence, not a controlled study. A [self-guided
-demo](https://github.com/jolars/coterie/blob/main/docs/demo.md) uses a public
-example to show Coterie's current workflow. The grant would add an export
-linking manuscript changes to inspectable evidence.
+demo](https://coterie.fyi/guide/demo) uses a public example to show Coterie's
+current workflow. The grant would add an export linking manuscript changes to
+inspectable evidence.
 
 ## 6. ALTERNATIVES AND COMPETITORS
 
