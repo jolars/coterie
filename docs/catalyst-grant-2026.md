@@ -157,15 +157,11 @@ later connection to manuscript systems.
 
 ## 9. BUDGET
 
-Of the £25,000, I would allocate £11,000 to eight weeks of development and
-coordination, delivering the evidence export by week 4 and the report and demo
-by week 12. I would reserve £1,000 for capped agent usage during preparation and
-the pilot, and £8,000 to pay 16 researchers £500 each for two tasks and a paired
-evidence review by week 8.
+Of the £25,000, I would allocate £12,000 to eight weeks of development and
+coordination to deliver the evidence export, report, and demo. I would reserve
+£1,000 for capped agent usage and £8,000 to pay 16 researchers £500 each for two
+tasks and a paired evidence review.
 
-The remaining £5,000 would fund an assessor independent of development to test
-workspace and network restrictions, inspect secret handling, and conduct a
-usability walkthrough. The assessor would provide written findings before
-participant sessions and verify fixes by week 12. Recruitment would use unpaid
-community outreach, and tasks would use public materials. This funding would
-enable external evaluation and independent scrutiny beyond my own projects.
+The remaining £4,000 would fund an assessor independent of development to test
+workspace and network restrictions, inspect secret handling, conduct a usability
+walkthrough, document findings, and verify fixes.
