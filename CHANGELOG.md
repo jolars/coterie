@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/jolars/coterie/compare/v0.2.0...v0.3.0) (2026-10-06)
+
+### Features
+
+- expose worker deadlines and exit reasons ([`ea17aea`](https://github.com/jolars/coterie/commit/ea17aea826a05aab981b05e86df02145bdfb6624))
+- submit retained commits after worker exit ([`b56e7a1`](https://github.com/jolars/coterie/commit/b56e7a17213649d7ec98bda982aec8775cf64b64))
+- mark command event coverage in logs ([`606fb4f`](https://github.com/jolars/coterie/commit/606fb4ff7e4f0627bccf6e02bbb0c10416194884))
+- add automatic review and unrestricted profiles ([`e067b50`](https://github.com/jolars/coterie/commit/e067b505757fee0d040cb196682a1c986c89d031))
+- add explicit stopped run recovery ([`7ccbee0`](https://github.com/jolars/coterie/commit/7ccbee025544507e47be405dc9213b9fa2b4f9aa))
+
+### Bug Fixes
+
+- avoid premature Nix source lookup ([`93f125d`](https://github.com/jolars/coterie/commit/93f125d4d36f1f0811d6102fc6cb52f5dda1d619))
+- include embedded guide in Nix source ([`2b3ddd6`](https://github.com/jolars/coterie/commit/2b3ddd614245fa9bb31de54d95b5dda8dbc46497))
+- recover lost worker assignments safely ([`e985f46`](https://github.com/jolars/coterie/commit/e985f46f61fdb64a99e3470e69484ed7744ff167))
+- fix socket race ([`e6aeceb`](https://github.com/jolars/coterie/commit/e6aeceb55cdd706cd71334e6e60bc502ea8696a3))
+- secure supervisor sockets before binding ([`9ea4088`](https://github.com/jolars/coterie/commit/9ea40888054db9e914c868342e8146d961f85f87))
+- use nextest ([`31d57fc`](https://github.com/jolars/coterie/commit/31d57fcc199451cde8deb03f82abbbc4817b5c09))
+- bound foreground notifications until receipt ([`658f681`](https://github.com/jolars/coterie/commit/658f681c07d4cafbdbd12d6a52f3c442dd91241d))
+
 ## [0.2.0](https://github.com/jolars/coterie/compare/v0.1.0...v0.2.0) (2026-09-16)
 
 ### Added
