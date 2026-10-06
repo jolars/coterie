@@ -267,6 +267,10 @@ pub(crate) struct TaskRecoverArguments {
     /// Missing evidence remains unknown. Sources refer to messages, logs, or artifacts.
     #[arg(long, value_parser = parse_recovery_report)]
     pub(crate) report: Option<crate::protocol::recovery::RecoveryReport>,
+    /// Operator only: acknowledge a lost session whose exit was never observed.
+    /// Requires a fresh provider check proving the recorded process is absent.
+    #[arg(long)]
+    pub(crate) acknowledge_lost: bool,
     #[command(flatten)]
     pub(crate) mutation: MutationArguments,
 }

@@ -90,6 +90,109 @@ fn stopped_run_idle_shutdown_continues_through_accepted_closure() {
     recovery_workflow("idle");
 }
 
+#[test]
+fn lost_worker_after_supervisor_restart_continues_through_accepted_closure() {
+    recovery_workflow("lost");
+}
+
+#[test]
+fn sandbox_startup_failure_uses_observed_exit_recovery() {
+    let fixture = TestEnvironment::new();
+    write_global(&fixture, include_str!("../../examples/config/global.toml"));
+    fs::write(
+        fixture.root.join("bin/codex"),
+        format!(
+            "{}{}",
+            FAKE_CODEX.split_once("is_job=false").unwrap().0,
+            "if [ -z \"${COTERIE_TASK_ID-}\" ]; then exit 0; fi\n\
+             printf '%s\\n' '{\"type\":\"error\",\"message\":\"sandbox mount marker: No space left on device\"}'\n\
+             exit 71\n"
+        ),
+    )
+    .unwrap();
+    fixture.launch(&[]);
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Sandbox startup failed",
+        "--json",
+    ]);
+    let spawn = fixture.run_json(&[
+        "spawn",
+        "builder",
+        "--task",
+        task["data"]["task"]["id"].as_str().unwrap(),
+        "--json",
+    ]);
+    let assignment = spawn["data"]["assignment_id"].as_str().unwrap();
+    wait_until("sandbox failure exit observation", || {
+        fixture.run_json(&["status", "--json"])["data"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| {
+                agent["id"] == spawn["data"]["agent"]["id"]
+                    && agent["state"] == "exited"
+            })
+    });
+    let run_id = fixture.run_json(&["status", "--json"])["data"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let database = fixture
+        .state
+        .join(format!("coterie/runs/{run_id}/state.sqlite3"));
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let exit: String = connection
+        .query_row(
+            "SELECT payload_json FROM events WHERE event_type = 'session.lifecycle_changed' AND subject = ?1 AND json_extract(payload_json, '$.data.state') = 'exited'",
+            [spawn["data"]["session_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let exit: Value = serde_json::from_str(&exit).unwrap();
+    assert_eq!(exit["data"]["exit"]["code"], 71);
+    assert_eq!(exit["data"]["exit"]["reason"], "process");
+    let transcript = fixture.state.join(format!(
+        "coterie/runs/{run_id}/transcripts/{}.jsonl",
+        spawn["data"]["session_id"].as_str().unwrap()
+    ));
+    assert!(
+        fs::read_to_string(transcript)
+            .unwrap()
+            .contains("sandbox mount marker: No space left on device")
+    );
+    rejected(
+        &fixture,
+        &[
+            "task",
+            "recover",
+            "--assignment",
+            assignment,
+            "--reason",
+            "Sandbox startup failed.",
+            "--acknowledge-lost",
+            "--json",
+        ],
+        "inactivity",
+    );
+    let recovered = fixture.run_json(&[
+        "task",
+        "recover",
+        "--assignment",
+        assignment,
+        "--reason",
+        "Sandbox startup failed.",
+        "--json",
+    ]);
+    assert!(recovered["data"]["missing_exit_acknowledged"].is_null());
+    fixture.run_json(&["stop", "--json"]);
+}
+
 fn recovery_workflow(shutdown: &str) {
     let fixture = TestEnvironment::new();
     write_global(
@@ -114,7 +217,25 @@ fn recovery_workflow(shutdown: &str) {
         ),
     )
     .unwrap();
-    fixture.launch(&[]);
+    let mut supervisor = if shutdown == "lost" {
+        let child = fixture
+            .command()
+            .args(["__supervisor", RUN_ID, PROJECT_ID])
+            .arg(&fixture.project)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_until("supervisor publication", || {
+            fixture.index_entry_count() == 1
+        });
+        fixture.launch(&[]);
+        Some(child)
+    } else {
+        fixture.launch(&[]);
+        None
+    };
     let run_status = fixture.run_json(&["status", "--json"]);
     let run_id = run_status["data"]["run_id"].as_str().unwrap();
     let task = fixture.run_json(&[
@@ -198,7 +319,7 @@ fn recovery_workflow(shutdown: &str) {
         "validation_evidence": [{"text": "Artifact contents checked; full suite blocked.", "source": format!("message {}", evidence["data"]["message_id"].as_str().unwrap())}],
         "unfinished_steps": [{"text": "Port files, validate, commit, and submit.", "source": format!("message {}", evidence["data"]["message_id"].as_str().unwrap())}]
     }).to_string();
-    let recovery_args = [
+    let mut recovery_args = vec![
         "task",
         "recover",
         "--assignment",
@@ -214,6 +335,53 @@ fn recovery_workflow(shutdown: &str) {
     rejected(&fixture, &recovery_args, "inactivity");
     if shutdown == "explicit" {
         fixture.run_json(&["stop", "--json"]);
+    } else if shutdown == "lost" {
+        let database = fixture
+            .state
+            .join(format!("coterie/runs/{run_id}/state.sqlite3"));
+        let connection = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let provider_id: String = connection
+            .query_row(
+                "SELECT provider_session_id FROM sessions WHERE id = ?1",
+                [spawn["data"]["session_id"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let pid = provider_id
+            .strip_prefix("process:")
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        // Hold the known child before crashing its owner so the PID cannot
+        // disappear and be reused before the test terminates that child.
+        kill(Pid::from_raw(pid), Signal::SIGSTOP).unwrap();
+        let mut child = supervisor.take().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        kill(Pid::from_raw(pid), Signal::SIGKILL).unwrap();
+        wait_until("lost worker process absence", || {
+            matches!(
+                kill(Pid::from_raw(pid), None),
+                Err(nix::errno::Errno::ESRCH)
+            )
+        });
+        let transcript = fixture.state.join(format!(
+            "coterie/runs/{run_id}/transcripts/{}.jsonl",
+            spawn["data"]["session_id"].as_str().unwrap()
+        ));
+        fs::OpenOptions::new()
+            .append(true)
+            .open(transcript)
+            .unwrap()
+            .write_all(b"{\"type\":")
+            .unwrap();
+        let restart = run(fixture.connect_command());
+        assert!(restart.status.success(), "{restart:?}");
+        recovery_args.insert(8, "--acknowledge-lost");
     } else {
         fs::write(format!("{}.exit", capture.display()), "exit").unwrap();
     }
@@ -232,7 +400,7 @@ fn recovery_workflow(shutdown: &str) {
             fixture.index_entry_count() == 0
         });
     }
-    let run_recovery = if shutdown != "active" {
+    let run_recovery = if shutdown == "explicit" || shutdown == "idle" {
         let listed = fixture.run_json(&["run", "list", "--json"]);
         assert_eq!(listed["data"]["runs"][0]["run_id"], run_id);
         assert_eq!(listed["data"]["runs"][0]["status"], "stopped");
@@ -255,7 +423,7 @@ fn recovery_workflow(shutdown: &str) {
     } else {
         None
     };
-    wait_until("observed worker exit", || {
+    wait_until("worker terminal state", || {
         let status = fixture.run_json(&["status", "--json"]);
         status["data"]["agents"]
             .as_array()
@@ -263,11 +431,16 @@ fn recovery_workflow(shutdown: &str) {
             .iter()
             .any(|agent| {
                 agent["id"] == spawn["data"]["agent"]["id"]
-                    && agent["state"] == "exited"
+                    && agent["state"]
+                        == if shutdown == "lost" { "lost" } else { "exited" }
             })
     });
     let doctor = fixture.run_json(&["doctor", "--json"]);
     assert!(doctor.to_string().contains("task recover"));
+    if shutdown == "lost" {
+        assert!(doctor.to_string().contains("incomplete final frame"));
+        assert!(doctor.to_string().contains("--acknowledge-lost"));
+    }
     let exited = fixture.run_json(&["prime", "--json"]);
     let blocked = exited["data"]["tasks"]
         .as_array()
@@ -276,9 +449,17 @@ fn recovery_workflow(shutdown: &str) {
         .find(|t| t["id"] == task_id)
         .unwrap();
     assert_eq!(blocked["status"], "in_progress");
-    assert_eq!(blocked["assignment"]["session_state"], "exited");
+    assert_eq!(
+        blocked["assignment"]["session_state"],
+        if shutdown == "lost" { "lost" } else { "exited" }
+    );
     assert_eq!(blocked["next_action"], "inspect_provider");
     let recovered = fixture.run_json(&recovery_args);
+    if shutdown == "lost" {
+        assert_eq!(recovered["data"]["missing_exit_acknowledged"], true);
+    } else {
+        assert!(recovered["data"]["missing_exit_acknowledged"].is_null());
+    }
     let context = fixture.run_json(&["prime", "--json"]);
     let reopened = context["data"]["tasks"]
         .as_array()
@@ -571,7 +752,7 @@ fn recovery_workflow(shutdown: &str) {
     );
     let accepted = super::context::read_detail(&fixture, "task", task_id);
     fixture.run_json(&["stop", "--json"]);
-    if shutdown != "active" {
+    if shutdown == "explicit" || shutdown == "idle" {
         let retained_transcripts = || {
             let directory =
                 fixture.state.join(format!("coterie/runs/{run_id}"));

@@ -9,6 +9,7 @@ impl Repositories<'_, '_> {
         &self,
         run_id: RunId,
         assignment_id: AssignmentId,
+        acknowledge_lost: bool,
     ) -> Result<(AssignmentRecord, WorkspaceRecord), StoreError> {
         let reject = |reason: &str| StoreError::RecoveryConflict {
             assignment_id,
@@ -64,14 +65,21 @@ impl Repositories<'_, '_> {
             session_id: session.id,
             generation: assignment.generation,
         };
+        let terminal_matches = if acknowledge_lost {
+            session.state == LifecycleState::Lost
+                && session.reconciliation_state == ExternalResourceState::Lost
+        } else {
+            session.state == LifecycleState::Exited
+                && session.reconciliation_state
+                    == ExternalResourceState::Observed
+        };
         if !self.session_scope_is_current(scope)?
-            || session.state != LifecycleState::Exited
-            || session.reconciliation_state != ExternalResourceState::Observed
+            || !terminal_matches
             || session.ended_at.is_none()
             || session.provider_session_id.is_none()
             || !self
                 .agent(assignment.agent_id)?
-                .is_some_and(|agent| agent.state == LifecycleState::Exited)
+                .is_some_and(|agent| agent.state == session.state)
             || !self
                 .session_credential(session.id)?
                 .is_some_and(|credential| credential.revoked_at.is_some())
@@ -102,12 +110,14 @@ impl Repositories<'_, '_> {
                 AND json_extract(payload_json, '$.data.exit.reason') IN ('process', 'interrupted', 'terminated'))",
             params![run_id, session.id, session.generation], |row| row.get(0),
         )?;
-        if !exit_recorded
+        if (exit_recorded == acknowledge_lost)
             || session.process_owner != SessionProcessOwner::Supervisor
         {
-            return Err(reject(
-                "no verified provider process-exit record; preserve the worktree and inspect `coterie doctor`",
-            ));
+            return Err(reject(if acknowledge_lost {
+                "the lost session has an exit event or unverified process ownership; preserve the worktree and inspect `coterie doctor`"
+            } else {
+                "no verified provider process-exit record; preserve the worktree and inspect `coterie doctor`"
+            }));
         }
         let workspace = self.workspace_for_scope(assignment.scope())?;
         if workspace.kind != "worktree"
@@ -128,9 +138,13 @@ impl Repositories<'_, '_> {
         assignment_id: AssignmentId,
         reason: &str,
         handoff: &RecoveryHandoff,
+        acknowledge_lost: bool,
     ) -> Result<RecoverySummary, StoreError> {
-        let (assignment, workspace) =
-            self.recovery_preflight(mutation.run_id, assignment_id)?;
+        let (assignment, workspace) = self.recovery_preflight(
+            mutation.run_id,
+            assignment_id,
+            acknowledge_lost,
+        )?;
         let recovery = RecoverySummary {
             task_id: assignment.task_id,
             assignment_id,
@@ -147,6 +161,7 @@ impl Repositories<'_, '_> {
                 .to_vec(),
             base_commit: workspace.base_commit,
             reason: reason.to_owned(),
+            missing_exit_acknowledged: acknowledge_lost,
             continuation_assignment_id: None,
             handoff: Some(Box::new(handoff.brief())),
         };

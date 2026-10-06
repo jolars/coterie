@@ -28,6 +28,13 @@ coterie task recover --assignment <source-id> --reason 'Exited before submission
   --report '{"validation_evidence":[{"text":"python3 validate.py passed in the assigned workspace; full suite blocked by Nix daemon access under workspace-write/network-deny policy.","source":"message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW"}],"unfinished_steps":[{"text":"Port result.json, rerun validation, and request a coordinator commit before submission.","source":"message cm-01ARZ3NDEKTSV4RRFFQ69G5FAW"}]}'
 ```
 
+When a worker is `lost` and no exit observation exists, the local operator
+may add `--acknowledge-lost` after inspecting the assignment and transcript.
+The supervisor requires a fresh proof that the recorded process is absent;
+live or uncertain process state refuses retirement. The recovery summary
+records `missing_exit_acknowledged: true`, while the source session remains
+lost and its worktree and index remain preserved.
+
 The operator or an agent with `task:recover` selects the report from available
 messages, logs, or artifacts. Coterie records that caller's identity. Every
 statement has a source reference, but references and claims are unverified

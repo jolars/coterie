@@ -35,6 +35,19 @@ coterie task recover --assignment <assignment-id> --reason "Worker exited before
 coterie spawn worker --task <reopened-task-id>
 ```
 
+If the supervisor recorded the worker as `lost` without an exit event, the
+local operator can acknowledge the missing exit evidence after inspecting
+`doctor`, the assignment, and its transcript:
+
+```console
+coterie task recover --assignment <assignment-id> --reason "Exit observation was lost; preserve and continue the work." --acknowledge-lost
+```
+
+Coterie checks the recorded process again and refuses a live or uncertain
+process. This option does not claim that the worker exited successfully. The
+old session stays `lost`, and its credentials stay revoked. Agents cannot use
+this option. A stopped or draining run cannot recover a task.
+
 The original worktree, files, index, commits, transcript, and reference remain preserved. The continuation receives a fresh worktree and a handoff link. Use `coterie assignment show <source-assignment-id> --json` to read the recorded Git snapshot and any sourced validation report. Transfer useful changes deliberately, validate them in the new workspace, and follow the normal commit, submission, integration, and closure steps.
 
 An optional `--report <JSON>` can record validation evidence and unfinished steps, each with a source reference. An absent report means the evidence is unknown. The [handoff notes on GitHub](https://github.com/jolars/coterie/blob/main/docs/recovery-handoffs.md) show the full format.

@@ -607,7 +607,7 @@ blocked. The running Coterie executable was version 0.2.0, and `doctor`
 reported Codex 0.157.0. The sandbox failure preceded the lost session, but
 the available records do not establish why the process observation was lost.
 
-- [ ] **High: Resolve lost worker sessions without weakening recovery safety.**
+- [x] **High: Resolve lost worker sessions without weakening recovery safety.**
   Inspect the provider and supervisor events for this run and determine whether
   the worker process remained live or exited without an observation. Define an
   operator-supported path in `DESIGN.md` for an unfinished assignment whose
@@ -618,6 +618,9 @@ the available records do not establish why the process observation was lost.
   incomplete transcripts, live and absent lost processes, supervisor restart,
   dirty worktrees, repeated recovery attempts, and continuation through
   validation and accepted task closure. Keep real-provider coverage opt-in.
+  The [incident review and recovery test](docs/lost-worker-recovery.md) record
+  the missing exit evidence, the operator-only absence check, and continuation
+  through accepted closure.
 
 ### M7 gate
 

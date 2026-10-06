@@ -213,6 +213,10 @@
             }
           ]
         },
+        "missing_exit_acknowledged": {
+          "description": "The operator accepted missing exit evidence after a fresh absence check.",
+          "type": "boolean"
+        },
         "project_id": {
           "$ref": "#/$defs/ProjectId"
         },

@@ -594,6 +594,36 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         })
     }
 
+    /// A lost worker has no exit status; only a fresh absence check permits
+    /// explicit operator retirement while preserving its source worktree.
+    pub(crate) fn verify_recovery_absence(
+        &mut self,
+        store: &mut Store,
+        scope: SessionScope,
+    ) -> Result<bool, AgentSessionError> {
+        let (session, agent) = store.transaction(|r| {
+            Ok((r.session(scope.session_id)?, r.agent(scope.agent_id)?))
+        })?;
+        let (Some(session), Some(agent)) = (session, agent) else {
+            return Ok(false);
+        };
+        let Some(provider_id) = session.provider_session_id else {
+            return Ok(false);
+        };
+        self.configure_provider(store, scope.run_id, &agent.role)?;
+        if !self
+            .provider
+            .probe()
+            .is_ok_and(|probe| probe.name == session.provider)
+        {
+            return Ok(false);
+        }
+        Ok(matches!(
+            self.provider.recover(&provider_id, scope),
+            Ok(ProviderRecovery::Lost)
+        ))
+    }
+
     /// Conservatively classifies sessions that outlived a supervisor process.
     pub(crate) fn reconcile_after_restart(
         &mut self,

@@ -170,6 +170,8 @@ pub(crate) enum RpcRequest {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         report: Option<recovery::RecoveryReport>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        acknowledge_lost: bool,
     },
     TaskResubmit {
         operation_id: OperationId,
@@ -528,10 +530,17 @@ pub(crate) struct RecoverySummary {
     pub(crate) workspace_path_bytes: Vec<u8>,
     pub(crate) base_commit: Option<String>,
     pub(crate) reason: String,
+    /// The operator accepted missing exit evidence after a fresh absence check.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) missing_exit_acknowledged: bool,
     pub(crate) continuation_assignment_id: Option<AssignmentId>,
     /// Absent for recoveries recorded before handoff snapshots were supported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) handoff: Option<Box<recovery::RecoveryHandoffBrief>>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Exact identities recorded by one explicit guarded integration.

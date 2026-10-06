@@ -1064,6 +1064,7 @@ fn public_request(
                         assignment_id: arguments.assignment,
                         reason: arguments.reason,
                         report: arguments.report,
+                        acknowledge_lost: arguments.acknowledge_lost,
                     },
                     Some(operation_id),
                     false,
@@ -3226,6 +3227,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             assignment_id,
             reason,
             report,
+            acknowledge_lost,
         } => recovery::recover_task(
             store,
             sessions,
@@ -3236,6 +3238,7 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             assignment_id,
             reason,
             report,
+            acknowledge_lost,
             Some(&request_fingerprint),
         ),
         RpcRequest::TaskResubmit {

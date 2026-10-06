@@ -80,7 +80,7 @@ Correct an unintegrated Git submission through an authorized coordinator. Supply
 
 ### `coterie task recover`
 
-`coterie task recover --assignment <id> --reason <text>` retires an exited, unsubmitted Git assignment and reopens its task. `--report <JSON>` optionally records sourced validation evidence and unfinished steps. Source files, commits, and references remain preserved; a continuation gets a new worktree. See [Recovery](/guide/recovery).
+`coterie task recover --assignment <id> --reason <text>` retires an exited, unsubmitted Git assignment and reopens its task. `--report <JSON>` optionally records sourced validation evidence and unfinished steps. For a lost worker with no observed exit, the local operator may add `--acknowledge-lost`; Coterie requires a fresh process-absence check and records the missing evidence. Source files, commits, and references remain preserved; a continuation gets a new worktree. See [Recovery](/guide/recovery).
 
 ### `coterie assignment show`
 

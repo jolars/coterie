@@ -19,6 +19,19 @@ fn recovery_requires_assignment_reason_and_accepts_an_operation_id() {
         ])
         .is_ok()
     );
+    assert!(
+        Arguments::try_parse_from([
+            "coterie",
+            "task",
+            "recover",
+            "--assignment",
+            assignment,
+            "--reason",
+            "The exit observation is missing.",
+            "--acknowledge-lost",
+        ])
+        .is_ok()
+    );
     for args in [
         vec!["coterie", "task", "recover", "--assignment", assignment],
         vec!["coterie", "task", "recover", "--reason", "Interrupted."],
@@ -38,6 +51,7 @@ fn example() -> crate::protocol::RecoverySummary {
         workspace_path_bytes: b"/state/preserved".to_vec(),
         base_commit: Some("a".repeat(40)),
         reason: "Provider exited before submission.".into(),
+        missing_exit_acknowledged: false,
         continuation_assignment_id: None,
         handoff: Some(Box::new(handoff_example().brief())),
     }

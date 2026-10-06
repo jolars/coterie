@@ -642,7 +642,7 @@ them with `cargo test regenerate_resubmit_contract -- --ignored`.
 
 ```console
 coterie task recover --assignment <assignment-id> --reason <explanation>
-  [--report <JSON>] [--operation-id <co-ULID>]
+  [--report <JSON>] [--acknowledge-lost] [--operation-id <co-ULID>]
 ```
 
 Retire an interrupted Git worktree assignment before submission. Requires the
@@ -650,11 +650,21 @@ operator channel or `task:recover`. The assignment must still own the task's
 active claim, its current provider session must have an observed exit and
 revoked credentials, and its workspace must have verified ownership. Unresolved
 launch, process-control, or integration intent blocks recovery. An unknown,
-lost, or merely quarantined session is insufficient. Inspect `doctor` and wait
+lost, or merely quarantined session is insufficient for this path. Inspect
+`doctor` and wait
 for verified inactivity before retrying; recovery never stops a provider.
 Admission requires a normalized provider exit event and a fresh adapter check of
 the recorded identity. An exact exited observation or confirmed absence after
 that recorded exit qualifies; absence alone does not establish an exit.
+
+The operator-only `--acknowledge-lost` path explicitly retires a lost worker
+whose exit was never observed. It requires a current, supervisor-owned lost
+session with revoked credentials and no exit event, plus a fresh adapter proof
+that the recorded process is absent. A live or uncertain process refuses the
+request. The session remains lost, and the recovery output records
+`missing_exit_acknowledged: true`. This path does not infer an exit or task
+success; it preserves source work and uses the ordinary continuation and
+acceptance workflow.
 
 One transaction releases the old assignment and claim, reopens the same task,
 and records `task.recovered` with the reason, actor, and preserved source.

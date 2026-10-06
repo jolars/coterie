@@ -13,10 +13,17 @@ pub(super) fn recover_task<P: Provider, B: WorkspaceBackend>(
     assignment_id: AssignmentId,
     reason: String,
     report: Option<crate::protocol::recovery::RecoveryReport>,
+    acknowledge_lost: bool,
     fingerprint: Option<&str>,
 ) -> Result<RpcResponse, RpcFailure> {
     require_current_caller(store, run_id, caller)?;
     require_capability(store, run_id, caller, "task", "recover")?;
+    if acknowledge_lost && !matches!(caller, AuthenticatedCaller::Operator) {
+        return Err(RpcFailure::new(
+            RpcFailureCode::PermissionDenied,
+            "acknowledging a lost worker requires the local operator",
+        ));
+    }
     if reason.trim().is_empty() {
         return Err(invalid_argument("recovery requires a nonempty --reason"));
     }
@@ -34,6 +41,9 @@ pub(super) fn recover_task<P: Provider, B: WorkspaceBackend>(
         ));
     }
     let mut request = json!({"assignment_id": assignment_id, "reason": reason});
+    if acknowledge_lost {
+        request["acknowledge_lost"] = json!(true);
+    }
     if let Some(report) = &report {
         request["report"] = serde_json::to_value(report)
             .map_err(|error| rpc_state_failure(error.into()))?;
@@ -51,7 +61,9 @@ pub(super) fn recover_task<P: Provider, B: WorkspaceBackend>(
         .map_err(rpc_state_failure)?;
     let handoff = if existing.is_none() {
         let (assignment, _) = store
-            .transaction(|r| r.recovery_preflight(run_id, assignment_id))
+            .transaction(|r| {
+                r.recovery_preflight(run_id, assignment_id, acknowledge_lost)
+            })
             .map_err(rpc_state_failure)?;
         let scope = crate::auth::SessionScope {
             run_id,
@@ -61,10 +73,13 @@ pub(super) fn recover_task<P: Provider, B: WorkspaceBackend>(
                 .expect("preflight requires a session"),
             generation: assignment.generation,
         };
-        if !sessions
-            .verify_recovery_exit(store, scope)
-            .map_err(rpc_session_failure)?
-        {
+        let inactive = if acknowledge_lost {
+            sessions.verify_recovery_absence(store, scope)
+        } else {
+            sessions.verify_recovery_exit(store, scope)
+        }
+        .map_err(rpc_session_failure)?;
+        if !inactive {
             return Err(conflict(
                 "the provider cannot verify process inactivity; preserve the workspace and inspect `coterie doctor` before retrying `coterie task recover`",
             ));
@@ -98,6 +113,7 @@ pub(super) fn recover_task<P: Provider, B: WorkspaceBackend>(
                 handoff
                     .as_ref()
                     .expect("only a new operation executes retirement"),
+                acknowledge_lost,
             )?;
             Ok(RpcResponse::TaskRecovered {
                 operation_id,

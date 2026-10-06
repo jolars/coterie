@@ -836,8 +836,23 @@ check of the recorded process identity. That check must prove an exact exited
 session with exit details, or process absence following the recorded exit.
 Absence alone never supplies the missing exit evidence. Provider uncertainty
 refuses recovery without changing the original observation.
-Unknown or lost process ownership requires inspection with `coterie doctor`
-and never authorizes recovery. A stopped or draining run cannot recover tasks.
+Unknown or lost process ownership requires inspection with `coterie doctor`;
+the label alone never authorizes recovery. A stopped or draining run cannot
+recover tasks.
+
+If a supervisor loses a worker's process exit observation, the operator may
+use `coterie task recover --assignment ID --reason TEXT --acknowledge-lost`
+while the run is active. This is a separate, explicit retirement path, not an
+inferred exit. It requires the current supervisor-owned session and agent to
+be `lost`, a recorded end time, revoked credentials, no normalized exit event,
+no pending launch, control, workspace creation, or integration, and a fresh
+adapter observation that the recorded process is absent. A live, inaccessible,
+unrecognized, or ambiguously owned process refuses retirement. Agents cannot
+request this override. The recovery event records that the exit was not
+observed; the original session stays `lost`. The transaction fences the old
+assignment and generation, preserves its worktree and index, and opens the
+same task for an ordinary fresh worktree continuation. The operator must
+inspect the source and validate any ported work before accepted closure.
 
 Recovery is one database transaction: release the old claim and assignment,
 reopen the same task, and record the reason, actor, session, and preserved

@@ -30,6 +30,7 @@ fn request(
             assignment_id,
             reason: reason.into(),
             report: None,
+            acknowledge_lost: false,
         },
     )
 }
@@ -52,6 +53,165 @@ fn exit(fixture: &mut Fixture) {
             unix_timestamp().unwrap() * 1000,
         )
         .unwrap();
+}
+
+#[test]
+fn lost_worker_requires_operator_acknowledgment_and_fresh_absence_proof() {
+    use crate::providers::{ProviderRecovery, ProviderSessionHandle};
+
+    for proof in ["absent", "unknown", "live"] {
+        let (_directory, mut fixture) = fixture();
+        let scope = fixture.scope();
+        let workspace = fixture.workspace();
+        fs::write(workspace.path.join("unfinished.txt"), "preserve me\n")
+            .unwrap();
+        let provider_id = fixture
+            .store
+            .transaction(|r| r.session(scope.session_id))
+            .unwrap()
+            .unwrap()
+            .provider_session_id
+            .unwrap();
+        fixture.sessions =
+            AgentSessionSupervisor::new(FakeProvider::new([]), &fixture.run);
+        fixture
+            .sessions
+            .reconcile_after_restart(
+                &mut fixture.store,
+                scope.run_id,
+                unix_timestamp().unwrap(),
+            )
+            .unwrap();
+        let session = fixture
+            .store
+            .transaction(|r| r.session(scope.session_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.state, LifecycleState::Lost);
+        assert!(
+            fixture
+                .store
+                .transaction(|r| r.session_credential(scope.session_id))
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
+        assert!(
+            request(
+                &mut fixture,
+                &AuthenticatedCaller::Operator,
+                OperationId::generate(),
+                workspace.assignment_id,
+                "ordinary recovery",
+            )
+            .is_err()
+        );
+        let observation = match proof {
+            "absent" => ProviderRecovery::Lost,
+            "unknown" => ProviderRecovery::Unknown,
+            _ => ProviderRecovery::Observed {
+                handle: ProviderSessionHandle::new(provider_id, scope),
+                observation: SessionObservation {
+                    lifecycle: LifecycleState::Running,
+                    activity: ActivityState::Unknown,
+                    exit: None,
+                },
+            },
+        };
+        fixture.sessions = AgentSessionSupervisor::new(
+            FakeProvider::new([]).with_missing_recoveries([observation]),
+            &fixture.run,
+        );
+        let operation_id = OperationId::generate();
+        let lost_request = RpcRequest::TaskRecover {
+            operation_id,
+            assignment_id: workspace.assignment_id,
+            reason: "Operator inspected the lost worker.".into(),
+            report: None,
+            acknowledge_lost: true,
+        };
+        let execute = |fixture: &mut Fixture, caller, request| {
+            execute_request(
+                &mut fixture.store,
+                &mut fixture.sessions,
+                &mut fixture.workspaces,
+                RuntimePaths {
+                    run_state_directory: &fixture.run,
+                    socket_path: &fixture.socket,
+                },
+                scope.run_id,
+                caller,
+                request,
+            )
+        };
+        let agent_caller = AuthenticatedCaller::Agent(scope);
+        let operator = AuthenticatedCaller::Operator;
+        assert_eq!(
+            execute(&mut fixture, &agent_caller, lost_request.clone())
+                .unwrap_err()
+                .code,
+            RpcFailureCode::Unauthenticated
+        );
+        let outcome = execute(&mut fixture, &operator, lost_request.clone());
+        if proof == "absent" {
+            let response = outcome.unwrap();
+            let RpcResponse::TaskRecovered { recovery, .. } = &response else {
+                panic!("recovery expected");
+            };
+            assert!(recovery.missing_exit_acknowledged);
+            assert_eq!(
+                execute(&mut fixture, &operator, lost_request).unwrap(),
+                response
+            );
+            assert_eq!(
+                fs::read_to_string(workspace.path.join("unfinished.txt"))
+                    .unwrap(),
+                "preserve me\n"
+            );
+            assert_eq!(
+                fixture
+                    .store
+                    .transaction(|r| r.task(TASK.parse().unwrap()))
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                TaskStatus::Open
+            );
+            fixture
+                .store
+                .transaction(|r| {
+                    assert_eq!(
+                        r.session(scope.session_id)?.unwrap().state,
+                        LifecycleState::Lost
+                    );
+                    assert!(!r.session_scope_is_current(scope)?);
+                    assert!(!r.assignment_scope_is_current(workspace.scope())?);
+                    assert!(
+                        !r.events_after(scope.run_id, 0, 1000)?.iter().any(
+                            |event| {
+                                event.subject == scope.session_id.to_string()
+                                    && event.event_type
+                                        == "session.lifecycle_changed"
+                                    && event.payload["data"]["state"]
+                                        == "exited"
+                            }
+                        )
+                    );
+                    Ok(())
+                })
+                .unwrap();
+        } else {
+            assert_eq!(outcome.unwrap_err().code, RpcFailureCode::Conflict);
+            assert!(
+                fixture
+                    .store
+                    .transaction(|r| r.operation(operation_id))
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 }
 
 #[test]
@@ -357,6 +517,7 @@ fn recovery_reports_require_sources_redact_credentials_and_replay_original_obser
         assignment_id,
         reason: "Needs continuation.".into(),
         report: Some(report),
+        acknowledge_lost: false,
     };
     let execute = |fixture: &mut Fixture, request| {
         execute_request(
@@ -474,6 +635,26 @@ fn recovery_requires_capability_and_current_caller_even_for_replay() {
         generation,
     };
     let caller = AuthenticatedCaller::Agent(scope);
+    let denied = execute_request(
+        &mut fixture.store,
+        &mut fixture.sessions,
+        &mut fixture.workspaces,
+        RuntimePaths {
+            run_state_directory: &fixture.run,
+            socket_path: &fixture.socket,
+        },
+        run_id,
+        &caller,
+        RpcRequest::TaskRecover {
+            operation_id: OperationId::generate(),
+            assignment_id: workspace.assignment_id,
+            reason: "Attempt operator-only retirement.".into(),
+            report: None,
+            acknowledge_lost: true,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(denied.code, RpcFailureCode::PermissionDenied);
     exit(&mut fixture);
     let operation = OperationId::generate();
     let secret = format!("cot1_{}", "a".repeat(64));
@@ -572,6 +753,7 @@ fn large_recovery_handoffs_keep_prime_bounded_and_full_details_retrievable() {
             assignment_id: workspace.assignment_id,
             reason: "Large preserved artifacts.".into(),
             report: Some(report.clone()),
+            acknowledge_lost: false,
         },
     )
     .unwrap();
