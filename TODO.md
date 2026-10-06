@@ -562,6 +562,13 @@ the exits to a particular limit; current defaults are not the run snapshot.
   Bind reusable evidence to the exact source and relevant environment; edits,
   recovery onto a new base, or integration still require appropriate checks.
   Do not solve this by widening worker permissions or skipping required tests.
+  The October 6 Metewand run `cr-01M48CRWHZ7XCA5PBF292AWRE7` reproduced the
+  serial handoff: workers implemented in isolated worktrees, while the lead
+  handled Git commits and full target validation. The integrated target passed
+  Cargo formatting, Clippy, and tests, but `devenv test` was blocked by a Nix
+  fetcher-lock permission error under the lead's selected policy. Distinguish
+  that environment block from a test failure and from Git write authority;
+  record handoff wait time before attributing the delay to either one.
 - [ ] **Medium: Show useful progress separately from coordination activity.**
   The lead inbox reached sequence 161, but engine and cache implementation had
   not started. Expose elapsed time and recorded waits for review, validation,
@@ -571,6 +578,10 @@ the exits to a particular limit; current defaults are not the run snapshot.
   Test that messages, polls, and repeated reviews cannot appear as completed
   implementation or release dependencies. Preserve agent judgment about
   scope and scheduling; do not derive semantic progress from token counts.
+  In the October 6 Metewand run, operator `status --json` showed four closed,
+  one in-progress, and two open tasks while the in-progress worker was `lost`
+  and dependent review could not start. Show that lifecycle blocker alongside
+  the counts, with a link to the recovery diagnostic.
 - [ ] **Medium: Audit delayed notices during a long active foreground turn.**
   Many notices with distinct delivery IDs arrived during this run. After
   closeout, receipt of `co-01M36Q89NJ8RRSK4XNNHM8279Y` succeeded and the next
@@ -582,6 +593,31 @@ the exits to a particular limit; current defaults are not the run snapshot.
   turns that also read updates through tools, user status/scope changes, and
   final closeout. Keep real-provider coverage opt-in; preserve coalescing,
   idempotent receipt, separate inbox acknowledgement, and user stop instructions.
+
+### Metewand lost-worker recovery follow-up
+
+Observed October 6, 2026 in run `cr-01M48CRWHZ7XCA5PBF292AWRE7`:
+worker assignment `ca-01M48FVDTZ3N5PGHWR5ZVDPX8B` retained dirty and
+untracked files after sandbox commands failed with `No space left on device`.
+Its Codex session `cs-01M48FVDTZPKX9EHYFM3NF5S8Q` became `lost`, and its
+provider transcript has an incomplete final frame. `coterie doctor` reported
+unknown process ownership; `task recover` refused the assignment because no
+provider process exit was observed. The active task and dependent review remain
+blocked. The running Coterie executable was version 0.2.0, and `doctor`
+reported Codex 0.157.0. The sandbox failure preceded the lost session, but
+the available records do not establish why the process observation was lost.
+
+- [ ] **High: Resolve lost worker sessions without weakening recovery safety.**
+  Inspect the provider and supervisor events for this run and determine whether
+  the worker process remained live or exited without an observation. Define an
+  operator-supported path in `DESIGN.md` for an unfinished assignment whose
+  exit evidence cannot be recovered, or an actionable diagnostic when safe
+  continuation is impossible. Preserve the source worktree and index, reject
+  unverified process ownership, fence old credentials and generations, and
+  never infer an exit from process absence alone. Test sandbox launch failure,
+  incomplete transcripts, live and absent lost processes, supervisor restart,
+  dirty worktrees, repeated recovery attempts, and continuation through
+  validation and accepted task closure. Keep real-provider coverage opt-in.
 
 ### M7 gate
 
