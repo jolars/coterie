@@ -92,8 +92,10 @@ preserved recovery source. The operator test process reviews and commits only
 the requested file using `git2`, replies through a durable message, and waits
 for the actual worker to submit. It then integrates, validates, and closes the
 task. The helper writes its observation to a test-owned temporary result file
-after all assertions pass, so verification also works when the provider omits
-shell commands run through its code tool from JSONL output. Byte comparisons
+after all assertions pass, so verification does not depend on a
+`command_execution` item for the helper. The
+[command-event investigation](codex-command-events.md) records the earlier
+omission report and later probes that did not reproduce it. Byte comparisons
 check the protected files and preserved index separately from worker reports.
 
 The worker profile is `workspace-write`, `network=deny`, and `approvals=never`.

@@ -72,8 +72,8 @@ fn commit_policy_child() {
         "stage_error": stage.err().map(|error| error.to_string()),
         "commit_returned_oid": commit.as_ref().ok().map(ToString::to_string),
         "commit_error": commit.err().map(|error| error.to_string())});
-    // Codex exec does not emit command_execution items for shell calls inside
-    // its code tool. Retain the probe's own result before reporting completion.
+    // A provider command item may be absent, so retain the probe's own result
+    // before reporting completion.
     if let Some(path) = manifest["observation"].as_str() {
         fs::write(path, observation.to_string()).unwrap();
     }
