@@ -16,6 +16,47 @@ pub(crate) struct ProgressPage {
     pub(crate) next_cursor: String,
     pub(crate) has_more: bool,
     pub(crate) timed_out: bool,
+    /// Current background jobs, computed from the saved run policy.
+    #[schemars(length(max = 100))]
+    pub(crate) deadlines: Vec<JobDeadline>,
+    pub(crate) omitted_deadlines: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct JobDeadline {
+    pub(crate) session_id: SessionId,
+    pub(crate) agent_id: AgentId,
+    pub(crate) generation: i64,
+    pub(crate) state: LifecycleState,
+    pub(crate) deadline_at: i64,
+    pub(crate) remaining_seconds: i64,
+    pub(crate) warning: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct ObservedExit {
+    pub(crate) code: Option<i32>,
+    pub(crate) reason: ObservedExitReason,
+}
+
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ObservedExitReason {
+    Process,
+    Interrupted,
+    Terminated,
+}
+
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProgressControlReason {
+    Shutdown,
+    StartupTimeout,
+    ExecutionTimeout,
 }
 
 /// The durable order is retained even when intervening events are excluded.
@@ -57,6 +98,19 @@ pub(crate) enum ProgressState {
         agent_id: AgentId,
         generation: i64,
         state: LifecycleState,
+        exit: Option<ObservedExit>,
+    },
+    SessionControl {
+        session_id: SessionId,
+        agent_id: AgentId,
+        generation: i64,
+        reason: ProgressControlReason,
+    },
+    JobDeadlineWarning {
+        session_id: SessionId,
+        agent_id: AgentId,
+        generation: i64,
+        deadline_at: i64,
     },
 }
 

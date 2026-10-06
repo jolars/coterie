@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{AgentId, MessageId, OperationId, RunId};
-use crate::protocol::progress::{ProgressChange, ProgressPage};
+use crate::protocol::progress::{JobDeadline, ProgressChange, ProgressPage};
 use crate::protocol::{
     MessageSummary, RpcFailureCode, RpcRequest, RpcResponse,
 };
@@ -60,6 +60,8 @@ pub(super) struct Poll {
 pub(super) struct PollResult {
     pub cursor: PollCursor,
     pub changes: Vec<ProgressChange>,
+    pub deadlines: Vec<JobDeadline>,
+    pub omitted_deadlines: usize,
     pub messages: Vec<MessageSummary>,
     pub has_more: bool,
     pub timed_out: bool,
@@ -211,6 +213,8 @@ impl<T: Transport> Client<T> {
             ));
         }
         let mut changes = Vec::new();
+        let mut deadlines = Vec::new();
+        let mut omitted_deadlines = 0;
         let mut has_more = false;
         let mut timed_out = false;
         if arguments.include_progress.unwrap_or(true) {
@@ -236,6 +240,8 @@ impl<T: Transport> Client<T> {
                     next_cursor,
                     has_more: more,
                     timed_out: timeout,
+                    deadlines: current_deadlines,
+                    omitted_deadlines: current_omitted_deadlines,
                 } = page;
                 if observed_run != run_id
                     || (more && cursor.progress.as_ref() == Some(&next_cursor))
@@ -244,6 +250,8 @@ impl<T: Transport> Client<T> {
                     return Err(SupervisorError::InvalidProof);
                 }
                 changes.extend(next);
+                deadlines = current_deadlines;
+                omitted_deadlines = current_omitted_deadlines;
                 cursor.progress = Some(next_cursor);
                 has_more = more;
                 timed_out |= timeout;
@@ -277,6 +285,8 @@ impl<T: Transport> Client<T> {
         Ok(PollResult {
             cursor,
             changes,
+            deadlines,
+            omitted_deadlines,
             messages,
             has_more,
             timed_out,

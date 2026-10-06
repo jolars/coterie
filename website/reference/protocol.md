@@ -34,6 +34,13 @@ An integration retry keeps its original plan. If the target changed independentl
 
 `progress`, `inbox`, `events`, and `logs` return cursors. Pass each command's returned cursor unchanged for the next page; cursor ownership and meaning differ between commands. `task show` and `assignment show` return UTF-8 text pages for a JSON document. Concatenate `data.text` and retain the returned `revision` while paging. A revision conflict means the document changed; start again at offset zero.
 
+`progress` also reports current background-job deadlines and remaining seconds
+from the saved run policy. A warning appears shortly before a job reaches its
+limit. Complete pending review and commit handoff while the worker can still
+submit. The progress stream records timeout-control reasons and observed exit
+codes separately from task submission. Missing exit evidence remains unknown;
+an exit never accepts a task.
+
 Read-only polling never acknowledges inbox messages. An authenticated agent uses `inbox ack` for messages it has handled. Provider output, task submission, and accepted task closure remain distinct observations.
 
 ## Exit codes

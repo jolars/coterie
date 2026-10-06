@@ -39,6 +39,44 @@
       "type": "integer",
       "const": 1
     },
+    "JobDeadline": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "$ref": "#/$defs/AgentId"
+        },
+        "deadline_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "generation": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "remaining_seconds": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "state": {
+          "$ref": "#/$defs/LifecycleState"
+        },
+        "warning": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "session_id",
+        "agent_id",
+        "generation",
+        "state",
+        "deadline_at",
+        "remaining_seconds",
+        "warning"
+      ]
+    },
     "LifecycleState": {
       "description": "The process-level state of one provider session.",
       "type": "string",
@@ -49,6 +87,33 @@
         "lost",
         "unknown",
         "quarantined"
+      ]
+    },
+    "ObservedExit": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "reason": {
+          "$ref": "#/$defs/ObservedExitReason"
+        }
+      },
+      "required": [
+        "code",
+        "reason"
+      ]
+    },
+    "ObservedExitReason": {
+      "type": "string",
+      "enum": [
+        "process",
+        "interrupted",
+        "terminated"
       ]
     },
     "ProgressChange": {
@@ -173,6 +238,16 @@
             "agent_id": {
               "$ref": "#/$defs/AgentId"
             },
+            "exit": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ObservedExit"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "generation": {
               "type": "integer",
               "format": "int64"
@@ -193,12 +268,80 @@
             "session_id",
             "agent_id",
             "generation",
-            "state"
+            "state",
+            "exit"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "$ref": "#/$defs/AgentId"
+            },
+            "generation": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "session_control"
+            },
+            "reason": {
+              "$ref": "#/$defs/ProgressControlReason"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "agent_id",
+            "generation",
+            "reason"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agent_id": {
+              "$ref": "#/$defs/AgentId"
+            },
+            "deadline_at": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "generation": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "kind": {
+              "type": "string",
+              "const": "job_deadline_warning"
+            },
+            "session_id": {
+              "$ref": "#/$defs/SessionId"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "agent_id",
+            "generation",
+            "deadline_at"
           ]
         }
       ],
       "required": [
         "sequence"
+      ]
+    },
+    "ProgressControlReason": {
+      "type": "string",
+      "enum": [
+        "shutdown",
+        "startup_timeout",
+        "execution_timeout"
       ]
     },
     "ProgressPage": {
@@ -212,11 +355,24 @@
           },
           "maxItems": 100
         },
+        "deadlines": {
+          "description": "Current background jobs, computed from the saved run policy.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/JobDeadline"
+          },
+          "maxItems": 100
+        },
         "has_more": {
           "type": "boolean"
         },
         "next_cursor": {
           "type": "string"
+        },
+        "omitted_deadlines": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
         },
         "run_id": {
           "$ref": "#/$defs/RunId"
@@ -230,7 +386,9 @@
         "changes",
         "next_cursor",
         "has_more",
-        "timed_out"
+        "timed_out",
+        "deadlines",
+        "omitted_deadlines"
       ]
     },
     "ProjectId": {

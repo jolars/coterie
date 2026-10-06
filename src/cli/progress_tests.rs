@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::progress::{
-    AssignmentState, ProgressChange, ProgressPage, ProgressState,
+    AssignmentState, JobDeadline, ProgressChange, ProgressPage, ProgressState,
 };
 use crate::providers::LifecycleState;
 use crate::tasks::TaskStatus;
@@ -39,6 +39,7 @@ fn example() -> ProgressPage {
                     agent_id,
                     generation: 1,
                     state: LifecycleState::Exited,
+                    exit: None,
                 },
             },
             ProgressChange {
@@ -53,6 +54,8 @@ fn example() -> ProgressPage {
         next_cursor: format!("p1:{run_id}:operator:46"),
         has_more: false,
         timed_out: false,
+        deadlines: vec![],
+        omitted_deadlines: 0,
     }
 }
 
@@ -143,6 +146,18 @@ fn progress_maximum_page_fits_the_documented_byte_budget() {
         },
     };
     page.changes = vec![longest; 100];
+    page.deadlines = vec![
+        JobDeadline {
+            session_id: "cs-01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            agent_id: "cg-01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+            generation: i64::MAX,
+            state: LifecycleState::Running,
+            deadline_at: i64::MAX,
+            remaining_seconds: i64::MAX,
+            warning: true,
+        };
+        100
+    ];
     let mut stdout = Vec::new();
     render_json_success(&mut stdout, &mut Vec::new(), &page).unwrap();
     assert!(stdout.len() < 64 * 1024);

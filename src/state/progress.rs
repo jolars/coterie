@@ -1,7 +1,9 @@
 //! Bounded projections of durable lifecycle events for progress inspection.
 
 use super::{Repositories, RunId, StoreError, params};
-use crate::protocol::progress::{ProgressChange, ProgressState};
+use crate::auth::SessionScope;
+use crate::protocol::progress::{JobDeadline, ProgressChange, ProgressState};
+use crate::state::SessionProcessOwner;
 
 pub(crate) struct ProgressScan {
     pub(crate) changes: Vec<ProgressChange>,
@@ -10,6 +12,43 @@ pub(crate) struct ProgressScan {
 }
 
 impl Repositories<'_, '_> {
+    pub(crate) fn job_deadlines(
+        &self,
+        run_id: RunId,
+        now_seconds: i64,
+    ) -> Result<Vec<JobDeadline>, StoreError> {
+        let timeout =
+            self.configuration(run_id)?.supervision.job_timeout_seconds;
+        let warning_window = super::supervision::job_warning_window(timeout);
+        let mut deadlines = Vec::new();
+        for session in self.sessions(run_id)? {
+            if session.process_owner != SessionProcessOwner::Supervisor
+                || session.state.is_terminal()
+                || !self.session_scope_is_current(SessionScope {
+                    run_id,
+                    agent_id: session.agent_id,
+                    session_id: session.id,
+                    generation: session.generation,
+                })?
+            {
+                continue;
+            }
+            let deadline_at = session.created_at.saturating_add(timeout);
+            let remaining_seconds =
+                deadline_at.saturating_sub(now_seconds).max(0);
+            deadlines.push(JobDeadline {
+                session_id: session.id,
+                agent_id: session.agent_id,
+                generation: session.generation,
+                state: session.state,
+                deadline_at,
+                remaining_seconds,
+                warning: remaining_seconds <= warning_window,
+            });
+        }
+        Ok(deadlines)
+    }
+
     pub(crate) fn progress_after(
         &self,
         run_id: RunId,
@@ -51,16 +90,26 @@ impl Repositories<'_, '_> {
                 WHEN 'session.started' THEN json_object('kind', 'session',
                     'session_id', CAST(substr(CAST(subject AS BLOB), 1, 30) AS TEXT), 'agent_id', CAST(substr(CAST(agent_id AS BLOB), 1, 30) AS TEXT),
                     'generation', CASE WHEN json_type(payload_json, '$.data.generation') = 'integer' AND typeof(json_extract(payload_json, '$.data.generation')) = 'integer' THEN json_extract(payload_json, '$.data.generation') ELSE NULL END,
-                    'state', CAST(substr(CAST(json_extract(payload_json, '$.data.state') AS BLOB), 1, 12) AS TEXT))
+                    'state', CAST(substr(CAST(json_extract(payload_json, '$.data.state') AS BLOB), 1, 12) AS TEXT), 'exit', NULL)
                 WHEN 'session.lifecycle_changed' THEN json_object('kind', 'session',
                     'session_id', CAST(substr(CAST(subject AS BLOB), 1, 30) AS TEXT), 'agent_id', CAST(substr(CAST(agent_id AS BLOB), 1, 30) AS TEXT),
                     'generation', CASE WHEN json_type(payload_json, '$.data.generation') = 'integer' AND typeof(json_extract(payload_json, '$.data.generation')) = 'integer' THEN json_extract(payload_json, '$.data.generation') ELSE NULL END,
-                    'state', CAST(substr(CAST(json_extract(payload_json, '$.data.state') AS BLOB), 1, 12) AS TEXT))
+                    'state', CAST(substr(CAST(json_extract(payload_json, '$.data.state') AS BLOB), 1, 12) AS TEXT),
+                    'exit', CASE WHEN json_type(payload_json, '$.data.exit') = 'object' THEN json_extract(payload_json, '$.data.exit') ELSE NULL END)
+                WHEN 'session.control_changed' THEN CASE WHEN json_extract(payload_json, '$.data.phase') = 'interrupt' THEN json_object('kind', 'session_control',
+                    'session_id', CAST(substr(CAST(subject AS BLOB), 1, 30) AS TEXT), 'agent_id', CAST(substr(CAST(agent_id AS BLOB), 1, 30) AS TEXT),
+                    'generation', CASE WHEN json_type(payload_json, '$.data.generation') = 'integer' AND typeof(json_extract(payload_json, '$.data.generation')) = 'integer' THEN json_extract(payload_json, '$.data.generation') ELSE NULL END,
+                    'reason', CAST(substr(CAST(json_extract(payload_json, '$.data.reason') AS BLOB), 1, 20) AS TEXT)) ELSE NULL END
+                WHEN 'session.deadline_approaching' THEN json_object('kind', 'job_deadline_warning',
+                    'session_id', CAST(substr(CAST(subject AS BLOB), 1, 30) AS TEXT), 'agent_id', CAST(substr(CAST(agent_id AS BLOB), 1, 30) AS TEXT),
+                    'generation', CASE WHEN json_type(payload_json, '$.data.generation') = 'integer' AND typeof(json_extract(payload_json, '$.data.generation')) = 'integer' THEN json_extract(payload_json, '$.data.generation') ELSE NULL END,
+                    'deadline_at', CASE WHEN json_type(payload_json, '$.data.deadline_at') = 'integer' THEN json_extract(payload_json, '$.data.deadline_at') ELSE NULL END)
                 ELSE NULL END,
                 CASE WHEN event_type IN ('task.created', 'task.lifecycle_changed',
                     'assignment.created', 'assignment.lifecycle_changed',
                     'assignment.session_associated', 'agent.created',
-                    'agent.lifecycle_changed', 'session.started', 'session.lifecycle_changed')
+                    'agent.lifecycle_changed', 'session.started', 'session.lifecycle_changed',
+                    'session.control_changed', 'session.deadline_approaching')
                     THEN CASE WHEN json_type(payload_json, '$.schema_version') = 'integer'
                         THEN json_extract(payload_json, '$.schema_version') ELSE NULL END
                     ELSE NULL END
@@ -100,7 +149,10 @@ impl Repositories<'_, '_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::progress::{AssignmentState, ProgressState};
+    use crate::protocol::progress::{
+        AssignmentState, ObservedExit, ObservedExitReason,
+        ProgressControlReason, ProgressState,
+    };
     use crate::state::*;
 
     fn fixture() -> (Store, RunId, ProjectId, AgentId, TaskId) {
@@ -153,6 +205,62 @@ mod tests {
             })
             .unwrap();
         (store, run, project, agent, task)
+    }
+
+    #[test]
+    fn progress_exposes_normalized_timeout_and_exit_without_provider_text() {
+        let (mut store, run, _, agent, _) = fixture();
+        let session = SessionId::generate();
+        store.transaction(|r| {
+            for (kind, data) in [
+                (EventKind::SessionControlChanged, json!({"generation": 1, "phase": "interrupt", "reason": "execution_timeout", "private": "secret"})),
+                (EventKind::SessionLifecycleChanged, json!({"generation": 1, "state": "exited", "exit": {"reason": "process", "code": 1}, "provider_output": "secret"})),
+                (EventKind::SessionLifecycleChanged, json!({"generation": 1, "state": "lost", "exit": null})),
+            ] {
+                r.append_event(&NewEvent {
+                    run_id: run, kind, actor: "provider".into(),
+                    subject: session.to_string(), project_id: None,
+                    agent_id: Some(agent), task_id: None, operation_id: None,
+                    correlation_id: None, causation_id: None, data,
+                    summary: "secret".into(), created_at: 2,
+                })?;
+            }
+            Ok(())
+        }).unwrap();
+        let page = store
+            .transaction(|r| r.progress_after(run, 0, 100))
+            .unwrap();
+        assert!(page.changes.iter().any(|change| change.state
+            == ProgressState::SessionControl {
+                session_id: session,
+                agent_id: agent,
+                generation: 1,
+                reason: ProgressControlReason::ExecutionTimeout,
+            }));
+        assert!(page.changes.iter().any(|change| change.state
+            == ProgressState::Session {
+                session_id: session,
+                agent_id: agent,
+                generation: 1,
+                state: LifecycleState::Exited,
+                exit: Some(ObservedExit {
+                    code: Some(1),
+                    reason: ObservedExitReason::Process
+                }),
+            }));
+        assert!(page.changes.iter().any(|change| change.state
+            == ProgressState::Session {
+                session_id: session,
+                agent_id: agent,
+                generation: 1,
+                state: LifecycleState::Lost,
+                exit: None,
+            }));
+        assert!(
+            !serde_json::to_string(&page.changes)
+                .unwrap()
+                .contains("secret")
+        );
     }
 
     #[test]

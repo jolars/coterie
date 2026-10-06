@@ -1,4 +1,5 @@
 use super::*;
+use crate::id::SessionId;
 use std::collections::VecDeque;
 
 struct Script {
@@ -34,6 +35,15 @@ async fn poll_drains_empty_pages_and_keeps_inbox_cursor_independent() {
         progress: Some("before".into()),
         inbox: 7,
     };
+    let deadline = JobDeadline {
+        session_id: SessionId::generate(),
+        agent_id,
+        generation: 0,
+        state: crate::providers::LifecycleState::Running,
+        deadline_at: 100,
+        remaining_seconds: 30,
+        warning: true,
+    };
     let mut client = Client::new(Script {
         expected: VecDeque::from([
             (RpcRequest::Whoami, Ok(identity(run_id, agent_id))),
@@ -50,6 +60,8 @@ async fn poll_drains_empty_pages_and_keeps_inbox_cursor_independent() {
                         next_cursor: "filtered".into(),
                         has_more: true,
                         timed_out: false,
+                        deadlines: vec![],
+                        omitted_deadlines: 0,
                     },
                 }),
             ),
@@ -66,6 +78,8 @@ async fn poll_drains_empty_pages_and_keeps_inbox_cursor_independent() {
                         next_cursor: "caught-up".into(),
                         has_more: false,
                         timed_out: false,
+                        deadlines: vec![deadline.clone()],
+                        omitted_deadlines: 0,
                     },
                 }),
             ),
@@ -88,6 +102,7 @@ async fn poll_drains_empty_pages_and_keeps_inbox_cursor_independent() {
         .unwrap();
     assert_eq!(page.cursor.progress.as_deref(), Some("caught-up"));
     assert_eq!(page.cursor.inbox, 7);
+    assert_eq!(page.deadlines, vec![deadline]);
     assert!(!page.has_more);
     assert!(client.transport.expected.is_empty());
 }
@@ -222,6 +237,8 @@ async fn bounded_drain_returns_continuation_and_always_inspects_inbox() {
                     next_cursor: (index + 1).to_string(),
                     has_more: true,
                     timed_out: false,
+                    deadlines: vec![],
+                    omitted_deadlines: 0,
                 },
             }),
         ));
@@ -279,6 +296,8 @@ async fn timeout_still_reads_messages_and_failed_poll_does_not_consume_a_checkpo
                         next_cursor: "later".into(),
                         has_more: false,
                         timed_out: true,
+                        deadlines: vec![],
+                        omitted_deadlines: 0,
                     },
                 }),
             ),

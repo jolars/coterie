@@ -45,6 +45,11 @@ pub(crate) enum ControlReason {
     ExecutionTimeout,
 }
 
+/// Give short jobs an early warning while capping long-job notice at five minutes.
+pub(crate) fn job_warning_window(timeout_seconds: i64) -> i64 {
+    (timeout_seconds / 10).clamp(1, 300)
+}
+
 fn encoded<T: Serialize>(value: T) -> String {
     serde_json::to_value(value)
         .expect("a supervision enum is serializable")
@@ -97,6 +102,35 @@ pub(crate) enum LaunchAdmission {
 }
 
 impl Repositories<'_, '_> {
+    pub(crate) fn warn_job_deadline(
+        &self,
+        scope: SessionScope,
+        deadline_at: i64,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        if !self.session_scope_is_current(scope)? {
+            return Ok(());
+        }
+        let warned: bool = self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE run_id = ?1 AND event_type = 'session.deadline_approaching' AND subject = ?2 AND json_extract(payload_json, '$.data.generation') = ?3)",
+            params![scope.run_id, scope.session_id.to_string(), scope.generation],
+            |row| row.get(0),
+        )?;
+        if warned {
+            return Ok(());
+        }
+        self.supervision_event(
+            scope.run_id,
+            EventKind::SessionDeadlineApproaching,
+            scope.session_id.to_string(),
+            Some(scope.agent_id),
+            None,
+            json!({"generation": scope.generation, "deadline_at": deadline_at}),
+            "Background job deadline is approaching; complete pending review and commit handoff before the worker exits.",
+            now_ms,
+        )
+    }
+
     /// Returns an event cursor only when inactivity is positively established.
     pub(crate) fn idle_shutdown_cursor(
         &self,

@@ -22,6 +22,13 @@ pub(super) fn poll(
     let scan = store
         .transaction(|r| r.progress_after(run_id, after, limit))
         .map_err(rpc_state_failure)?;
+    let now = rpc_timestamp()?;
+    let mut deadlines = store
+        .transaction(|r| r.job_deadlines(run_id, now))
+        .map_err(rpc_state_failure)?;
+    deadlines.sort_by_key(|item| (item.remaining_seconds, item.session_id));
+    let omitted_deadlines = deadlines.len().saturating_sub(100);
+    deadlines.truncate(100);
     if after > scan.high_watermark {
         return Err(invalid_argument(
             "progress cursor is beyond the durable event sequence",
@@ -34,6 +41,8 @@ pub(super) fn poll(
             next_cursor: format!("{prefix}{}", scan.next_sequence),
             has_more: scan.next_sequence < scan.high_watermark,
             timed_out: false,
+            deadlines,
+            omitted_deadlines,
         },
     })
 }

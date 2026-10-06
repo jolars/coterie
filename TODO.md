@@ -535,7 +535,7 @@ policy was `workspace-write`, network denied, approvals never. Recover the
 incident provider version and saved supervision policy before attributing the
 exits to a particular limit; current defaults are not the run snapshot.
 
-- [ ] **High: Diagnose worker exits and expose approaching job deadlines.** Two
+- [x] **High: Diagnose worker exits and expose approaching job deadlines.** Two
   workers exited without `finish`: identity assignment
   `ca-01M36FNAC4A27GGYTQXC4WYPF2` left 12 dirty paths, while startup
   assignment `ca-01M36JGZR6AZE6AY7DR21R0GJV` had already verified reviewed
@@ -554,6 +554,18 @@ exits to a particular limit; current defaults are not the run snapshot.
   handoffs, timeout termination, and unknown exits. Any deadline extension
   or changed accounting needs an explicit design and authority contract;
   neither silence nor provider exit means task completion.
+  [The incident diagnosis](docs/2026-09-23-worker-timeouts.md) confirms that
+  both saved sessions received `execution_timeout` control exactly 3,600 seconds
+  after launch and then produced observed process exits with code 1. The saved
+  run policy matches that limit. Matching Codex session metadata identifies
+  version 0.154.0 for both workers. Authorized `progress` and MCP `poll` now
+  expose current background deadlines and remaining time, normalized timeout
+  and exit reasons, and one durable warning per session generation before the
+  limit. The warning does not
+  extend execution or accept a task. Tests cover active work, an unhandled
+  commit request, timeout escalation and exit, unknown exit evidence, replay,
+  and bounded output. `task check` passed with 586 tests and 28 skips; real
+  provider tests remain opt-in and were not run.
 - [x] **High: Reduce recovery work after an acknowledged commit.** The startup
   worker sent its full commit and cleanliness verification in
   `cm-01M36NXRC6JAMKTZFQX1J9HHVD`, then exited before submission. The

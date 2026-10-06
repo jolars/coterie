@@ -1073,6 +1073,25 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                 };
                 let elapsed =
                     (now_ms / 1000).saturating_sub(session.created_at);
+                if shutdown.is_none()
+                    && session.process_owner == SessionProcessOwner::Supervisor
+                    && session.state == LifecycleState::Running
+                    && elapsed
+                        >= policy.job_timeout_seconds.saturating_sub(
+                            crate::state::supervision::job_warning_window(
+                                policy.job_timeout_seconds,
+                            ),
+                        )
+                    && elapsed < policy.job_timeout_seconds
+                {
+                    repositories.warn_job_deadline(
+                        scope,
+                        session
+                            .created_at
+                            .saturating_add(policy.job_timeout_seconds),
+                        now_ms,
+                    )?;
+                }
                 let reason = if shutdown.is_some() {
                     Some(ControlReason::Shutdown)
                 } else if (session.state == LifecycleState::Starting
@@ -1540,11 +1559,81 @@ mod tests {
         supervisor
             .advance(&mut store, launch.scope.session_id, 11)
             .unwrap();
+        let coordinator = AgentId::generate();
+        store
+            .transaction(|repositories| {
+                repositories.insert_agent(&crate::state::AgentRecord {
+                    id: coordinator,
+                    run_id: launch.scope.run_id,
+                    role: "coordinator".into(),
+                    generation: 0,
+                    state: LifecycleState::Running,
+                    created_at: 10,
+                })?;
+                repositories.insert_message(&crate::state::MessageRecord {
+                    id: crate::id::MessageId::generate(),
+                    run_id: launch.scope.run_id,
+                    sender_agent_id: Some(launch.scope.agent_id),
+                    recipient_agent_id: coordinator,
+                    sequence: 1,
+                    body: "Commit request is awaiting review.".into(),
+                    created_at: 11,
+                    acknowledged_at: None,
+                })
+            })
+            .unwrap();
         supervisor
             .drive_controls(&mut store, launch.scope.run_id, 12_999)
             .unwrap();
         assert!(supervisor.provider.controls.is_empty());
-        for now in [13_000, 13_019, 13_020, 13_100] {
+        let before_timeout = store
+            .transaction(|repositories| {
+                Ok((
+                    repositories.job_deadlines(launch.scope.run_id, 12)?,
+                    repositories.progress_after(launch.scope.run_id, 0, 100)?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(before_timeout.0.len(), 1);
+        assert_eq!(before_timeout.0[0].deadline_at, 13);
+        assert_eq!(before_timeout.0[0].remaining_seconds, 1);
+        assert!(before_timeout.0[0].warning);
+        assert_eq!(
+            before_timeout
+                .1
+                .changes
+                .iter()
+                .filter(|change| matches!(
+            change.state,
+            crate::protocol::progress::ProgressState::JobDeadlineWarning { .. }
+        ))
+                .count(),
+            1
+        );
+        let warning = store
+            .transaction(|repositories| {
+                Ok(repositories
+                    .events_after(launch.scope.run_id, 0, 100)?
+                    .into_iter()
+                    .find(|event| {
+                        event.event_type == "session.deadline_approaching"
+                    })
+                    .unwrap())
+            })
+            .unwrap();
+        assert_eq!(warning.created_at, 12);
+        assert_eq!(
+            store
+                .transaction(|repositories| repositories.messages_after(
+                    launch.scope.run_id,
+                    coordinator,
+                    0
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        for now in [13_000, 13_019, 13_020, 13_100, 13_201] {
             supervisor
                 .drive_controls(&mut store, launch.scope.run_id, now)
                 .unwrap();
@@ -1563,6 +1652,42 @@ mod tests {
             })
             .unwrap();
         assert_eq!(controls[0].reason, ControlReason::ExecutionTimeout);
+        assert_eq!(
+            controls[0].phase,
+            crate::state::supervision::ControlPhase::Completed
+        );
+        assert_eq!(
+            store
+                .transaction(|repositories| repositories
+                    .session(launch.scope.session_id))
+                .unwrap()
+                .unwrap()
+                .state,
+            LifecycleState::Exited
+        );
+        let after_timeout = store
+            .transaction(|repositories| {
+                repositories.progress_after(launch.scope.run_id, 0, 100)
+            })
+            .unwrap();
+        assert_eq!(
+            after_timeout
+                .changes
+                .iter()
+                .filter(|change| matches!(
+            change.state,
+            crate::protocol::progress::ProgressState::JobDeadlineWarning { .. }
+        ))
+                .count(),
+            1
+        );
+        assert!(after_timeout.changes.iter().any(|change| matches!(
+            change.state,
+            crate::protocol::progress::ProgressState::SessionControl {
+                reason: crate::protocol::progress::ProgressControlReason::ExecutionTimeout,
+                ..
+            }
+        )));
     }
 
     #[test]

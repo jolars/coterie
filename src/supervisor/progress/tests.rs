@@ -130,6 +130,56 @@ fn page(response: RpcResponse) -> ProgressPage {
 }
 
 #[test]
+fn authorized_coordinator_sees_background_deadline_from_saved_policy() {
+    let mut fixture =
+        Fixture::new(Store::open_in_memory().unwrap(), Path::new("/tmp"), true);
+    let worker = AgentId::generate();
+    let session_id = SessionId::generate();
+    let now = rpc_timestamp().unwrap();
+    let timeout = fixture
+        .store
+        .configuration(fixture.active.run_id)
+        .unwrap()
+        .supervision
+        .job_timeout_seconds;
+    fixture
+        .store
+        .transaction(|r| {
+            r.insert_agent(&AgentRecord {
+                id: worker,
+                run_id: fixture.active.run_id,
+                role: "builder".into(),
+                generation: 0,
+                state: LifecycleState::Running,
+                created_at: now,
+            })?;
+            r.insert_session(&SessionRecord {
+                id: session_id,
+                run_id: fixture.active.run_id,
+                agent_id: worker,
+                generation: 0,
+                provider: "fake".into(),
+                provider_session_id: Some("fake:1".into()),
+                reconciliation_state: ExternalResourceState::Observed,
+                state: LifecycleState::Running,
+                transcript_path: "transcript".into(),
+                created_at: now - timeout + 120,
+                ended_at: None,
+                reconciled_at: Some(now),
+                process_owner: SessionProcessOwner::Supervisor,
+            })?;
+            Ok(())
+        })
+        .unwrap();
+    let page = fixture.page(None, 100).unwrap();
+    assert_eq!(page.deadlines.len(), 1);
+    assert_eq!(page.deadlines[0].session_id, session_id);
+    assert_eq!(page.deadlines[0].state, LifecycleState::Running);
+    assert!((119..=120).contains(&page.deadlines[0].remaining_seconds));
+    assert!(page.deadlines[0].warning);
+}
+
+#[test]
 fn progress_authorizes_custom_roles_and_rejects_cursors_from_other_scopes() {
     let mut fixture =
         Fixture::new(Store::open_in_memory().unwrap(), Path::new("/tmp"), true);
@@ -297,6 +347,7 @@ fn progress_cursor_survives_session_renewal_but_requires_fresh_authentication()
             agent_id: agent.id,
             generation,
             state: LifecycleState::Starting,
+            exit: None,
         }));
     let replay = launch_foreground(
         &mut fixture.store,

@@ -1678,6 +1678,16 @@ control intent, and deadlines survive supervisor replacement; uncertain
 in-flight launches remain unknown. Trusted operator configuration owns these
 bounds; trusted global policy sets them when the run snapshot is created.
 
+An authenticated agent with `task:read` can inspect the deadline and remaining
+time of each active background session through the compact progress view. The
+supervisor records one durable warning per session generation shortly before
+the limit and makes the warning visible in that view. The warning prompts the
+coordinator to complete a pending review or commit handoff while the worker can
+still submit; it grants no extra time or authority. Progress also projects
+normalized process-control reasons and observed exit details without exposing
+raw provider output. Missing exit evidence remains unknown. Task acceptance
+still requires an explicit task transition.
+
 Shutdown proceeds in phases:
 
 1. Stop accepting new spawns.

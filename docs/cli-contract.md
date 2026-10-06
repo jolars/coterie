@@ -426,8 +426,8 @@ authenticated agent with `task:read` may use this view. It shares `prime`'s
 run-wide task and agent visibility, including the caller's own lifecycle, and
 does not depend on role names or provider live steering.
 
-The response contains `run_id`, `changes`, `next_cursor`, `has_more`, and
-`timed_out`. Each change contains a durable sequence and one of these `kind`
+The response contains `run_id`, `changes`, `next_cursor`, `has_more`,
+`timed_out`, `deadlines`, and `omitted_deadlines`. Each change contains a durable sequence and one of these `kind`
 values:
 
   | Kind                 | Fields                                               |
@@ -436,14 +436,36 @@ values:
   | `assignment`         | `assignment_id`, `task_id`, `agent_id`, `state`      |
   | `assignment_session` | `assignment_id`, `task_id`, `agent_id`, `session_id` |
   | `agent`              | `agent_id`, `generation`, `state`                    |
-  | `session`            | `session_id`, `agent_id`, `generation`, `state`      |
+  | `session`            | `session_id`, `agent_id`, `generation`, `state`, `exit` |
+  | `session_control`    | `session_id`, `agent_id`, `generation`, `reason`     |
+  | `job_deadline_warning` | `session_id`, `agent_id`, `generation`, `deadline_at` |
 
 These are historical changes, not a current-state snapshot. Apply them in
 sequence order. Task `submitted` and assignment `completed` describe a
 submission; agent or session `exited` describes provider lifecycle
 independently. Task acceptance is recorded by task `closed`. Task titles,
 descriptions, results, message bodies, paths, provider details, and raw event
-payloads are excluded. An example containing submission and exit records is
+payloads are excluded. `session.exit` is null when no normalized provider exit
+observation exists; otherwise it contains the observed process code, if known, and a
+normalized reason. `session_control` reports the initial process-control reason,
+including `execution_timeout`, without inferring a successful task outcome.
+
+`deadlines` is a current snapshot of active background jobs, computed from the
+saved run policy and session creation time. Each entry reports the Unix-second
+`deadline_at`, nonnegative `remaining_seconds`, lifecycle `state`, and `warning`.
+An `unknown` state does not assert process liveness. The supervisor
+also emits one durable `job_deadline_warning` event per session generation when
+the remaining time enters the last 10% of the job limit, capped at five minutes.
+The warning is available to authorized progress readers and can wake a
+foreground coordinator's automatic notification. When it arrives, finish the
+review and commit handoff promptly so the worker can call `finish` before the
+deadline. If the worker exits first, inspect the exit and retained work; use
+`task submit-retained` only when its exact-commit guards pass, or use `task
+recover` for an explicit continuation. The warning does not extend the limit.
+The view lists the 100 nearest deadlines; `omitted_deadlines` counts additional
+active background sessions. Their warnings remain in the durable progress
+stream.
+An example containing submission and exit records is
 [`examples/progress.json`](../examples/progress.json).
 
 Omitting `--after` starts at sequence zero. Save the opaque returned cursor and
@@ -1208,8 +1230,10 @@ agent-only tool adds no public CLI command or exit code; the [notification
 contract](codex-queue.md) describes recovery.
 
 The MCP client helpers reduce cursor and retry bookkeeping. `poll` returns
-`schema_version=1` and `data` containing `cursor`, `changes`, `messages`,
-`has_more`, and `timed_out`. Pass its cursor unchanged on the next call; it
+`schema_version=1` and `data` containing `cursor`, `changes`, `deadlines`,
+`omitted_deadlines`, `messages`, `has_more`, and `timed_out`. The deadlines are the latest current
+snapshot from its progress pages; they are empty when progress is disabled.
+Pass its cursor unchanged on the next call; it
 keeps progress and inbox positions separate and retains unhandled messages. It
 drains up to 16 progress pages or 100 changes, including empty pages with
 `has_more`. Repeat while more remain. `inbox_handled` accepts an operation ID

@@ -111,7 +111,7 @@ impl Repositories<'_, '_> {
             self.transaction.query_row(
             "SELECT COALESCE(MAX(sequence), ?3) FROM events WHERE run_id = ?1 AND sequence > ?3 AND actor <> ?2
                 AND (agent_id IS NULL OR agent_id <> ?2) AND event_type IN
-                ('task.lifecycle_changed', 'assignment.lifecycle_changed', 'session.lifecycle_changed', 'task.recovered')",
+                ('task.lifecycle_changed', 'assignment.lifecycle_changed', 'session.lifecycle_changed', 'session.deadline_approaching', 'session.control_changed', 'task.recovered')",
             params![scope.run_id, scope.agent_id, event_cursor], |row| row.get(0),
         )?
         } else {
