@@ -12,6 +12,9 @@ mod context_tests;
 mod resubmit_tests;
 
 #[cfg(test)]
+mod retained_tests;
+
+#[cfg(test)]
 mod recovery_tests;
 #[cfg(test)]
 mod run_recovery_tests;
@@ -195,6 +198,12 @@ pub(crate) enum TaskCommand {
     /// correction first. Both commits must be full lowercase commit IDs; the
     /// clean worktree tip must descend from the expected recorded result.
     Resubmit(TaskResubmitArguments),
+    /// Submit an independently reviewed retained commit after verified worker exit.
+    ///
+    /// Requires operator authority or task:submit-retained. Supply the exact full
+    /// lowercase commit ID and independent review evidence. Preserves the source
+    /// worktree and index. Integration, target validation, and closure remain required.
+    SubmitRetained(TaskSubmitRetainedArguments),
     /// Retire an exited agent's unfinished Git assignment and reopen its task.
     ///
     /// Requires operator authority or task:recover and a verified process exit.
@@ -332,6 +341,31 @@ pub(crate) struct TaskCloseArguments {
     /// Why acceptance requires an override; --summary records validation evidence.
     #[arg(long, requires = "operator_override")]
     pub(crate) reason: Option<String>,
+    #[command(flatten)]
+    pub(crate) mutation: MutationArguments,
+}
+
+/// Inputs for explicit submission without a replacement worker.
+#[derive(Debug, Args)]
+pub(crate) struct TaskSubmitRetainedArguments {
+    /// The still-active assignment of the exited worker.
+    #[arg(long)]
+    pub(crate) assignment: crate::id::AssignmentId,
+    /// The full lowercase commit ID independently reviewed for submission.
+    #[arg(long)]
+    pub(crate) result: String,
+    /// Work, validation commands and outcomes, and any blocked checks.
+    #[arg(long)]
+    pub(crate) summary: String,
+    /// Why the retained commit should be submitted on the worker's behalf.
+    #[arg(long)]
+    pub(crate) reason: String,
+    /// Independent review of this exact commit, not task acceptance.
+    #[arg(long)]
+    pub(crate) review: String,
+    /// The message, review artifact, or operator inspection supporting the review.
+    #[arg(long)]
+    pub(crate) review_source: String,
     #[command(flatten)]
     pub(crate) mutation: MutationArguments,
 }

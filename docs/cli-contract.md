@@ -638,6 +638,39 @@ The typed [response schema](../schemas/cli-resubmit-v1.schema.json) and
 [example](../examples/resubmit.json) are checked by the test suite. Regenerate
 them with `cargo test regenerate_resubmit_contract -- --ignored`.
 
+### `coterie task submit-retained`
+
+```console
+coterie task submit-retained --assignment <assignment-id> --result <full-oid> \
+  --summary 'Validation commands, outcomes, and blocked checks.' \
+  --reason 'Worker exited before finish.' \
+  --review 'Independent review of the exact commit.' --review-source 'Review artifact.'
+```
+
+Requires operator authority or `task:submit-retained`, available through
+`task:*`. The caller must independently review the exact retained commit.
+Coterie checks current assignment ownership, the recorded process exit and a
+fresh provider observation, revoked worker credentials, and a clean owned
+worktree at `--result`. Unknown or lost exits do not qualify. The command
+preserves source files and index and submits the original assignment without a
+continuation. Integration, target validation, and explicit acceptance remain
+required. Review and validation statements are attributed reports rather than
+mechanically verified checks. See [the handoff workflow](linked-worktree-commits.md).
+
+Missing or malformed inputs return `invalid_argument` (exit 2), insufficient
+capabilities return `permission_denied` (exit 6), and dirty work, changed commit
+IDs, unverified exits, or retired assignments return `conflict` (exit 5).
+A successful retry with the same operation ID and identical arguments replays
+the recorded response even after closure. Changed arguments conflict; stale
+credentials fail before replay. A rejected preflight records no submission.
+
+JSON data contains `assignment_id` and the submitted `task`, including
+`result.retained_submission` with the attributed reason and review. The
+[response schema](../schemas/cli-retained-v1.schema.json) and
+[example](../examples/retained.json) are generated from Rust types. Regenerate
+with `cargo test regenerate_retained_contract -- --ignored`. The
+[agent tool catalog](../schemas/mcp-tools-v1.json) contains the typed input.
+
 ### `coterie task recover`
 
 ```console

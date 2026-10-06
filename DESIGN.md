@@ -909,6 +909,48 @@ writable ownership of the preserved source. The continuation must inspect and
 port selected changes into its fresh workspace, validate there, submit, and
 obtain explicit integration and validated closure.
 
+### Submission of a retained commit
+
+An operator or a current agent with `task:submit-retained` may explicitly run
+`coterie task submit-retained --assignment ID --result FULL_OID --summary TEXT
+--reason TEXT --review TEXT --review-source TEXT` when a worker exits before
+submission. The caller independently reviews that exact commit and supplies the
+review account and its source, such as a durable message or review artifact.
+The summary records validation commands, outcomes, and any blocked checks.
+These are attributed reports, not checks executed or acceptance inferred by
+Coterie. Message delivery or acknowledgement alone never authorizes submission.
+The assignment's own agent cannot use this path.
+
+Admission requires the same active run, current assignment and claim, observed
+worker exit, revoked credentials, normalized exit event, fresh provider proof,
+and absence of pending resource operations as ordinary task recovery. Lost or
+unknown exits do not qualify. The Git backend verifies ownership and a clean
+index and worktree without writing either, and requires the full lowercase
+commit ID to equal the retained owned reference and HEAD. Dirty, hidden,
+unreadable, moved, or ambiguous work refuses submission. The caller must inspect
+new evidence rather than reuse a review of another commit. An unchanged base is
+permitted, as with ordinary `finish`, but still requires independent review.
+
+One transaction records the result commit, completes the original assignment,
+releases its claim, moves the task to `submitted`, and saves the actor, reason,
+review source, review account, original session generation, and commit identities
+in the task result and immutable lifecycle events. The operation result commits
+in that transaction. A commit recorded by an interrupted `finish` is admissible
+only if it matches the requested and freshly observed commit; a completed
+`finish` already submitted the task and refuses a new retained submission.
+No files, index, references, session history, or credentials change, and no new
+worker or workspace is needed. The operation never resurrects an old generation.
+
+Exact retries replay the saved submission even after integration or closure;
+changed requests conflict, and caller authentication precedes replay. A prior
+`task recover` fences this path permanently for its retired source. Repeated
+recovery continues through fresh assignments when retained submission cannot
+prove its prerequisites. Integration still checks the current target, review
+and target validation remain required, and only explicit accepted closure
+releases dependent tasks. No persistent schema change is needed: existing task
+results, operation results, and typed events retain the submission evidence.
+Internal RPC protocol 17 carries the new request and response.
+
 An incorrect unintegrated Git submission can be superseded explicitly with
 `coterie task resubmit --assignment ID --expected-result OLD --result NEW
 --summary TEXT --reason TEXT`. The operator or an agent with `task:resubmit`
@@ -1283,8 +1325,10 @@ only the intended changes, and commits in that assignment's worktree through
 their existing operator-approved Git access. They confirm the full commit ID in
 a durable reply. The worker checks HEAD and cleanliness and calls `finish`;
 submission, integration, validation, and closure retain their existing guards.
-If interrupted while waiting, use normal recovery into a fresh worktree; never
-commit into a recovered source on behalf of its continuation.
+If interrupted while waiting, an authorized caller may submit a clean reviewed
+commit through `task submit-retained` after verified exit. Otherwise use normal
+recovery into a fresh worktree; never commit into a recovered source on behalf
+of its continuation.
 
 Messages convey a request, not executable commands or new authority. There is no
 automatic commit, hook bypass, permission escalation, or Git-directory write

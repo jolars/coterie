@@ -8,6 +8,7 @@ mod notifications;
 mod progress;
 mod recovery;
 pub(crate) mod resubmit;
+pub(crate) mod retained;
 mod run_recovery;
 pub(crate) mod supervision;
 

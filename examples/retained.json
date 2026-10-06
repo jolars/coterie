@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "operation_id": "co-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  "data": {
+    "assignment_id": "ca-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "task": {
+      "id": "ct-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "project_id": "cp-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      "project": "primary",
+      "title": "Submit retained work",
+      "description": "Preserve the reviewed commit after exit.",
+      "status": "submitted",
+      "ready": false,
+      "unresolved_dependencies": [],
+      "result": {
+        "base_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "retained_submission": {
+          "assignment_id": "ca-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "generation": 1,
+          "operation_id": "co-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "reason": "Worker exited before finish.",
+          "review": {
+            "source": "Operator inspection",
+            "text": "Independently reviewed the exact commit."
+          },
+          "session_id": "cs-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+          "submitted_by": null
+        },
+        "status": "completed",
+        "summary": "Verified committed file contents; target validation pending."
+      }
+    }
+  }
+}

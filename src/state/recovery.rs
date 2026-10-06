@@ -11,6 +11,21 @@ impl Repositories<'_, '_> {
         assignment_id: AssignmentId,
         acknowledge_lost: bool,
     ) -> Result<(AssignmentRecord, WorkspaceRecord), StoreError> {
+        self.interrupted_assignment_preflight(
+            run_id,
+            assignment_id,
+            acknowledge_lost,
+            None,
+        )
+    }
+
+    pub(crate) fn interrupted_assignment_preflight(
+        &self,
+        run_id: RunId,
+        assignment_id: AssignmentId,
+        acknowledge_lost: bool,
+        retained_commit: Option<&str>,
+    ) -> Result<(AssignmentRecord, WorkspaceRecord), StoreError> {
         let reject = |reason: &str| StoreError::RecoveryConflict {
             assignment_id,
             reason: reason.to_owned(),
@@ -122,7 +137,10 @@ impl Repositories<'_, '_> {
         let workspace = self.workspace_for_scope(assignment.scope())?;
         if workspace.kind != "worktree"
             || workspace.state != ExternalResourceState::Observed
-            || workspace.result_commit.is_some()
+            || workspace
+                .result_commit
+                .as_deref()
+                .is_some_and(|recorded| Some(recorded) != retained_commit)
             || workspace.target_commit.is_some()
         {
             return Err(reject(

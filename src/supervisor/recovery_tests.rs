@@ -35,7 +35,7 @@ fn request(
     )
 }
 
-fn exit(fixture: &mut Fixture) {
+pub(super) fn exit(fixture: &mut Fixture) {
     let scope = fixture.scope();
     fixture
         .sessions

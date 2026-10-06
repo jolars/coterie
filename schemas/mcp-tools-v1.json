@@ -470,6 +470,88 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
+      "description": "Submit an independently reviewed exact retained commit after verified worker exit. Requires task:submit-retained. Supply summary with validation outcomes and blocked checks, reason, and review text and source. Preserves the original files and index. Integration, target validation, and accepted closure remain separate. Reuse operation_id and identical arguments on retry.",
+      "inputSchema": {
+        "$defs": {
+          "AssignmentId": {
+            "pattern": "^ca-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "OperationId": {
+            "pattern": "^co-[0-7][0-9A-HJKMNP-TV-Z]{25}$",
+            "type": "string"
+          },
+          "ReportedEvidence": {
+            "additionalProperties": false,
+            "description": "A reporter's statement and reference, not a check executed by Coterie.",
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text",
+              "source"
+            ],
+            "type": "object"
+          },
+          "RetainedSubmission": {
+            "additionalProperties": false,
+            "properties": {
+              "assignment_id": {
+                "$ref": "#/$defs/AssignmentId"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "result_commit": {
+                "type": "string"
+              },
+              "review": {
+                "$ref": "#/$defs/ReportedEvidence"
+              },
+              "summary": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "assignment_id",
+              "result_commit",
+              "summary",
+              "reason",
+              "review"
+            ],
+            "type": "object"
+          }
+        },
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "additionalProperties": false,
+        "properties": {
+          "operation_id": {
+            "$ref": "#/$defs/OperationId"
+          },
+          "submission": {
+            "$ref": "#/$defs/RetainedSubmission"
+          }
+        },
+        "required": [
+          "operation_id",
+          "submission"
+        ],
+        "title": "TaskSubmitRetained",
+        "type": "object"
+      },
+      "name": "task_submit_retained"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "readOnlyHint": false
+      },
       "description": "Supersede an unintegrated Git submission after validating and committing its correction. Requires task:resubmit. Reuse operation_id on retry.",
       "inputSchema": {
         "$defs": {

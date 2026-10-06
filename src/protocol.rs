@@ -20,7 +20,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 16;
+pub(crate) const PROTOCOL_VERSION: u16 = 17;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -172,6 +172,10 @@ pub(crate) enum RpcRequest {
         report: Option<recovery::RecoveryReport>,
         #[serde(default, skip_serializing_if = "is_false")]
         acknowledge_lost: bool,
+    },
+    TaskSubmitRetained {
+        operation_id: OperationId,
+        submission: Box<crate::state::retained::RetainedSubmission>,
     },
     TaskResubmit {
         operation_id: OperationId,
@@ -384,6 +388,11 @@ pub(crate) enum RpcResponse {
         assignment_id: AssignmentId,
         task: TaskSummary,
     },
+    TaskRetainedSubmitted {
+        operation_id: OperationId,
+        #[serde(flatten)]
+        submission: RetainedSubmissionSummary,
+    },
     TaskResubmitted {
         operation_id: OperationId,
         #[serde(flatten)]
@@ -486,6 +495,15 @@ pub(crate) struct TaskSummary {
     pub(crate) ready: bool,
     pub(crate) unresolved_dependencies: Vec<TaskId>,
     pub(crate) result: Option<serde_json::Value>,
+}
+
+/// The immutable response to authorized submission of retained work.
+#[derive(
+    Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub(crate) struct RetainedSubmissionSummary {
+    pub(crate) assignment_id: AssignmentId,
+    pub(crate) task: TaskSummary,
 }
 
 /// The immutable response recorded by a successful submission correction.
@@ -739,7 +757,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 16,
+                    "protocol_version": 17,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -853,7 +871,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 16,
+                    "protocol_version": 17,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

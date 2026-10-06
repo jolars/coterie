@@ -60,7 +60,19 @@ permission is denied, retain the contribution and report the blocker.
 
 ## Interrupted handoffs
 
-An exited worker's unsubmitted files remain recoverable. Use `task recover`
+An exited worker's clean committed work can be submitted without a replacement
+worker through `task submit-retained`. The operator or a coordinator with
+`task:submit-retained` independently reviews the exact full commit ID and supplies
+`--assignment`, `--result`, `--summary`, `--reason`, `--review`, and
+`--review-source`. Include validation commands, outcomes, and blocked checks in
+the summary. Coterie verifies the process exit, current ownership, and clean
+owned tip, then submits the original assignment atomically. The review remains
+an attributed report. Durable message acknowledgement alone does not authorize
+submission. Integration, target validation, and accepted closure still follow.
+The operation preserves source files, index, and references, and never restores
+worker credentials. Retry with the same operation ID and identical arguments.
+
+Dirty or uncertain work remains recoverable. Use `task recover`
 after inactivity is proved, then spawn the continuation in a fresh worktree. Its
 `prime` response contains the recovery source and a new commit handoff. Port
 useful changes into the continuation and validate them there. Request a commit

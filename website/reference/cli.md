@@ -78,6 +78,10 @@ List open tasks with no unresolved dependencies or active claim.
 
 Correct an unintegrated Git submission through an authorized coordinator. Supply `--assignment`, `--expected-result`, `--result`, `--summary`, and `--reason`. The corrected commit must be the clean owned worktree tip and descend from the recorded result. Integration and closure still follow.
 
+### `coterie task submit-retained`
+
+Submit a clean, independently reviewed commit after a verified worker exit without starting a replacement worker. Requires operator authority or `task:submit-retained`. Supply `--assignment`, `--result` (full lowercase commit ID), `--summary` (validation outcomes and blocked checks), `--reason`, `--review`, and `--review-source`. The original assignment must still own its claim, and its clean worktree tip must match the reviewed commit. Source files and index stay intact. Integration, target validation, and explicit closure still follow. See [Recovery](/guide/recovery#submit-a-retained-commit).
+
 ### `coterie task recover`
 
 `coterie task recover --assignment <id> --reason <text>` retires an exited, unsubmitted Git assignment and reopens its task. `--report <JSON>` optionally records sourced validation evidence and unfinished steps. For a lost worker with no observed exit, the local operator may add `--acknowledge-lost`; Coterie requires a fresh process-absence check and records the missing evidence. Source files, commits, and references remain preserved; a continuation gets a new worktree. See [Recovery](/guide/recovery).

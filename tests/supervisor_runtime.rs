@@ -21,6 +21,9 @@ mod closure_override;
 #[path = "supervisor_runtime/review_acceptance.rs"]
 mod review_acceptance;
 
+#[path = "supervisor_runtime/retained.rs"]
+mod retained;
+
 #[path = "supervisor_runtime/recovery.rs"]
 mod recovery;
 

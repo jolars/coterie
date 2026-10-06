@@ -290,6 +290,16 @@ impl<B: WorkspaceBackend> WorkspaceSupervisor<B> {
         Ok(self.backend.base_commit(kind, project)?)
     }
 
+    /// Verifies ownership and cleanliness without recording a partial submission.
+    pub(crate) fn observe_result_commit(
+        &self,
+        store: &mut Store,
+        scope: AssignmentScope,
+    ) -> Result<Option<String>, WorkspaceError> {
+        let (workspace, project) = workspace_records(store, scope)?;
+        Ok(self.backend.result_commit(&workspace, &project)?)
+    }
+
     /// Observes and durably records the commit produced by an assignment.
     pub(crate) fn record_result_commit(
         &self,

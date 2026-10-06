@@ -6,6 +6,9 @@ use crate::workspace::GitWorkspace;
 use git2::{Repository, Signature};
 use std::os::unix::fs::DirBuilderExt;
 
+#[path = "retained_tests.rs"]
+mod retained_tests;
+
 #[path = "resubmit_tests.rs"]
 mod resubmit_tests;
 
@@ -72,6 +75,11 @@ fn crash_matrix_spawn() {
 #[test]
 fn crash_matrix_finish() {
     matrix("finish");
+}
+
+#[test]
+fn crash_matrix_retained_submission() {
+    matrix("submit-retained");
 }
 
 #[test]
@@ -312,6 +320,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
     for source in [
         include_str!("../state.rs"),
         include_str!("../state/recovery.rs"),
+        include_str!("../state/retained.rs"),
         include_str!("../state/run_recovery.rs"),
         include_str!("../supervisor.rs"),
         include_str!("session.rs"),
@@ -319,6 +328,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         include_str!("idle.rs"),
         include_str!("notifications.rs"),
         include_str!("recovery.rs"),
+        include_str!("retained.rs"),
         include_str!("run_recovery.rs"),
         include_str!("../providers.rs"),
         include_str!("../providers/notifications.rs"),
@@ -348,6 +358,7 @@ fn crash_matrix_covers_all_declared_boundaries() {
         "spawn",
         "finish",
         "resubmit",
+        "submit-retained",
         "recover-assignment",
         "recover-run",
         "continue-assignment",
@@ -1728,6 +1739,10 @@ impl Fixture {
                 )
                 .unwrap();
         }
+        if case == "submit-retained" {
+            retained_tests::prepare(self);
+            return;
+        }
         if matches!(case, "recover-assignment" | "continue-assignment") {
             recovery_tests::prepare(self, case);
             return;
@@ -1814,6 +1829,7 @@ impl Fixture {
             }
             "finish" => self.finish(),
             "resubmit" => self.resubmit(),
+            "submit-retained" => retained_tests::exercise(self),
             "recover-assignment" | "continue-assignment" => {
                 recovery_tests::exercise(self, case)
             }
@@ -2081,11 +2097,16 @@ impl Fixture {
             "external-close" => self.close(true),
             "initialize" | "finish" | "transcript" => {}
             "resubmit" => self.resubmit(),
+            "submit-retained" => retained_tests::exercise(self),
             _ => panic!("unknown recovery case: {case}"),
         }
     }
 
     fn verify(&mut self, case: &str) {
+        if case == "submit-retained" {
+            retained_tests::verify(self);
+            return;
+        }
         if case == "recover-run" {
             run_recovery_tests::verify(self);
             return;

@@ -10,6 +10,7 @@ mod progress;
 mod projects;
 mod recovery;
 mod resubmit;
+mod retained;
 mod run_recovery;
 mod session;
 mod stop;
@@ -1069,6 +1070,24 @@ fn public_request(
                     Some(operation_id),
                     false,
                 )
+            }
+            TaskCommand::SubmitRetained(arguments) => {
+                let operation_id = arguments
+                    .mutation
+                    .operation_id
+                    .unwrap_or_else(OperationId::generate);
+                (RpcRequest::TaskSubmitRetained {
+                    operation_id,
+                    submission: Box::new(crate::state::retained::RetainedSubmission {
+                        assignment_id: arguments.assignment,
+                        result_commit: arguments.result,
+                        summary: arguments.summary,
+                        reason: arguments.reason,
+                        review: crate::protocol::recovery::ReportedEvidence {
+                            text: arguments.review, source: arguments.review_source,
+                        },
+                    }),
+                }, Some(operation_id), false)
             }
             TaskCommand::Resubmit(arguments) => {
                 let operation_id = arguments
@@ -3051,6 +3070,14 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
                 }
             }
         }
+        RpcRequest::TaskSubmitRetained { submission, .. } => {
+            submission.summary = crate::redaction::text(&submission.summary);
+            submission.reason = crate::redaction::text(&submission.reason);
+            submission.review.text =
+                crate::redaction::text(&submission.review.text);
+            submission.review.source =
+                crate::redaction::text(&submission.review.source);
+        }
         RpcRequest::TaskResubmit { submission, .. } => {
             submission.summary = crate::redaction::text(&submission.summary);
             submission.reason = crate::redaction::text(&submission.reason);
@@ -3239,6 +3266,19 @@ fn execute_request<P: Provider, B: WorkspaceBackend>(
             reason,
             report,
             acknowledge_lost,
+            Some(&request_fingerprint),
+        ),
+        RpcRequest::TaskSubmitRetained {
+            operation_id,
+            submission,
+        } => retained::submit_retained(
+            store,
+            sessions,
+            workspaces,
+            run_id,
+            caller,
+            operation_id,
+            *submission,
             Some(&request_fingerprint),
         ),
         RpcRequest::TaskResubmit {
@@ -5749,6 +5789,7 @@ fn available_commands(
             "spawn",
             "workspace integrate",
             "task recover",
+            "task submit-retained",
             "send",
             "logs",
             "events",
@@ -5770,6 +5811,7 @@ fn available_commands(
             ("task", "create", "task create"),
             ("task", "close", "task close"),
             ("task", "recover", "task recover"),
+            ("task", "submit-retained", "task submit-retained"),
             ("logs", "*", "logs"),
             ("workspace", "integrate", "workspace integrate"),
         ] {
@@ -5920,6 +5962,9 @@ fn bootstrap_instruction(
         bootstrap.push_str(
             "\nYour role lacks task:read. Use `poll` with include_progress=false for inbox messages and `prime` for current context. Report monitoring blockers to the user or an authorized coordinator.",
         );
+    }
+    if allowed("task", "submit-retained") {
+        bootstrap.push_str("\nIf a worker exits before finish with a clean retained commit, independently review that exact commit and use task_submit_retained with its full ID, review source, validation summary, and reason. Verified exit is required. This submits the original assignment without a replacement worker; integrate, validate the target, and explicitly close afterward. Dirty or uncertain work still requires task_recover.");
     }
     if allowed("task", "recover") {
         bootstrap.push_str("\nWhen using task_recover, supply report with validation_evidence and unfinished_steps arrays of {text, source} from available messages, logs, or artifacts. Report blocked checks explicitly. Coterie records this context without executing it or treating reported checks as verified acceptance.");

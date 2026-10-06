@@ -227,13 +227,14 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
   unrestricted profiles. Preserve historical policy and fingerprints through
   migration and test provider capability checks and recovery.
   `NEXTEST_TEST_THREADS=4 task check` passes (567 tests passed, 25 skipped).
-  Authenticated provider checks remain opt-in. See the
-  [permission guide](docs/permissions.md).
+  Authenticated provider checks remain opt-in. See the [permission
+  guide](docs/permissions.md).
 
 - [x] Lattice and property tests prove that an untrusted project override can
   never increase authority or a resource ceiling. See the [policy
   tests](src/config/policy_tests.rs) for intersection laws, combined
   restrictions, trusted selection, operator bounds, and injection rejection.
+
 - [x] Golden tests cover schemas, provenance, configuration fingerprints, lock
   portability, includes, and actionable mismatch diagnostics. See the [lock
   tests](src/config/lock/tests.rs) and [configuration CLI
@@ -289,11 +290,11 @@ transparent provider reattachment, and exhaustive crash-boundary coverage.
 
 ### Research workflow follow-ups
 
-These items come from the September 15, 2026
-[normreg-multi field report](docs/field-report-normreg-multi.md). Address the
-high-priority items first. The observations concern one run; pin the Coterie
-build, provider version, and effective policy in reproductions before attributing
-a cause. Specify new interfaces or authority in `DESIGN.md` before implementation.
+These items come from the September 15, 2026 [normreg-multi field
+report](docs/field-report-normreg-multi.md). Address the high-priority items
+first. The observations concern one run; pin the Coterie build, provider
+version, and effective policy in reproductions before attributing a cause.
+Specify new interfaces or authority in `DESIGN.md` before implementation.
 Scientific relevance and task scope remain agent responsibilities.
 
 - [x] **High: Make the linked-worktree commit path usable under the selected
@@ -303,19 +304,21 @@ Scientific relevance and task scope remain agent responsibilities.
   provide scoped commit support or an explicit coordinator-commit handoff.
   Test that the primary checkout, sibling worktrees, shared references, and
   repository configuration remain protected; broad write access to the Git
-  common directory is not an acceptable fix. Keep real-provider tests opt-in.
-  The explicit coordinator handoff passed with Codex 0.153.4 on NixOS, including
-  normal submission and recovery through validated closure. See the
-  [reproduction and acceptance evidence](docs/linked-worktree-commits.md).
+  common directory is not an acceptable fix. Keep real-provider tests
+  opt-in. The explicit coordinator handoff passed with Codex 0.153.4 on
+  NixOS, including normal submission and recovery through validated closure.
+  See the [reproduction and acceptance
+  evidence](docs/linked-worktree-commits.md).
 - [x] **High: Diagnose validation environment access separately from Git
   permissions.** Reproduce Nix daemon access and `.devenv` write failures in
-  assigned workspaces, recording the command and selected policy. Report which
-  validation steps succeed or are blocked and document supported environment
-  entry without automatically widening permissions. Add opt-in NixOS regression
-  coverage for reproduced failures. The assigned-worktree regression passed on
-  NixOS with Codex 0.153.4, with independent daemon and external `.devenv` state
-  denials and successful validation using a prepared interpreter. See the
-  [environment guide and recorded evidence](docs/validation-environments.md).
+  assigned workspaces, recording the command and selected policy. Report
+  which validation steps succeed or are blocked and document supported
+  environment entry without automatically widening permissions. Add opt-in
+  NixOS regression coverage for reproduced failures. The assigned-worktree
+  regression passed on NixOS with Codex 0.153.4, with independent daemon and
+  external `.devenv` state denials and successful validation using a
+  prepared interpreter. See the [environment guide and recorded
+  evidence](docs/validation-environments.md).
 - [x] **High: Bound repeated context inspection.** Provide compact task and
   assignment summaries in `prime`, with stable references for fetching full
   descriptions and reports. Keep current task context, recovery provenance,
@@ -323,83 +326,86 @@ Scientific relevance and task scope remain agent responsibilities.
   serialized response sizes on a fixture with long reports and several
   completed tasks, and enforce documented size bounds. Include repeated
   bootstrap and serialized context in transcript-inspection measurements;
-  provide a concise route to current activity while retaining full transcripts.
-  Test human and JSON views and full-detail retrieval. The bounded `progress`
-  feed remains a lifecycle feed, not a substitute for current task context.
-  Compact context, revision-checked full details, and transcript tails passed
-  the fixture and `task check`. See the [bounds and measurements](docs/context-inspection.md).
+  provide a concise route to current activity while retaining full
+  transcripts. Test human and JSON views and full-detail retrieval. The
+  bounded `progress` feed remains a lifecycle feed, not a substitute for
+  current task context. Compact context, revision-checked full details, and
+  transcript tails passed the fixture and `task check`. See the [bounds and
+  measurements](docs/context-inspection.md).
 - [x] **Medium: Make recovery handoffs self-contained.** Expose the preserved
   path and base commit, dirty, staged, and untracked paths, prior validation
-  evidence, and unfinished steps with references to their sources. Distinguish
-  agent-reported checks and next steps from recorded mechanical state. Test a
-  worker exit with unsubmitted staged artifacts, recovery into a fresh
-  worktree, and continuation through integration, validation, and task closure.
-  Verify that the source files and index survive unchanged and that the
-  continuation receives no writable ownership of the preserved workspace.
-  Recovery snapshots and sourced reports passed staged-artifact continuation,
-  schema upgrades, crash tests, and `task check`. See the
+  evidence, and unfinished steps with references to their sources.
+  Distinguish agent-reported checks and next steps from recorded mechanical
+  state. Test a worker exit with unsubmitted staged artifacts, recovery into
+  a fresh worktree, and continuation through integration, validation, and
+  task closure. Verify that the source files and index survive unchanged and
+  that the continuation receives no writable ownership of the preserved
+  workspace. Recovery snapshots and sourced reports passed staged-artifact
+  continuation, schema upgrades, crash tests, and `task check`. See the
   [handoff guide](docs/recovery-handoffs.md).
 - [x] **High: Deliver foreground wake-up notifications through Codex queue.**
   Capability-probed delivery binds provider metadata to the authenticated
   foreground generation and verifies the host bridge's process provenance.
-  Durable attempts coalesce updates without promoting worker content, changing
-  user authority, acknowledging inbox messages, or accepting tasks. Tests cover
-  busy and ended turns, stale bindings, shutdown, reconnects, command failure,
-  duplicates, and crash recovery. `task check` passed all 509 tests and gates;
-  the opt-in real foreground test passed on Codex 0.153.4. See the
-  [delivery contract and evidence](docs/codex-queue.md).
+  Durable attempts coalesce updates without promoting worker content,
+  changing user authority, acknowledging inbox messages, or accepting tasks.
+  Tests cover busy and ended turns, stale bindings, shutdown, reconnects,
+  command failure, duplicates, and crash recovery. `task check` passed all
+  509 tests and gates; the opt-in real foreground test passed on Codex
+  0.153.4. See the [delivery contract and evidence](docs/codex-queue.md).
 - [x] **Medium: Reduce client-side protocol bookkeeping.** Add client support
   for separate progress and inbox cursors, page draining, acknowledgement of
   handled messages, and mutation retries. Progress must never acknowledge
   messages; uncertain retries must retain the original operation ID and
   identical arguments. Test empty pages with `has_more`, reconnects, partial
   message handling, and uncertain mutation outcomes before shortening
-  agent-facing instructions. Preserve explicit task acceptance and generation
-  checks. MCP polling checkpoints, handled-message acknowledgements, and saved
-  mutation retries passed deterministic disconnect and partial-handling tests
-  and `task check` (531 tests). See the [client helper contract](docs/client-bookkeeping.md).
+  agent-facing instructions. Preserve explicit task acceptance and
+  generation checks. MCP polling checkpoints, handled-message
+  acknowledgements, and saved mutation retries passed deterministic
+  disconnect and partial-handling tests and `task check` (531 tests). See
+  the [client helper contract](docs/client-bookkeeping.md).
 - [x] **Medium: Document and test MCP bridge rediscovery after reconnect.**
-  Exercise a stale tool identifier followed by discovery of the current bridge
-  and `prime`, verifying the same run and agent identity with current session
-  authentication. Document the recovery steps and test that stale credentials
-  remain rejected. Distinguish restored tool access from automatic foreground
-  wake-up, which requires separate provider capability evidence. Deterministic
-  bridge/authentication coverage and the opt-in Codex 0.153.4 host-catalog test
-  passed, along with the integrated `task check` gate. See the
-  [recovery guide](docs/mcp-rediscovery.md) and
+  Exercise a stale tool identifier followed by discovery of the current
+  bridge and `prime`, verifying the same run and agent identity with current
+  session authentication. Document the recovery steps and test that stale
+  credentials remain rejected. Distinguish restored tool access from
+  automatic foreground wake-up, which requires separate provider capability
+  evidence. Deterministic bridge/authentication coverage and the opt-in
+  Codex 0.153.4 host-catalog test passed, along with the integrated
+  `task check` gate. See the [recovery guide](docs/mcp-rediscovery.md) and
   [two-worker run evidence](docs/codex-queue.md#two-worker-dogfooding).
 
 ### Commit-handoff validation follow-ups
 
-These observations come from the September 15, 2026
-[linked-worktree reproduction](docs/linked-worktree-commits.md#recorded-reproduction).
+These observations come from the September 15, 2026 [linked-worktree
+reproduction](docs/linked-worktree-commits.md#recorded-reproduction).
 
 - [x] **High: Verify Git commit publication after write failures.** Isolate
-  libgit2 1.9.7 returning a commit ID after an object-write failure while a fresh
-  repository handle observes the original HEAD. Add a regression that checks
-  object readability and reference advancement, audit Coterie's Git write paths
-  before recording observed success, and verify recovery and idempotent retries
-  after failed writes. Track the upstream error-propagation fix and evaluate a
-  dependency update without treating a returned ID as proof of publication.
-  The isolated 1.9.7 reproduction, fresh-handle publication checks, failed-write
-  recovery and retry coverage, and `task check` passed (537 tests). The
-  [write-path audit](docs/git-publication.md) tracks the upstream fix and the
-  decision to retain the current dependency until a fixed release is available.
+  libgit2 1.9.7 returning a commit ID after an object-write failure while a
+  fresh repository handle observes the original HEAD. Add a regression that
+  checks object readability and reference advancement, audit Coterie's Git
+  write paths before recording observed success, and verify recovery and
+  idempotent retries after failed writes. Track the upstream
+  error-propagation fix and evaluate a dependency update without treating a
+  returned ID as proof of publication. The isolated 1.9.7 reproduction,
+  fresh-handle publication checks, failed-write recovery and retry coverage,
+  and `task check` passed (537 tests). The [write-path
+  audit](docs/git-publication.md) tracks the upstream fix and the decision
+  to retain the current dependency until a fixed release is available.
 - [ ] **Medium: Diagnose missing Codex code-tool transcript entries.** Reproduce
   shell commands invoked through Codex's code tool being absent from
-  `exec --json` command-execution events on 0.153.4. Compare emitted events with
-  independent command-result artifacts and direct shell invocations, pinning
-  the provider version and policy. Preserve available events and expose any
-  observability limitation explicitly; do not infer that an omitted command
-  never ran or rely on undocumented provider session-file formats. Test human
-  and JSON log views, credential redaction, and any supported adapter change.
-  Keep real-provider coverage opt-in.
-  The October 6, 2026 pinned 0.153.4 probes emitted matching command items for
-  direct, requested code-mode, and Coterie-launched worker commands. Coterie
-  now labels log coverage and tests human and JSON views and redaction, but the
+  `exec --json` command-execution events on 0.153.4. Compare emitted events
+  with independent command-result artifacts and direct shell invocations,
+  pinning the provider version and policy. Preserve available events and
+  expose any observability limitation explicitly; do not infer that an
+  omitted command never ran or rely on undocumented provider session-file
+  formats. Test human and JSON log views, credential redaction, and any
+  supported adapter change. Keep real-provider coverage opt-in. The October
+  6, 2026 pinned 0.153.4 probes emitted matching command items for direct,
+  requested code-mode, and Coterie-launched worker commands. Coterie now
+  labels log coverage and tests human and JSON views and redaction, but the
   reported omission has not been reproduced with a complete artifact and
-  provider-stream pair. See the [investigation](docs/codex-command-events.md);
-  keep this item open.
+  provider-stream pair. See the
+  [investigation](docs/codex-command-events.md); keep this item open.
 
 ### Diplodocus workflow follow-ups
 
@@ -426,207 +432,225 @@ establish behavior across other builds or policies.
   work. Measure per-assignment artifact usage, expose actionable low-space
   diagnostics, and define scoped cleanup of explicitly selected disposable
   artifacts from completed, inactive assignments. Specify cleanup ownership
-  and authority in `DESIGN.md` before implementation. Preserve source changes,
-  indexes, submissions, and artifacts still used by running processes. Test
-  low-space failures, symlink boundaries, concurrent use, and interrupted or
-  repeated cleanup without deleting unrelated files or caches.
-- [ ] **Medium: Extend validation coverage to declared environment inputs.**
-  The lead could discover the configured Python/R kernels, while the reviewer
-  lacked `JUPYTER_PATH`. Extend the existing
-  [validation-environment regression](docs/validation-environments.md) with a
-  check that needs an additional declared environment input. Distinguish
-  intentional provider filtering, missing prerequisites, and sandbox denials;
-  verify the documented workspace environment-entry or coordinator-validation
-  handoff with exact commit and command evidence. Do not infer full environment
-  inheritance from a preserved `PATH`, pass the entire ambient environment, or
-  widen permissions automatically. Keep real-provider coverage opt-in and
+  and authority in `DESIGN.md` before implementation. Preserve source
+  changes, indexes, submissions, and artifacts still used by running
+  processes. Test low-space failures, symlink boundaries, concurrent use,
+  and interrupted or repeated cleanup without deleting unrelated files or
+  caches.
+- [ ] **Medium: Extend validation coverage to declared environment inputs.** The
+  lead could discover the configured Python/R kernels, while the reviewer
+  lacked `JUPYTER_PATH`. Extend the existing [validation-environment
+  regression](docs/validation-environments.md) with a check that needs an
+  additional declared environment input. Distinguish intentional provider
+  filtering, missing prerequisites, and sandbox denials; verify the
+  documented workspace environment-entry or coordinator-validation handoff
+  with exact commit and command evidence. Do not infer full environment
+  inheritance from a preserved `PATH`, pass the entire ambient environment,
+  or widen permissions automatically. Keep real-provider coverage opt-in and
   retain the completed Nix daemon and `.devenv` access coverage.
 
 ### Diplodocus notification-loop follow-up
 
-Observed September 17, 2026 in run `cr-01M2GGM9R6E0HV9TB43G50V93T`,
-foreground session `cs-01M2RDNP2KQ80Z4CQ3RSZW7Y9H`, generation 1.
+Observed September 17, 2026 in run `cr-01M2GGM9R6E0HV9TB43G50V93T`, foreground
+session `cs-01M2RDNP2KQ80Z4CQ3RSZW7Y9H`, generation 1.
 
 - [x] **High: Diagnose and stop repeated foreground notifications without new
   updates.** Identical automatic notices repeatedly started lead turns after
-  implementation, integration, and validation had finished and all workers had
-  exited. Each `prime` confirmed the same session and `notifications=automatic`;
-  each `poll` returned `changes=[]`, `messages=[]`, and `has_more=false`, with
-  unchanged inbox cursor 51 and progress sequence 370. No messages remained to
-  acknowledge. One original docstring task remained submitted because its
-  reviewed result was integrated through a replacement task, and closing the
-  original required an operator override. Treat that as reproduction context,
-  not an established cause. Pin the running Coterie build, provider version,
-  and effective policy; inspect durable delivery attempts and eligible event
+  implementation, integration, and validation had finished and all workers
+  had exited. Each `prime` confirmed the same session and
+  `notifications=automatic`; each `poll` returned `changes=[]`,
+  `messages=[]`, and `has_more=false`, with unchanged inbox cursor 51 and
+  progress sequence 370. No messages remained to acknowledge. One original
+  docstring task remained submitted because its reviewed result was
+  integrated through a replacement task, and closing the original required
+  an operator override. Treat that as reproduction context, not an
+  established cause. Pin the running Coterie build, provider version, and
+  effective policy; inspect durable delivery attempts and eligible event
   cursors to distinguish newly queued notices from provider replay or an
-  existing queue backlog. Reproduce the read-only `prime`/`poll`/end-turn cycle
-  with a deterministic provider, both with all tasks closed and with an
-  unchanged submitted task requiring operator action. Once eligible updates
-  have been delivered and consumed, repeated reads, reconciliation, and turn
-  completion must cause no further queue attempts without a new eligible
-  event. Test coalescing, reconnects, supervisor restart, and stale generations
-  while preserving explicit inbox acknowledgement, task acceptance, and user
-  pauses. Keep any real-provider regression opt-in. The
-  [incident audit and regression evidence](docs/notification-loop.md) identify
-  accepted notices accumulating during a long foreground turn. Delivery now
-  permits one outstanding notice per session until explicit receipt coalesces
-  current updates. `task check` passed with 543 tests and 24 skips; the updated
-  real-provider regression remains opt-in and was not run.
+  existing queue backlog. Reproduce the read-only `prime`/`poll`/end-turn
+  cycle with a deterministic provider, both with all tasks closed and with
+  an unchanged submitted task requiring operator action. Once eligible
+  updates have been delivered and consumed, repeated reads, reconciliation,
+  and turn completion must cause no further queue attempts without a new
+  eligible event. Test coalescing, reconnects, supervisor restart, and stale
+  generations while preserving explicit inbox acknowledgement, task
+  acceptance, and user pauses. Keep any real-provider regression opt-in. The
+  [incident audit and regression evidence](docs/notification-loop.md)
+  identify accepted notices accumulating during a long foreground turn.
+  Delivery now permits one outstanding notice per session until explicit
+  receipt coalesces current updates. `task check` passed with 543 tests and
+  24 skips; the updated real-provider regression remains opt-in and was not
+  run.
 
 ### Diplodocus stopped-run recovery follow-up
 
-Observed September 21, 2026 in Milestone 6 run
-`cr-01M325FW0XP0N03DW97X5EDQ66`: a completed `run.stop` left one closed task,
-three unfinished assignments, and seven open tasks. Their records and worktrees
-were preserved, but a later launch created an empty run. At the time, the CLI and
-MCP tools could not reopen a stopped run; `task recover` requires an active run.
-The shutdown record does not establish who requested the stop.
+Observed September 21, 2026 in Milestone 6 run `cr-01M325FW0XP0N03DW97X5EDQ66`:
+a completed `run.stop` left one closed task, three unfinished assignments, and
+seven open tasks. Their records and worktrees were preserved, but a later launch
+created an empty run. At the time, the CLI and MCP tools could not reopen a
+stopped run; `task recover` requires an active run. The shutdown record does not
+establish who requested the stop.
 
 - [x] **High: Provide explicit recovery of work from a stopped run.** Let the
   operator discover retained runs and select one for continuation without
   manually editing the database or active-run index. Define in `DESIGN.md`
-  whether continuation reactivates the run or imports its work into a new run.
-  Preserve task dependencies, accepted results, reports, transcript references,
-  and recovery provenance. Use fresh authenticated sessions and validate
-  project leases, saved policy, and assignment ownership; never revive stale
-  credentials or grant implicit write access to preserved worktrees. Keep
-  source files and indexes unchanged when transferring selected changes into
-  fresh assignments. Make CLI and MCP diagnostics distinguish active-run
-  reconnects from stopped-run recovery and explain the supported next step.
-  Test explicit and idle shutdown, an existing replacement run, policy and
-  lease conflicts, dirty or staged work, interrupted recovery, and idempotent
-  retries through validation and accepted task closure.
-  `run list` now discovers retained runs, and operator-only `run recover`
-  reactivates the selected run under its saved policy with fresh sessions.
-  [The recovery contract](docs/cli-contract.md#coterie-run-recover) defines
-  lease and ownership checks, provenance, and replay of both recovery and the
+  whether continuation reactivates the run or imports its work into a new
+  run. Preserve task dependencies, accepted results, reports, transcript
+  references, and recovery provenance. Use fresh authenticated sessions and
+  validate project leases, saved policy, and assignment ownership; never
+  revive stale credentials or grant implicit write access to preserved
+  worktrees. Keep source files and indexes unchanged when transferring
+  selected changes into fresh assignments. Make CLI and MCP diagnostics
+  distinguish active-run reconnects from stopped-run recovery and explain
+  the supported next step. Test explicit and idle shutdown, an existing
+  replacement run, policy and lease conflicts, dirty or staged work,
+  interrupted recovery, and idempotent retries through validation and
+  accepted task closure. `run list` now discovers retained runs, and
+  operator-only `run recover` reactivates the selected run under its saved
+  policy with fresh sessions. [The recovery
+  contract](docs/cli-contract.md#coterie-run-recover) defines lease and
+  ownership checks, provenance, and replay of both recovery and the
   preceding stop. Explicit and idle shutdown tests continue dirty and staged
-  work through fresh assignments, integration, validation, and accepted closure,
-  preserving source files, index bytes, reports, and transcript references.
-  Crash matrices cover 70 startup and retirement boundaries and six dirty-work
-  recovery boundaries, each recovered twice. `task check` passed with 557 tests
-  and 25 skips; real-provider tests remain opt-in and were not run.
+  work through fresh assignments, integration, validation, and accepted
+  closure, preserving source files, index bytes, reports, and transcript
+  references. Crash matrices cover 70 startup and retirement boundaries and
+  six dirty-work recovery boundaries, each recovered twice. `task check`
+  passed with 557 tests and 25 skips; real-provider tests remain opt-in and
+  were not run.
 
 ### Diplodocus Milestone 6 coordination follow-ups
 
-Observed September 23, 2026 in run `cr-01M36CJ6S3PH09F9VXEKTD8JFG`,
-foreground session `cs-01M36CJ6XPDPFZZDZT03SSKED1`, generation 0. The run
-eventually accepted the identity, output-safety, shared-record, and startup
-fixes; the user stopped further milestone work after several hours. Real
-implementation defects, late review findings, and excessive lead coordination
-also contributed. These observations do not establish a supervisor crash,
-lost work, or a recurrence of the September 17 notification bug.
+Observed September 23, 2026 in run `cr-01M36CJ6S3PH09F9VXEKTD8JFG`, foreground
+session `cs-01M36CJ6XPDPFZZDZT03SSKED1`, generation 0. The run eventually
+accepted the identity, output-safety, shared-record, and startup fixes; the user
+stopped further milestone work after several hours. Real implementation defects,
+late review findings, and excessive lead coordination also contributed. These
+observations do not establish a supervisor crash, lost work, or a recurrence of
+the September 17 notification bug.
 
 The running executable was
-`/nix/store/7jg2ks84rcw4g1sskp99vxvj4fv03h4w-coterie-0.2.0/bin/coterie`,
-SHA-256 `61a2c146475a013db87585e84972a9e31e7081ebb0246b8dacf0292c7e1a0d6a`.
-Worker policy was `workspace-write`, network denied, approvals never. Recover
-the incident provider version and saved supervision policy before attributing
-the exits to a particular limit; current defaults are not the run snapshot.
+`/nix/store/7jg2ks84rcw4g1sskp99vxvj4fv03h4w-coterie-0.2.0/bin/coterie`, SHA-256
+`61a2c146475a013db87585e84972a9e31e7081ebb0246b8dacf0292c7e1a0d6a`. Worker
+policy was `workspace-write`, network denied, approvals never. Recover the
+incident provider version and saved supervision policy before attributing the
+exits to a particular limit; current defaults are not the run snapshot.
 
-- [ ] **High: Diagnose worker exits and expose approaching job deadlines.**
-  Two workers exited without `finish`: identity assignment
-  `ca-01M36FNAC4A27GGYTQXC4WYPF2` left 12 dirty paths, while startup assignment
-  `ca-01M36JGZR6AZE6AY7DR21R0GJV` had already verified reviewed commit
-  `b2be3b29ceb122ce01594128891f4b74ff5c562f` and a clean worktree. Their
-  recovery records were created 3,689 and 3,683 seconds after assignment
-  creation, respectively; these are recovery intervals, not observed exit
-  times. The current default `job_timeout_seconds = 3600` and the supervisor's
-  elapsed-session check make deadline expiry during coordination a concrete
-  hypothesis. Inspect normalized process-control and exit events and the saved
-  policy to confirm or reject it. The lead's `events` and `status` requests
-  were denied because those views are operator-only; transcript tails ended
-  after a successful tool call and an empty poll, without a final report.
-  Expose authorized exit reasons, deadline/remaining time, and an actionable
-  warning before a worker waiting on review or a commit reaches its limit.
-  Test active work, pending handoffs, timeout termination, and unknown exits.
-  Any deadline extension or changed accounting needs an explicit design and
-  authority contract; neither silence nor provider exit means task completion.
-- [ ] **High: Reduce recovery work after an acknowledged commit.** The startup
+- [ ] **High: Diagnose worker exits and expose approaching job deadlines.** Two
+  workers exited without `finish`: identity assignment
+  `ca-01M36FNAC4A27GGYTQXC4WYPF2` left 12 dirty paths, while startup
+  assignment `ca-01M36JGZR6AZE6AY7DR21R0GJV` had already verified reviewed
+  commit `b2be3b29ceb122ce01594128891f4b74ff5c562f` and a clean worktree.
+  Their recovery records were created 3,689 and 3,683 seconds after
+  assignment creation, respectively; these are recovery intervals, not
+  observed exit times. The current default `job_timeout_seconds = 3600` and
+  the supervisor's elapsed-session check make deadline expiry during
+  coordination a concrete hypothesis. Inspect normalized process-control and
+  exit events and the saved policy to confirm or reject it. The lead's
+  `events` and `status` requests were denied because those views are
+  operator-only; transcript tails ended after a successful tool call and an
+  empty poll, without a final report. Expose authorized exit reasons,
+  deadline/remaining time, and an actionable warning before a worker waiting
+  on review or a commit reaches its limit. Test active work, pending
+  handoffs, timeout termination, and unknown exits. Any deadline extension
+  or changed accounting needs an explicit design and authority contract;
+  neither silence nor provider exit means task completion.
+- [x] **High: Reduce recovery work after an acknowledged commit.** The startup
   worker sent its full commit and cleanliness verification in
-  `cm-01M36NXRC6JAMKTZFQX1J9HHVD`, then exited before submission. The supported
-  recovery path required a new worker/worktree, copying the same reviewed
-  production changes, validation, another commit handoff, and submission.
-  Scope a durable handoff state or explicitly authorized completion path in
-  `DESIGN.md` that can avoid this repeated transfer when the exact reviewed
-  commit is already retained. Preserve generation fencing, source files and
-  index, independent review, target validation, and explicit task acceptance.
-  Regress exits before commit, after commit, after acknowledgement, and around
-  `finish`, including dirty work, stale evidence, and repeated recovery.
-  This is a follow-up to the existing
-  [commit handoff](docs/linked-worktree-commits.md), not evidence of lost commits.
+  `cm-01M36NXRC6JAMKTZFQX1J9HHVD`, then exited before submission. The
+  supported recovery path required a new worker/worktree, copying the same
+  reviewed production changes, validation, another commit handoff, and
+  submission. Scope a durable handoff state or explicitly authorized
+  completion path in `DESIGN.md` that can avoid this repeated transfer when
+  the exact reviewed commit is already retained. Preserve generation
+  fencing, source files and index, independent review, target validation,
+  and explicit task acceptance. Regress exits before commit, after commit,
+  after acknowledgement, and around `finish`, including dirty work, stale
+  evidence, and repeated recovery. This is a follow-up to the existing
+  [commit handoff](docs/linked-worktree-commits.md), not evidence of lost
+  commits. Implemented `task submit-retained` and its agent tool with
+  exact-commit review, verified exit, atomic submission, and replay fencing.
+  Regression tests cover dirty and hidden work, changed reviews, commit
+  acknowledgement, interrupted `finish`, lost exits, repeated recovery, and
+  every new crash boundary. The end-to-end test preserves the source index
+  and keeps dependencies blocked through integration and target validation
+  until accepted closure. All 584 ordinary tests and the `task check` gates
+  pass; real-provider tests remain opt-in.
 - [ ] **Medium: Make validation handoffs schedulable before expensive work.**
   Workers could edit and run some direct Cargo checks, but documented devenv
   entry encountered Nix daemon or fetcher-lock denials; some runtime checks
-  also lacked kernels or permitted loopback access. Git metadata access was a
-  separate restriction. Consequently, the lead became the validation and
+  also lacked kernels or permitted loopback access. Git metadata access was
+  a separate restriction. Consequently, the lead became the validation and
   commit queue for otherwise parallel tasks. Extend the existing
   [environment workflow](docs/validation-environments.md) with a concise
   assignment preflight and visible validation owner/pending state. Record
-  required commands, declared inputs, actual policy, and failed versus blocked
-  checks once, then route the supported handoff without repeated denied probes.
-  Bind reusable evidence to the exact source and relevant environment; edits,
-  recovery onto a new base, or integration still require appropriate checks.
-  Do not solve this by widening worker permissions or skipping required tests.
-  The October 6 Metewand run `cr-01M48CRWHZ7XCA5PBF292AWRE7` reproduced the
-  serial handoff: workers implemented in isolated worktrees, while the lead
-  handled Git commits and full target validation. The integrated target passed
-  Cargo formatting, Clippy, and tests, but `devenv test` was blocked by a Nix
-  fetcher-lock permission error under the lead's selected policy. Distinguish
-  that environment block from a test failure and from Git write authority;
-  record handoff wait time before attributing the delay to either one.
+  required commands, declared inputs, actual policy, and failed versus
+  blocked checks once, then route the supported handoff without repeated
+  denied probes. Bind reusable evidence to the exact source and relevant
+  environment; edits, recovery onto a new base, or integration still require
+  appropriate checks. Do not solve this by widening worker permissions or
+  skipping required tests. The October 6 Metewand run
+  `cr-01M48CRWHZ7XCA5PBF292AWRE7` reproduced the serial handoff: workers
+  implemented in isolated worktrees, while the lead handled Git commits and
+  full target validation. The integrated target passed Cargo formatting,
+  Clippy, and tests, but `devenv test` was blocked by a Nix fetcher-lock
+  permission error under the lead's selected policy. Distinguish that
+  environment block from a test failure and from Git write authority; record
+  handoff wait time before attributing the delay to either one.
 - [ ] **Medium: Show useful progress separately from coordination activity.**
-  The lead inbox reached sequence 161, but engine and cache implementation had
-  not started. Expose elapsed time and recorded waits for review, validation,
-  commits, and recovery alongside accepted tasks and unresolved dependencies.
-  Make that bounded summary available through the coordinator's authorized
-  views so it can explain delays and propose a stopping point sooner.
-  Test that messages, polls, and repeated reviews cannot appear as completed
-  implementation or release dependencies. Preserve agent judgment about
-  scope and scheduling; do not derive semantic progress from token counts.
-  In the October 6 Metewand run, operator `status --json` showed four closed,
-  one in-progress, and two open tasks while the in-progress worker was `lost`
-  and dependent review could not start. Show that lifecycle blocker alongside
-  the counts, with a link to the recovery diagnostic.
+  The lead inbox reached sequence 161, but engine and cache implementation
+  had not started. Expose elapsed time and recorded waits for review,
+  validation, commits, and recovery alongside accepted tasks and unresolved
+  dependencies. Make that bounded summary available through the
+  coordinator's authorized views so it can explain delays and propose a
+  stopping point sooner. Test that messages, polls, and repeated reviews
+  cannot appear as completed implementation or release dependencies.
+  Preserve agent judgment about scope and scheduling; do not derive semantic
+  progress from token counts. In the October 6 Metewand run, operator
+  `status --json` showed four closed, one in-progress, and two open tasks
+  while the in-progress worker was `lost` and dependent review could not
+  start. Show that lifecycle blocker alongside the counts, with a link to
+  the recovery diagnostic.
 - [ ] **Medium: Audit delayed notices during a long active foreground turn.**
   Many notices with distinct delivery IDs arrived during this run. After
-  closeout, receipt of `co-01M36Q89NJ8RRSK4XNNHM8279Y` succeeded and the next
-  poll was empty at inbox 161/progress 887. This establishes one delayed notice,
-  not an infinite loop or a failure of the existing receipt gate. Correlate
-  eligible event cursors with queue attempts, provider acceptance, receipt,
-  and actual foreground consumption before proposing a fix. Extend the
-  [notification regression](docs/notification-loop.md) to long implementation
-  turns that also read updates through tools, user status/scope changes, and
-  final closeout. Keep real-provider coverage opt-in; preserve coalescing,
-  idempotent receipt, separate inbox acknowledgement, and user stop instructions.
+  closeout, receipt of `co-01M36Q89NJ8RRSK4XNNHM8279Y` succeeded and the
+  next poll was empty at inbox 161/progress 887. This establishes one
+  delayed notice, not an infinite loop or a failure of the existing receipt
+  gate. Correlate eligible event cursors with queue attempts, provider
+  acceptance, receipt, and actual foreground consumption before proposing a
+  fix. Extend the [notification regression](docs/notification-loop.md) to
+  long implementation turns that also read updates through tools, user
+  status/scope changes, and final closeout. Keep real-provider coverage
+  opt-in; preserve coalescing, idempotent receipt, separate inbox
+  acknowledgement, and user stop instructions.
 
 ### Metewand lost-worker recovery follow-up
 
-Observed October 6, 2026 in run `cr-01M48CRWHZ7XCA5PBF292AWRE7`:
-worker assignment `ca-01M48FVDTZ3N5PGHWR5ZVDPX8B` retained dirty and
-untracked files after sandbox commands failed with `No space left on device`.
-Its Codex session `cs-01M48FVDTZPKX9EHYFM3NF5S8Q` became `lost`, and its
-provider transcript has an incomplete final frame. `coterie doctor` reported
-unknown process ownership; `task recover` refused the assignment because no
-provider process exit was observed. The active task and dependent review remain
-blocked. The running Coterie executable was version 0.2.0, and `doctor`
-reported Codex 0.157.0. The sandbox failure preceded the lost session, but
-the available records do not establish why the process observation was lost.
+Observed October 6, 2026 in run `cr-01M48CRWHZ7XCA5PBF292AWRE7`: worker
+assignment `ca-01M48FVDTZ3N5PGHWR5ZVDPX8B` retained dirty and untracked files
+after sandbox commands failed with `No space left on device`. Its Codex session
+`cs-01M48FVDTZPKX9EHYFM3NF5S8Q` became `lost`, and its provider transcript has
+an incomplete final frame. `coterie doctor` reported unknown process ownership;
+`task recover` refused the assignment because no provider process exit was
+observed. The active task and dependent review remain blocked. The running
+Coterie executable was version 0.2.0, and `doctor` reported Codex 0.157.0. The
+sandbox failure preceded the lost session, but the available records do not
+establish why the process observation was lost.
 
 - [x] **High: Resolve lost worker sessions without weakening recovery safety.**
-  Inspect the provider and supervisor events for this run and determine whether
-  the worker process remained live or exited without an observation. Define an
-  operator-supported path in `DESIGN.md` for an unfinished assignment whose
-  exit evidence cannot be recovered, or an actionable diagnostic when safe
-  continuation is impossible. Preserve the source worktree and index, reject
-  unverified process ownership, fence old credentials and generations, and
-  never infer an exit from process absence alone. Test sandbox launch failure,
-  incomplete transcripts, live and absent lost processes, supervisor restart,
-  dirty worktrees, repeated recovery attempts, and continuation through
-  validation and accepted task closure. Keep real-provider coverage opt-in.
-  The [incident review and recovery test](docs/lost-worker-recovery.md) record
-  the missing exit evidence, the operator-only absence check, and continuation
-  through accepted closure.
+  Inspect the provider and supervisor events for this run and determine
+  whether the worker process remained live or exited without an observation.
+  Define an operator-supported path in `DESIGN.md` for an unfinished
+  assignment whose exit evidence cannot be recovered, or an actionable
+  diagnostic when safe continuation is impossible. Preserve the source
+  worktree and index, reject unverified process ownership, fence old
+  credentials and generations, and never infer an exit from process absence
+  alone. Test sandbox launch failure, incomplete transcripts, live and
+  absent lost processes, supervisor restart, dirty worktrees, repeated
+  recovery attempts, and continuation through validation and accepted task
+  closure. Keep real-provider coverage opt-in. The [incident review and
+  recovery test](docs/lost-worker-recovery.md) record the missing exit
+  evidence, the operator-only absence check, and continuation through
+  accepted closure.
 
 ### M7 gate
 
@@ -640,17 +664,17 @@ the available records do not establish why the process observation was lost.
 
 - [ ] Upgrade the documentation toolchain when stable VitePress supports a
   patched Vite release. VitePress 1.6.4 requires Vite 5, while the four open
-  documentation alerts have fixes beginning with Vite 6.4.3 and esbuild 0.25.0.
-  Remove the scoped exceptions in `scripts/check-npm-audit.mjs` after the
-  upgrade. Verify a clean raw `pnpm audit`, the site build, and the development
-  and preview commands before closing this item.
-- [ ] Scope an optional transfer helper for the
-  [research recovery handoff](docs/field-report-normreg-multi.md#3-recovery-preserved-work-but-required-a-manual-handoff).
-  Require an explicit selection of changes, identify conflicts before applying
-  them to the continuation's fresh workspace, and preserve the source files,
-  index, and ownership. Define the behavior in `DESIGN.md` before implementation,
-  with tests for conflicting changes, partial selection, and interrupted or
-  repeated transfers.
+  documentation alerts have fixes beginning with Vite 6.4.3 and esbuild
+  0.25.0. Remove the scoped exceptions in `scripts/check-npm-audit.mjs`
+  after the upgrade. Verify a clean raw `pnpm audit`, the site build, and
+  the development and preview commands before closing this item.
+- [ ] Scope an optional transfer helper for the [research recovery
+  handoff](docs/field-report-normreg-multi.md#3-recovery-preserved-work-but-required-a-manual-handoff).
+  Require an explicit selection of changes, identify conflicts before
+  applying them to the continuation's fresh workspace, and preserve the
+  source files, index, and ownership. Define the behavior in `DESIGN.md`
+  before implementation, with tests for conflicting changes, partial
+  selection, and interrupted or repeated transfers.
 - [ ] Design exclusive resource reservations for performance measurements: allow
   parallel implementation while serializing benchmark windows across Coterie
   runs on the same machine. Agents request and release reservations; Rust

@@ -26,6 +26,18 @@ coterie
 
 Recovery verifies saved configuration, project identity and leases, process exits, and workspace ownership. If a replacement run exists, stop it first. Changed policy must be restored. Retrying an uncertain recovery uses the same operation ID and identical arguments; see [JSON and retry rules](/reference/protocol).
 
+## Submit a retained commit
+
+If the worker exited after a commit handoff, inspect the original assignment and independently review its exact commit. An operator or coordinator with `task:submit-retained` can submit it without copying changes or launching another worker:
+
+```console
+coterie task submit-retained --assignment <assignment-id> --result <full-commit-id> --summary "Validation commands, outcomes, and blocked checks." --reason "Worker exited before finish." --review "Independent review of the exact commit." --review-source "Review message or artifact."
+```
+
+Coterie requires a verified process exit, current assignment ownership, and a clean worktree at the specified commit. An acknowledgement message alone is insufficient. The command records the review as an attributed report; it does not execute checks or accept the task. Integrate the submitted result, validate the target, and explicitly close the task. Use the same operation ID and arguments to retry an uncertain response.
+
+Dirty work, an uncertain exit, or a changed commit requires inspection. A retired recovery source cannot use this path. Follow the fresh-worktree workflow below when further implementation is needed.
+
 ## Continue an interrupted worker task
 
 If a Git worktree worker exited before submission, inspect its assignment and transcript. Once `doctor` and the recorded session state establish that it has exited, recover the assignment:

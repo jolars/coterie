@@ -75,6 +75,9 @@ agent_tools! {
     TaskRecover("task_recover", "Retire an exited agent's unfinished assignment, snapshot preserved Git state, and record a recovery handoff. Supply reported validation_evidence and unfinished_steps with text and source references in report; omitted evidence remains unknown. Full handoffs are available through assignment_show. Requires task:recover and an active run. For a stopped run, ask the operator to use coterie run list and coterie run recover <run-id> --reason TEXT, then launch a fresh session. Active-run reconnects cannot reactivate stopped runs or revive credentials. Reuse operation_id and identical arguments on retry.", false) {
         operation_id: OperationId, assignment_id: AssignmentId, reason: String, report: Option<crate::protocol::recovery::RecoveryReport>
     } => RpcRequest::TaskRecover { operation_id, assignment_id, reason, report, acknowledge_lost: false },
+    TaskSubmitRetained("task_submit_retained", "Submit an independently reviewed exact retained commit after verified worker exit. Requires task:submit-retained. Supply summary with validation outcomes and blocked checks, reason, and review text and source. Preserves the original files and index. Integration, target validation, and accepted closure remain separate. Reuse operation_id and identical arguments on retry.", false) {
+        operation_id: OperationId, submission: Box<crate::state::retained::RetainedSubmission>
+    } => RpcRequest::TaskSubmitRetained { operation_id, submission },
     TaskResubmit("task_resubmit", "Supersede an unintegrated Git submission after validating and committing its correction. Requires task:resubmit. Reuse operation_id on retry.", false) {
         operation_id: OperationId, submission: crate::state::resubmit::Resubmission
     } => RpcRequest::TaskResubmit { operation_id, submission },
