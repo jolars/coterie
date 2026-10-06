@@ -38,24 +38,32 @@
           pname = "coterie";
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
 
-          src = pkgs.lib.fileset.toSource {
-            root = ./.;
-            fileset = pkgs.lib.fileset.unions [
-              ./Cargo.lock
-              ./Cargo.toml
-              ./LICENSE-APACHE
-              ./LICENSE-MIT
-              ./README.md
-              # Opt-in validation tests embed the pinned development environment.
-              ./devenv.lock
-              ./devenv.yaml
-              ./docs
-              ./examples
-              ./schemas
-              ./src
-              ./tests
-            ];
-          };
+          src =
+            let
+              source = pkgs.lib.fileset.toSource {
+                root = ./.;
+                fileset = pkgs.lib.fileset.unions [
+                  ./Cargo.lock
+                  ./Cargo.toml
+                  ./LICENSE-APACHE
+                  ./LICENSE-MIT
+                  ./README.md
+                  # Opt-in validation tests embed the pinned development environment.
+                  ./devenv.lock
+                  ./devenv.yaml
+                  ./docs
+                  ./examples
+                  ./schemas
+                  ./src
+                  ./tests
+                  # CLI contract tests embed the getting-started guide.
+                  ./website/guide/getting-started.md
+                ];
+              };
+            in
+            assert pkgs.lib.assertMsg (builtins.pathExists "${source}/website/guide/getting-started.md")
+              "Coterie package source omits the embedded getting-started guide";
+            source;
           cargoLock.lockFile = ./Cargo.lock;
           # Isolate tests so concurrent child launches cannot inherit another
           # test's socket listener and delay its closure.
