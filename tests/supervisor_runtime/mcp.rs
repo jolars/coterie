@@ -567,6 +567,106 @@ fn installed_codex() -> PathBuf {
 }
 
 #[test]
+#[ignore = "requires explicit opt-in, Codex 0.153.4, local authentication, and model access; compares a command artifact with provider JSONL"]
+fn installed_codex_01534_command_event_probe() {
+    let fixture = TestEnvironment::new();
+    let home = isolated_authentication(&fixture);
+    let codex = installed_codex();
+    let version = Command::new(&codex).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "codex-cli 0.153.4"
+    );
+    let script = fixture.root.join("command-probe.py");
+    fs::write(
+        &script,
+        "import pathlib, sys\npathlib.Path(sys.argv[1]).write_text('executed\\n')\nprint('COMMAND_PROBE_EXECUTED')\n",
+    )
+    .unwrap();
+    for (route, code_mode) in [("direct", false), ("code_mode", true)] {
+        let artifact = fixture.root.join(format!("{route}-result.txt"));
+        let exact_command =
+            format!("python3 {} {}", script.display(), artifact.display());
+        let prompt = if code_mode {
+            format!(
+                "Use the JavaScript code tool to invoke tools.exec_command with this exact shell command: {exact_command}. Do not substitute a direct shell tool. If the JavaScript code tool is unavailable, say so and stop."
+            )
+        } else {
+            format!(
+                "Use the direct shell command tool to run this exact command once: {exact_command}. Then stop."
+            )
+        };
+        let mut command = Command::new(&codex);
+        if code_mode {
+            command.args([
+                "--enable",
+                "code_mode",
+                "--enable",
+                "code_mode_only",
+            ]);
+        }
+        let output = command
+            .args([
+                "exec",
+                "--json",
+                "--ignore-user-config",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--sandbox",
+                "workspace-write",
+                "--config",
+                "approval_policy=\"never\"",
+                "--config",
+                "sandbox_workspace_write.network_access=false",
+                "--cd",
+            ])
+            .arg(&fixture.project)
+            .args(if code_mode {
+                &["--model", "gpt-6-astra"][..]
+            } else {
+                &[][..]
+            })
+            .arg(prompt)
+            .env("CODEX_HOME", &home)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{route}: {output:?}");
+        let events: Vec<Value> = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        let matches = events
+            .iter()
+            .filter(|event| {
+                event["type"] == "item.completed"
+                    && event["item"]["type"] == "command_execution"
+                    && event["item"]["command"]
+                        .as_str()
+                        .is_some_and(|value| value.contains(&exact_command))
+            })
+            .count();
+        println!(
+            "route={route} artifact={} matching_command_events={matches} event_types={:?}",
+            artifact.exists(),
+            events
+                .iter()
+                .filter_map(|event| event["item"]["type"].as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            artifact.exists(),
+            "{route}: command did not produce its artifact"
+        );
+        if !code_mode {
+            assert_eq!(matches, 1, "direct command event missing");
+        }
+        assert_eq!(fs::read_to_string(&artifact).unwrap(), "executed\n");
+    }
+}
+
+#[test]
 #[ignore = "requires explicit opt-in, Codex authentication, and model access; exercises actual Coterie job launches"]
 fn installed_codex_jobs_use_mcp_and_preserve_the_sandbox() {
     for (profile, automatic) in [

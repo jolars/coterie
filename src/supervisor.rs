@@ -5437,6 +5437,14 @@ fn logs(
             agent,
             session_id: session.id,
             transcript: String::from_utf8_lossy(&page.bytes).into_owned(),
+            command_event_coverage: match session.process_owner {
+                crate::state::SessionProcessOwner::Supervisor => {
+                    crate::protocol::context::CommandEventCoverage::ProviderEmittedOnly
+                }
+                crate::state::SessionProcessOwner::Foreground => {
+                    crate::protocol::context::CommandEventCoverage::NotCaptured
+                }
+            },
             start_cursor: page.start_cursor,
             total_bytes: page.total_bytes,
             partial_head: page.partial_head,

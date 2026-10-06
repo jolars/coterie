@@ -2041,10 +2041,25 @@ fn operator_commands_drive_the_minimum_delegation_flow() {
     });
     let logs = logs.expect("the worker transcript should be observed");
     assert_eq!(logs["data"]["agent"]["name"], "worker-1");
+    assert_eq!(
+        logs["data"]["command_event_coverage"],
+        "provider_emitted_only"
+    );
     assert!(
         logs["data"]["transcript"]
             .as_str()
             .is_some_and(|transcript| transcript.contains("thread.started"))
+    );
+    let human_logs = run({
+        let mut command = fixture.command();
+        command.args(["logs", "worker-1"]);
+        command
+    });
+    assert!(human_logs.status.success(), "{human_logs:?}");
+    let human_logs: Value = serde_json::from_slice(&human_logs.stdout).unwrap();
+    assert_eq!(
+        human_logs["command_event_coverage"],
+        logs["data"]["command_event_coverage"]
     );
 
     let events = fixture.run_json(&["events", "--json"]);
@@ -2149,6 +2164,9 @@ fn foreground_lead_completes_the_codex_worker_loop_through_validation() {
         .to_owned();
     assert_eq!(identity["data"]["channel"], "agent");
     assert_eq!(identity["data"]["agent"]["role"], "lead");
+    let lead_logs = fixture
+        .run_agent_json(&["logs", &lead_id, "--json"], &lead_environment);
+    assert_eq!(lead_logs["data"]["command_event_coverage"], "not_captured");
 
     let task = fixture.run_agent_json(
         &["task", "create", "Implement the worker result", "--json"],
@@ -2255,6 +2273,11 @@ fn foreground_lead_completes_the_codex_worker_loop_through_validation() {
         .expect("the worker transcript should be returned");
     assert!(transcript.contains("thread.started"));
     assert!(transcript.contains("turn.completed"));
+    assert!(!transcript.contains("\"type\":\"command_execution\""));
+    assert_eq!(
+        logs["data"]["command_event_coverage"],
+        "provider_emitted_only"
+    );
 
     let mut premature_close = fixture.agent_command(&lead_environment);
     premature_close.args([
@@ -3305,6 +3328,23 @@ fn credentials_are_redacted_from_durable_requests_and_worker_output() {
             .contains("[REDACTED]")
     });
     let all = fixture.run_json(&["logs", agent, "--json"]);
+    assert_eq!(
+        all["data"]["command_event_coverage"],
+        "provider_emitted_only"
+    );
+    let human = run({
+        let mut command = fixture.command();
+        command.args(["logs", agent]);
+        command
+    });
+    assert!(human.status.success(), "{human:?}");
+    let human: Value = serde_json::from_slice(&human.stdout).unwrap();
+    assert_eq!(
+        human["command_event_coverage"],
+        all["data"]["command_event_coverage"]
+    );
+    assert!(!human.to_string().contains(secret));
+    assert!(!human.to_string().contains("cot1_"));
     let mut transcript = String::new();
     let mut cursor = 0;
     loop {

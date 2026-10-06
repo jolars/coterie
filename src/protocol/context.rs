@@ -28,6 +28,7 @@ pub(crate) struct LogsPage {
     pub(crate) agent: super::AgentSummary,
     pub(crate) session_id: SessionId,
     pub(crate) transcript: String,
+    pub(crate) command_event_coverage: CommandEventCoverage,
     pub(crate) start_cursor: u64,
     pub(crate) total_bytes: u64,
     pub(crate) partial_head: bool,
@@ -35,6 +36,16 @@ pub(crate) struct LogsPage {
     pub(crate) eof: bool,
     pub(crate) terminal: bool,
     pub(crate) incomplete_tail: bool,
+}
+
+/// What Coterie can establish from a session's captured provider output.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CommandEventCoverage {
+    ProviderEmittedOnly,
+    NotCaptured,
 }
 
 /// A lossless prefix, explicitly distinguished from the complete stored text.

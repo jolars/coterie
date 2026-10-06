@@ -405,6 +405,18 @@ fn installed_codex_linked_worktree_commit_handoff_and_recovery() {
                 "probe observation: {}",
                 fs::read_to_string(&observation_path).unwrap()
             );
+            let helper_event_count = completed
+                .iter()
+                .filter(|item| {
+                    item["type"] == "command_execution"
+                        && item["command"]
+                            .as_str()
+                            .is_some_and(|command| command.contains(&probe))
+                })
+                .count();
+            println!(
+                "helper result artifact present; matching command_execution items: {helper_event_count}"
+            );
             for tool in ["prime", "send"] {
                 assert!(
                     completed

@@ -128,7 +128,7 @@ Read the authenticated agent's durable messages after an optional `--after <curs
 
 ### `coterie logs`
 
-`coterie logs <agent-id-or-name>` reads a provider transcript. `--tail` reaches recent output, `--after` resumes a byte cursor, `--session` pins a session, and `--follow` streams later pages. Transcript text is evidence of output, not proof of task acceptance.
+`coterie logs <agent-id-or-name>` reads a provider transcript. `--tail` reaches recent output, `--after` resumes a byte cursor, `--session` pins a session, and `--follow` streams later pages. `command_event_coverage` is `provider_emitted_only` for background jobs: Codex may omit a `command_execution` item for a command run through its code tool. An absent item does not prove the command never ran. Foreground sessions report `not_captured` because Codex owns their terminal streams. Transcript text is evidence of output, not proof of task acceptance.
 
 ### `coterie events`
 

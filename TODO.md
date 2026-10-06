@@ -394,6 +394,11 @@ These observations come from the September 15, 2026
   never ran or rely on undocumented provider session-file formats. Test human
   and JSON log views, credential redaction, and any supported adapter change.
   Keep real-provider coverage opt-in.
+  The October 6, 2026 pinned 0.153.4 probes emitted matching command items for
+  both direct and requested code-mode commands. Coterie now labels log coverage
+  and tests human and JSON views and redaction, but the reported omission has
+  not been reproduced with a complete artifact and provider-stream pair. See
+  the [investigation](docs/codex-command-events.md); keep this item open.
 
 ### Diplodocus workflow follow-ups
 

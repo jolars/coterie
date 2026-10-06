@@ -1700,6 +1700,15 @@ normalized lifecycle events for portable behavior. Unknown provider fields are
 preserved only in the raw transcript, not promoted into the stable Coterie event
 schema accidentally.
 
+For background Codex jobs, transcript pages expose `command_event_coverage` as
+`provider_emitted_only`. Coterie retains the validated `exec --json` frames it
+receives; the field does not claim that every executed shell command produced a
+`command_execution` item. In particular, commands invoked through a provider
+code tool may be absent. An absent item cannot prove that a command did not run.
+Foreground sessions, whose terminal output Coterie does not capture, report
+`not_captured`. These values describe the capture boundary, not task success or
+the provider's private session state.
+
 `coterie doctor` checks at least supervisor reachability, database migrations,
 configuration and lock compatibility, provider versions and capabilities,
 abandoned operations, stale assignments, task cycles, transcript accessibility,

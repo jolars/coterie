@@ -48,11 +48,22 @@
       "type": "integer",
       "const": 1
     },
+    "CommandEventCoverage": {
+      "description": "What Coterie can establish from a session's captured provider output.",
+      "type": "string",
+      "enum": [
+        "provider_emitted_only",
+        "not_captured"
+      ]
+    },
     "LogsPage": {
       "type": "object",
       "properties": {
         "agent": {
           "$ref": "#/$defs/AgentSummary"
+        },
+        "command_event_coverage": {
+          "$ref": "#/$defs/CommandEventCoverage"
         },
         "eof": {
           "type": "boolean"
@@ -92,6 +103,7 @@
         "agent",
         "session_id",
         "transcript",
+        "command_event_coverage",
         "start_cursor",
         "total_bytes",
         "partial_head",

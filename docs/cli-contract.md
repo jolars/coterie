@@ -911,11 +911,18 @@ inspect any agent. An agent may inspect itself and any role allowed by its
 `logs:*` capabilities. Reads return at most 65,536 bytes by default, plus up to
 three bytes to keep a UTF-8 character whole, with a `start_cursor` and
 `next_cursor` byte offsets, `total_bytes`, `session_id`, `eof`, `terminal`,
-`partial_head`, and `incomplete_tail`. Resume using both the returned session
-and cursor to avoid switching to a newer session. A cursor beyond the file
-length is refused, including after truncation. Incomplete final JSONL frames
-remain visible as transcript data and do not imply success. Invalid UTF-8 is
-displayed with replacement characters; cursors always count stored bytes.
+`partial_head`, `incomplete_tail`, and `command_event_coverage`. Background job
+pages report `provider_emitted_only`: Coterie stores Codex's validated
+`exec --json` frames, but Codex may omit `command_execution` items for shell
+commands invoked through its code tool. An absent item is not proof that the
+command did not run. Foreground pages report `not_captured` because Codex owns
+the terminal streams. For consequential commands, inspect an independent result
+artifact or rerun a safe check under the appropriate policy. Resume using both
+the returned session and cursor to avoid switching to a newer session. A cursor
+beyond the file length is refused, including after truncation. Incomplete final
+JSONL frames remain visible as transcript data and do not imply success.
+Invalid UTF-8 is displayed with replacement characters; cursors always count
+stored bytes.
 
 Use `logs <agent> --tail --limit 4096` to reach recent raw activity without
 draining earlier bootstrap or serialized context. `--tail` conflicts with
