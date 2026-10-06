@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader};
 use std::process::{Child, ChildStdin};
 use std::sync::mpsc::{Receiver, channel};
@@ -642,6 +643,8 @@ fn installed_codex_01534_command_event_probe() {
             .filter(|event| {
                 event["type"] == "item.completed"
                     && event["item"]["type"] == "command_execution"
+                    && event["item"]["status"] == "completed"
+                    && event["item"]["exit_code"] == 0
                     && event["item"]["command"]
                         .as_str()
                         .is_some_and(|value| value.contains(&exact_command))
@@ -664,6 +667,139 @@ fn installed_codex_01534_command_event_probe() {
         }
         assert_eq!(fs::read_to_string(&artifact).unwrap(), "executed\n");
     }
+}
+
+#[test]
+#[ignore = "requires explicit opt-in, Codex 0.153.4, local authentication, and model access; launches a Coterie worker"]
+fn installed_codex_01534_worker_command_event_probe() {
+    let fixture = TestEnvironment::new();
+    let home = isolated_authentication(&fixture);
+    fs::write(
+        home.join("config.toml"),
+        "model = 'gpt-6-astra'\n[features]\ncode_mode = true\ncode_mode_only = true\n",
+    )
+    .unwrap();
+    let codex = installed_codex();
+    let version = Command::new(&codex).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout).trim(),
+        "codex-cli 0.153.4"
+    );
+    println!(
+        "Coterie binary SHA-256: {}",
+        Sha256::digest(fs::read(env!("CARGO_BIN_EXE_coterie")).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let global = include_str!("../../examples/config/global.toml").replace(
+        "roles.builder]\nprovider = \"codex\"",
+        "roles.builder]\nprovider = \"real_codex\"",
+    );
+    write_global(
+        &fixture,
+        &format!(
+            "{global}\n[providers.real_codex]\ncommand = [{}]\n",
+            serde_json::to_string(&codex).unwrap()
+        ),
+    );
+    let script = fixture.root.join("command-probe.py");
+    let artifact = fixture.root.join("worker-command-result.txt");
+    fs::write(
+        &script,
+        "import pathlib, sys\npathlib.Path(sys.argv[1]).write_text('executed\\n')\nprint('COMMAND_PROBE_EXECUTED')\n",
+    )
+    .unwrap();
+    let exact_command =
+        format!("python3 {} {}", script.display(), artifact.display());
+    let capture = fixture.root.join("lead-environment");
+    let mut lead = fixture
+        .command()
+        .env("CODEX_HOME", &home)
+        .env("COTERIE_FAKE_MODE", "contract")
+        .env("COTERIE_FAKE_CAPTURE", &capture)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until("Codex command probe lead", || capture.exists());
+    let _run = StopRun(&fixture);
+    let instruction = format!(
+        "Use the JavaScript code tool to run exactly one nested tools.exec_command with cmd={exact_command:?} and workdir set to the assigned workspace. Record whether it completed, then call the Coterie finish tool with status=completed and a concise summary. Do not edit the repository, inspect credentials, or run another shell command."
+    );
+    let task = fixture.run_json(&[
+        "task",
+        "create",
+        "Observe a code-tool command",
+        "--description",
+        &instruction,
+        "--json",
+    ]);
+    let task_id = task["data"]["task"]["id"].as_str().unwrap();
+    let spawn =
+        fixture.run_json(&["spawn", "builder", "--task", task_id, "--json"]);
+    let name = spawn["data"]["agent"]["name"].as_str().unwrap();
+    let assignment_id = spawn["data"]["assignment_id"].as_str().unwrap();
+    let prime = fixture.run_json(&["prime", "--json"]);
+    let handoff = prime["data"]["commit_handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|handoff| handoff["assignment_id"] == assignment_id)
+        .unwrap();
+    println!("effective worker policy: {}", handoff["permission_profile"]);
+    let mut transcript = String::new();
+    let mut cursor = 0;
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let page = fixture.run_json(&[
+            "logs",
+            name,
+            "--after",
+            &cursor.to_string(),
+            "--json",
+        ]);
+        assert_eq!(
+            page["data"]["command_event_coverage"],
+            "provider_emitted_only"
+        );
+        transcript.push_str(page["data"]["transcript"].as_str().unwrap());
+        cursor = page["data"]["next_cursor"].as_u64().unwrap();
+        if page["data"]["terminal"] == true && page["data"]["eof"] == true {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker did not reach transcript EOF"
+        );
+        thread::sleep(Duration::from_millis(250));
+    }
+    let events: Vec<Value> = transcript
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let matches = events
+        .iter()
+        .filter(|event| {
+            event["type"] == "item.completed"
+                && event["item"]["type"] == "command_execution"
+                && event["item"]["status"] == "completed"
+                && event["item"]["exit_code"] == 0
+                && event["item"]["command"]
+                    .as_str()
+                    .is_some_and(|command| command.contains(&exact_command))
+        })
+        .count();
+    println!(
+        "Coterie worker artifact={} matching_command_events={matches} terminal_frames={}",
+        artifact.exists(),
+        events.len()
+    );
+    assert_eq!(fs::read_to_string(&artifact).unwrap(), "executed\n");
+    lead.stdin.take().unwrap().write_all(b"done\n").unwrap();
+    lead.wait().unwrap();
+    fixture.run_json(&["stop", "--json"]);
 }
 
 #[test]

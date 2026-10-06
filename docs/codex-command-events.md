@@ -38,17 +38,30 @@ so that run supplies no command-event comparison or acceptance result. The
 test's helper artifact and matching event count are printed when it reaches
 the comparison point.
 
+A narrower Coterie-launched worker probe then completed with the 0.2.0
+development binary whose SHA-256 was
+`7d58193504aaa7af7596dd2af89b59016456aa8c7058add912dfd4108d770bc9`.
+The installed provider reported `codex-cli 0.153.4`. The worker selected
+`workspace-write`, network denied, approvals disabled, and user approval
+reviewer; its isolated Codex configuration selected `gpt-6-astra` with
+`code_mode` and `code_mode_only` enabled. The worker's helper wrote its
+independent artifact, and the complete Coterie transcript through terminal EOF
+contained one matching completed `command_execution` item. This test passed in
+66.55 seconds. It verifies that Coterie retained the available event for this
+run; it did not reproduce the earlier omission or prove the provider's internal
+tool routing from a prompt alone.
+
 The opt-in raw-provider probe can be rerun with a Codex 0.153.4 executable first
 on `PATH`, available local `auth.json` authentication, and model access:
 
 ```console
 cargo test --test supervisor_runtime mcp::installed_codex_01534_command_event_probe -- --ignored --exact --nocapture
+cargo test --test supervisor_runtime mcp::installed_codex_01534_worker_command_event_probe -- --ignored --exact --nocapture
 ```
 
 The [0.153.4 JSONL item definition](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/exec/src/exec_events.rs)
 defines `command_execution` items, but it does not promise an item for every
-nested shell call. A complete diagnosis still needs a run that independently
-proves a code-tool command result, pins the model, provider build, Coterie build,
-and effective policy, and compares that result with the full provider stream
-through process exit. Until then, an omitted item is an observability limit,
-not evidence of nonexecution.
+nested shell call. Confirming the earlier report still needs a run that proves
+the code-tool route and its command result independently, yet has no matching
+item in the full provider stream through process exit. An omitted item remains
+an observability limit, not evidence of nonexecution.
