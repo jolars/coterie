@@ -608,6 +608,13 @@ exits to a particular limit; current defaults are not the run snapshot.
   permission error under the lead's selected policy. Distinguish that
   environment block from a test failure and from Git write authority; record
   handoff wait time before attributing the delay to either one.
+  The October 12 Basin run recorded below had documented devenv commands pass
+  and later commands block in the same worktree. One invocation denied the
+  Nix daemon socket while `.devenv` writes succeeded; a fresh continuation
+  separately denied a fetcher-lock write before Cargo or Python started.
+  Preserve invocation-specific results and declared environment inputs rather
+  than treating an earlier successful check as proof of later access. Include
+  this case in the preflight and validation-owner handoff tests.
 - [ ] **Medium: Show useful progress separately from coordination activity.**
   The lead inbox reached sequence 161, but engine and cache implementation
   had not started. Expose elapsed time and recorded waits for review,
@@ -663,6 +670,53 @@ establish why the process observation was lost.
   recovery test](docs/lost-worker-recovery.md) record the missing exit
   evidence, the operator-only absence check, and continuation through
   accepted closure.
+
+### Basin convergence-harness coordination follow-ups
+
+Observed October 12, 2026 in run `cr-01M4QHH2SNSS721C5ZQVMXPV18`, lead
+session `cs-01M4QHH2Y81KVXR8MYFH0CJPKF`, generation 0. Six of the 20 original
+items reached reviewed, integrated, validated closure; interrupted work stayed
+recoverable. Basin's `dev/convergence-defaults/README.md` entry S026 and
+`coordinator-validation.json`, retained at closeout commit
+`868344ed8b786ffb9b041daee7948be25040c795`, record the handoff and validation.
+The running Coterie 0.2.0 executable had SHA-256
+`22fb8746dcfa7e8be4f13437e910a52b6e7f342af78e495bac3f2fb6d501926c`;
+its source revision and the incident provider version are unknown. Workers used
+`workspace-write`, network `deny`, and approvals `never`. The user closed the
+session; these follow-ups do not authorize resuming it.
+
+- [ ] **High: Explain agent admission limits in authorized coordinator views.**
+  Reviewer and next-task launches failed with "the run has reached its agent
+  limit," including after every worker had exited. Full run-status inspection
+  was operator-only, so the lead could not establish the effective ceiling or
+  which budget was exhausted. Expose bounded capacity information through
+  `prime` or `poll` and the admission diagnostic: the applicable concurrency,
+  per-run, role, or spawn-rate limit, its usage, and the policy source. Explain
+  which limits worker exit releases and which remain consumed; do not infer
+  that this incident exhausted a concurrency limit or assume a configured
+  value. Warn before recovery or review consumes the remaining admission
+  budget, and identify the supported operator action when continuation needs
+  authority the caller lacks. Specify the view in `DESIGN.md` before changing
+  contracts. Test exited workers, repeated recoveries, concurrent admissions,
+  role limits, and stale generations. Preserve existing ceilings and explicit
+  task acceptance.
+- [ ] **Medium: Audit deployed capability discovery for interrupted workers.**
+  The running bridge did not expose retained-commit submission, and clean,
+  acknowledged commits still needed fresh recovery assignments. Two provider
+  transcripts explicitly reported "Selected model is at capacity"; other exits
+  lacked an established cause. Current source already implements retained
+  submission and deadline/exit views in the completed follow-ups above. Pin
+  the supervisor build, provider version, resolved capabilities, and bridge
+  tool catalogue when reproducing this gap. Make the authorized availability
+  and prerequisites of `task submit-retained` discoverable, and explain the
+  supported recovery path when it is unavailable. Verify that bootstrap and
+  deferred-tool discovery expose implemented commands for the selected role.
+  Cover exit diagnostics with recorded provider-capacity failures, timeouts,
+  and unknown exits; retain uncertainty when evidence is missing. Include the
+  existing [review acceptance guide](docs/review-acceptance.md) in this audit:
+  unchanged read-only review required an explicit no-op integration before
+  closure. Keep exact-commit review, exit proof, generation fencing, target
+  validation, and task acceptance; do not count provider exit as completion.
 
 ### M7 gate
 
