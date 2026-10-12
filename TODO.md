@@ -685,7 +685,7 @@ its source revision and the incident provider version are unknown. Workers used
 `workspace-write`, network `deny`, and approvals `never`. The user closed the
 session; these follow-ups do not authorize resuming it.
 
-- [ ] **High: Explain agent admission limits in authorized coordinator views.**
+- [x] **High: Explain agent admission limits in authorized coordinator views.**
   Reviewer and next-task launches failed with "the run has reached its agent
   limit," including after every worker had exited. Full run-status inspection
   was operator-only, so the lead could not establish the effective ceiling or
@@ -699,7 +699,9 @@ session; these follow-ups do not authorize resuming it.
   authority the caller lacks. Specify the view in `DESIGN.md` before changing
   contracts. Test exited workers, repeated recoveries, concurrent admissions,
   role limits, and stale generations. Preserve existing ceilings and explicit
-  task acceptance.
+  task acceptance. The [admission capacity guide](docs/admission-capacity.md)
+  records the bounded view, distinct diagnostics, operator continuation path,
+  and tests. `task check` passes for this follow-up.
 - [ ] **Medium: Audit deployed capability discovery for interrupted workers.**
   The running bridge did not expose retained-commit submission, and clean,
   acknowledged commits still needed fresh recovery assignments. Two provider

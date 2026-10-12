@@ -1,5 +1,6 @@
 //! Desired-state reconciliation and process ownership.
 
+mod admission;
 mod closure_override;
 mod commit_handoff;
 mod context;
@@ -3465,16 +3466,20 @@ fn launch_foreground(
             .iter()
             .any(|agent| agent.role == role && !agent.state.is_terminal())
     {
-        let limits = configuration.limits;
-        if (!agents.iter().any(|agent| agent.role == role)
-            && agents.len() >= usize::from(limits.max_agents_per_run))
-            || agents
-                .iter()
-                .filter(|agent| !agent.state.is_terminal())
-                .count()
-                >= usize::from(limits.max_concurrent_agents)
+        let (_, _, capacity) = admission::counters(store, run_id, now)?;
+        if !agents.iter().any(|agent| agent.role == role)
+            && capacity.agents_per_run.exhausted
         {
-            return Err(conflict("the run has reached its agent limit"));
+            return Err(admission::exhausted(
+                "limits.max_agents_per_run",
+                &capacity.agents_per_run,
+            ));
+        }
+        if capacity.concurrent_agents.exhausted {
+            return Err(admission::exhausted(
+                "limits.max_concurrent_agents",
+                &capacity.concurrent_agents,
+            ));
         }
     }
     let agent_id = AgentId::generate();
@@ -4477,7 +4482,7 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
     }
     let mut base_commit = None;
     if !replaying {
-        let (agents, task, project, readiness) = store
+        let (task, project, readiness) = store
             .transaction(|repositories| {
                 let task = repositories.task(task_id)?;
                 let project = task
@@ -4485,12 +4490,7 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
                     .map(|task| repositories.project(task.project_id))
                     .transpose()?
                     .flatten();
-                Ok((
-                    repositories.agents(run_id)?,
-                    task,
-                    project,
-                    repositories.task_readiness(task_id)?,
-                ))
+                Ok((task, project, repositories.task_readiness(task_id)?))
             })
             .map_err(rpc_state_failure)?;
         task.filter(|task| task.run_id == run_id).ok_or_else(|| {
@@ -4505,38 +4505,33 @@ fn spawn_agent<P: Provider, B: WorkspaceBackend>(
         if !readiness.is_some_and(|readiness| readiness.is_ready()) {
             return Err(conflict(format!("task `{task_id}` is not ready")));
         }
-        let now = rpc_timestamp()?;
-        let recent_spawns = store
-            .transaction(|repositories| repositories.recent_spawns(run_id, now))
-            .map_err(rpc_state_failure)?;
-        if recent_spawns
-            >= i64::from(configuration.limits.max_spawns_per_minute)
-        {
-            return Err(conflict(
-                "the run has reached its spawn rate limit; retry after the rolling minute window",
+        let (_, admission_agents, capacity) =
+            admission::counters(store, run_id, rpc_timestamp()?)?;
+        if capacity.spawns_per_minute.exhausted {
+            return Err(admission::exhausted(
+                "limits.max_spawns_per_minute",
+                &capacity.spawns_per_minute,
             ));
         }
-        let active_role_instances = agents
-            .iter()
-            .filter(|agent| agent.role == role && !agent.state.is_terminal())
-            .count();
-        if effective_role
-            .max_instances
-            .is_some_and(|limit| active_role_instances >= usize::from(limit))
-        {
-            return Err(conflict(format!(
-                "role `{role}` has reached its active instance limit"
-            )));
+        let role_capacity =
+            admission::role_budget(&configuration, &admission_agents, &role);
+        if role_capacity.exhausted {
+            return Err(admission::exhausted(
+                &format!("roles.{role}.max_instances"),
+                &role_capacity,
+            ));
         }
-        let limits = configuration.limits;
-        if agents.len() >= usize::from(limits.max_agents_per_run)
-            || agents
-                .iter()
-                .filter(|agent| !agent.state.is_terminal())
-                .count()
-                >= usize::from(limits.max_concurrent_agents)
-        {
-            return Err(conflict("the run has reached its agent limit"));
+        if capacity.agents_per_run.exhausted {
+            return Err(admission::exhausted(
+                "limits.max_agents_per_run",
+                &capacity.agents_per_run,
+            ));
+        }
+        if capacity.concurrent_agents.exhausted {
+            return Err(admission::exhausted(
+                "limits.max_concurrent_agents",
+                &capacity.concurrent_agents,
+            ));
         }
         base_commit = workspaces
             .base_commit(workspace_kind, &project)
@@ -5572,8 +5567,13 @@ fn require_capability(
         Err(RpcFailure::new(
             RpcFailureCode::PermissionDenied,
             format!(
-                "role `{}` is not authorized for `{namespace}:{action}`",
-                agent.role
+                "role `{}` is not authorized for `{namespace}:{action}`{}",
+                agent.role,
+                if namespace == "spawn" {
+                    "; ask an authorized coordinator or the operator to launch; inspecting capacity grants no authority"
+                } else {
+                    ""
+                },
             ),
         ))
     }
@@ -5962,6 +5962,14 @@ fn bootstrap_instruction(
         bootstrap.push_str(
             "\nYour role lacks task:read. Use `poll` with include_progress=false for inbox messages and `prime` for current context. Report monitoring blockers to the user or an authorized coordinator.",
         );
+    }
+    if configuration
+        .archetype
+        .roles
+        .keys()
+        .any(|target| allowed("spawn", target))
+    {
+        bootstrap.push_str("\nBefore spawning a worker or reviewer, or recovering work needing a fresh continuation, inspect prime.admission for remaining lifetime admissions, active slots, spawn rate, and policy sources. Reserve the remaining budget for recovery and review. Worker exit never restores lifetime admissions; an exhausted lifetime ceiling requires the operator to preserve work, stop the run, and start a new run under suitable trusted policy. Inspecting capacity grants no authority and provider exit never accepts a task.");
     }
     if allowed("task", "submit-retained") {
         bootstrap.push_str("\nIf a worker exits before finish with a clean retained commit, independently review that exact commit and use task_submit_retained with its full ID, review source, validation summary, and reason. Verified exit is required. This submits the original assignment without a replacement worker; integrate, validate the target, and explicitly close afterward. Dirty or uncertain work still requires task_recover.");

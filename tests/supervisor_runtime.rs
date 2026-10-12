@@ -12,6 +12,9 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde_json::Value;
 
+#[path = "supervisor_runtime/admission.rs"]
+mod admission;
+
 #[path = "supervisor_runtime/finish.rs"]
 mod finish;
 
@@ -769,7 +772,7 @@ fn configured_bindings_instructions_permissions_and_role_names_reach_providers()
             next["data"]["task"]["id"].as_str().unwrap(),
             "--json",
         ],
-        "instance limit",
+        "roles.builder.max_instances",
     );
     // Editing the file cannot raise the ceiling in the supervisor's saved policy.
     fs::write(
@@ -786,7 +789,7 @@ fn configured_bindings_instructions_permissions_and_role_names_reach_providers()
             next["data"]["task"]["id"].as_str().unwrap(),
             "--json",
         ],
-        "instance limit",
+        "roles.builder.max_instances",
     );
     let report = fixture.run_json(&["doctor", "--json"]);
     assert!(
@@ -812,19 +815,19 @@ fn disabled_roles_run_limits_and_spawn_rates_use_effective_policy() {
         (
             "[limits]\nmax_agents_per_run = 1",
             "worker",
-            "agent limit",
+            "max_agents_per_run",
             false,
         ),
         (
             "[limits]\nmax_concurrent_agents = 1",
             "worker",
-            "agent limit",
+            "max_concurrent_agents",
             true,
         ),
         (
             "[limits]\nmax_spawns_per_minute = 1",
             "reviewer",
-            "spawn rate",
+            "max_spawns_per_minute",
             true,
         ),
     ] {
@@ -853,8 +856,8 @@ fn disabled_roles_run_limits_and_spawn_rates_use_effective_policy() {
             ],
             expected,
         );
-        if first && expected == "agent limit" {
-            rejected(&fixture, &[], "agent limit");
+        if first && expected == "max_concurrent_agents" {
+            rejected(&fixture, &[], "max_concurrent_agents");
         }
         fixture.run_json(&["stop", "--json"]);
     }

@@ -1,6 +1,121 @@
 {
   "schema_version": 1,
   "data": {
+    "admission": {
+      "observed_at": 1700000000,
+      "concurrent_agents": {
+        "used": 0,
+        "limit": 8,
+        "remaining": 8,
+        "exhausted": false,
+        "released_by": "agent_terminal",
+        "source": {
+          "layer": "compiled",
+          "field": {
+            "text": "limits.max_concurrent_agents",
+            "total_bytes": 28,
+            "truncated": false
+          }
+        }
+      },
+      "agents_per_run": {
+        "used": 0,
+        "limit": 16,
+        "remaining": 16,
+        "exhausted": false,
+        "released_by": "never",
+        "source": {
+          "layer": "compiled",
+          "field": {
+            "text": "limits.max_agents_per_run",
+            "total_bytes": 25,
+            "truncated": false
+          }
+        }
+      },
+      "spawns_per_minute": {
+        "used": 0,
+        "limit": 8,
+        "remaining": 8,
+        "exhausted": false,
+        "released_by": "rolling_minute",
+        "source": {
+          "layer": "compiled",
+          "field": {
+            "text": "limits.max_spawns_per_minute",
+            "total_bytes": 28,
+            "truncated": false
+          }
+        }
+      },
+      "roles": [
+        {
+          "role": {
+            "text": "reviewer",
+            "total_bytes": 8,
+            "truncated": false
+          },
+          "enabled": true,
+          "enabled_source": {
+            "layer": "compiled",
+            "field": {
+              "text": "roles.reviewer.enabled",
+              "total_bytes": 22,
+              "truncated": false
+            }
+          },
+          "active_instances": {
+            "used": 0,
+            "limit": 1,
+            "remaining": 1,
+            "exhausted": false,
+            "released_by": "agent_terminal",
+            "source": {
+              "layer": "builtin",
+              "field": {
+                "text": "archetypes.builtin:standard@1.roles.reviewer.max_instances",
+                "total_bytes": 58,
+                "truncated": false
+              }
+            }
+          }
+        },
+        {
+          "role": {
+            "text": "worker",
+            "total_bytes": 6,
+            "truncated": false
+          },
+          "enabled": true,
+          "enabled_source": {
+            "layer": "compiled",
+            "field": {
+              "text": "roles.worker.enabled",
+              "total_bytes": 20,
+              "truncated": false
+            }
+          },
+          "active_instances": {
+            "used": 0,
+            "limit": 3,
+            "remaining": 3,
+            "exhausted": false,
+            "released_by": "agent_terminal",
+            "source": {
+              "layer": "builtin",
+              "field": {
+                "text": "archetypes.builtin:standard@1.roles.worker.max_instances",
+                "total_bytes": 56,
+                "truncated": false
+              }
+            }
+          }
+        }
+      ],
+      "omitted_roles": 0,
+      "warning": null,
+      "guidance": "Inspect admission before recovery or review. Worker exit releases active slots, while lifetime admissions remain consumed. Rate slots expire after the rolling minute. A fresh continuation or review consumes another lifetime admission. Ask the operator to preserve work, stop the run, and start a new run if the lifetime budget is exhausted."
+    },
     "session": null,
     "notifications": "unavailable",
     "identity": {

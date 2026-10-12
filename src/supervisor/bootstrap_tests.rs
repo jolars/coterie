@@ -91,6 +91,10 @@ fn coordination_bootstrap_follows_capabilities_for_any_role_name() {
             assert!(bootstrap.contains("validation"));
             assert!(bootstrap.contains("Report blockers"));
             assert!(bootstrap.contains("prime.notifications"));
+            assert_eq!(
+                bootstrap.contains("prime.admission"),
+                grants.contains("spawn:builder")
+            );
             assert!(bootstrap.contains("automatic"));
             assert!(bootstrap.contains("may end your turn"));
             assert!(bootstrap.contains("polling fallback"));

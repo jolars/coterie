@@ -6,6 +6,9 @@ use crate::workspace::GitWorkspace;
 use git2::{Repository, Signature};
 use std::os::unix::fs::DirBuilderExt;
 
+#[path = "admission_tests.rs"]
+mod admission_tests;
+
 #[path = "retained_tests.rs"]
 mod retained_tests;
 

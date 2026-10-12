@@ -1,5 +1,6 @@
 //! Versioned local RPC framing and ownership handshakes.
 
+pub(crate) mod admission;
 pub(crate) mod context;
 pub(crate) mod notifications;
 pub(crate) mod progress;
@@ -20,7 +21,7 @@ use crate::id::{
 use crate::project::ProjectKey;
 use crate::tasks::TaskStatus;
 
-pub(crate) const PROTOCOL_VERSION: u16 = 17;
+pub(crate) const PROTOCOL_VERSION: u16 = 18;
 const MAXIMUM_FRAME_LENGTH: usize = 1024 * 1024;
 
 /// A client-to-supervisor message on the local versioned transport.
@@ -757,7 +758,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 17,
+                    "protocol_version": 18,
                     "request_id": 7,
                     "authentication": {
                         "caller": "operator"
@@ -871,7 +872,7 @@ mod tests {
             json!({
                 "type": "request",
                 "body": {
-                    "protocol_version": 17,
+                    "protocol_version": 18,
                     "request_id": 9,
                     "authentication": {
                         "caller": "agent",

@@ -380,6 +380,30 @@ liveness, grant permission, judge a report, or replace explicit acceptance.
 Consult the capability list, assignment session state, recovery reference, and
 commit handoff as appropriate.
 
+`admission` is null for callers without spawn authority. The operator and
+spawn-capable agents receive `observed_at`, `concurrent_agents`,
+`agents_per_run`, `spawns_per_minute`, authorized background `roles`,
+`omitted_roles`, `warning`, and `guidance`. Each budget reports `used`, optional
+`limit` and `remaining`, `exhausted`, `released_by`, and optional `source`.
+`source` contains the saved policy layer and a bounded field preview, omitting
+host file paths. Missing historical provenance stays null. Each role reports a
+bounded name, enablement and its source, and its `active_instances` budget.
+An absent role ceiling means unbounded role capacity within run-wide ceilings.
+At most 16 roles appear, and the section shortens to fit 32 KiB.
+
+A recorded terminal agent state releases active concurrency and role capacity;
+unknown states still consume active slots. Lifetime admissions remain consumed
+when workers exit. Explicit spawns expire from the rate count after the rolling
+60-second window. Recovery itself admits no agent, but each fresh continuation
+or review spawn consumes another lifetime and rate slot. Inspect this view
+before those operations: `warning` appears at two or fewer remaining lifetime
+admissions. These observations grant no authority and admission rechecks the
+saved ceilings. A conflict names the exhausted field, usage, ceiling, source,
+and action. Waiting releases active or rate slots; an exhausted lifetime budget
+requires the operator to preserve work, stop the run, and start a new run with
+suitable trusted policy. Retained work still needs explicit review, integration,
+validation, and acceptance. Editing files cannot increase the active snapshot.
+
 The compact task section has a 64 KiB serialized JSON budget; the page shortens
 before exceeding it. Run identity, projects, peers, command guidance, and active
 commit handoffs are separate metadata. See the [bounds and measurement

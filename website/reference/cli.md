@@ -98,7 +98,7 @@ Report whether the authenticated caller is the operator or an agent, with its du
 
 ### `coterie prime`
 
-Return compact current context: identity, peers, projects, tasks, ready IDs, and authorized commands. `--after-task` and `--limit` page tasks. Full task and assignment detail is available through `show`; `prime` intentionally bounds previews.
+Return compact current context: identity, peers, projects, tasks, ready IDs, and authorized commands. `--after-task` and `--limit` page tasks. Full task and assignment detail is available through `show`; `prime` intentionally bounds previews. The operator and agents with spawn authority also receive `admission`: saved ceilings, current usage, remaining capacity, policy sources, and authorized role capacities (at most 16 roles, with an omitted count). Inspect this view before recovery or review spawns. It warns when two or fewer lifetime admissions remain.
 
 ### `coterie progress`
 
@@ -106,7 +106,7 @@ Read compact lifecycle changes. Save `next_cursor`, continue while `has_more` is
 
 ### `coterie spawn`
 
-`coterie spawn <role> --task <task-id>` atomically claims a ready task and starts a configured background role. The built-in archetype offers writable `worker` and read-only `reviewer` roles, subject to policy and limits.
+`coterie spawn <role> --task <task-id>` atomically claims a ready task and starts a configured background role. The built-in archetype offers writable `worker` and read-only `reviewer` roles, subject to policy and limits. Admission conflicts name the exhausted ceiling, usage, and saved source. Worker exit frees active concurrency and role slots, while lifetime admissions stay consumed and rate slots expire after the rolling minute. A recovery itself creates no agent; a fresh continuation or review spawn consumes another admission. If the lifetime budget is exhausted, the operator must preserve work, stop the run, and start a new run with suitable trusted policy. Carry retained work forward through explicit review, integration, validation, and acceptance. Editing configuration cannot increase the active snapshot.
 
 ### `coterie workspace integrate`
 

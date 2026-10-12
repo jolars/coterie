@@ -41,6 +41,8 @@ submit. The progress stream records timeout-control reasons and observed exit
 codes separately from task submission. Missing exit evidence remains unknown;
 an exit never accepts a task.
 
+`prime.admission` reports bounded admission budgets to callers with spawn authority. A missing view grants no authority: request launches from an authorized coordinator or the operator. Capacity is advisory and admission rechecks the saved ceilings. Conflicts retain exit code 5 and `conflict`; authentication and permission failures retain exit code 6.
+
 Read-only polling never acknowledges inbox messages. An authenticated agent uses `inbox ack` for messages it has handled. Provider output, task submission, and accepted task closure remain distinct observations.
 
 ## Exit codes

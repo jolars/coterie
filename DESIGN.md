@@ -1386,6 +1386,42 @@ until the operator repairs it. See the [publication audit](docs/git-publication.
 
 ### Bounded current context and full details
 
+Internal RPC protocol 18 adds the bounded `prime.admission` view.
+Authorized admission inspection uses `prime.admission`. The operator and agents
+with a configured spawn capability receive current run-wide concurrency,
+lifetime agent, and rolling 60-second explicit-spawn usage and ceilings from
+the saved run snapshot. Each counter includes remaining capacity, whether it
+is exhausted, its policy source layer and field, and how capacity is released.
+No host configuration paths, provider commands, or credentials appear here.
+Unknown process states still consume active slots under the existing admission
+rules; these counters report recorded lifecycle state, not a liveness inference.
+
+The view includes at most 16 background roles the caller may spawn, ordered by
+role name, with an omitted count. Each includes enablement, active usage, an
+optional role ceiling, and policy provenance. Role names and source fields use
+the existing bounded text previews. The serialized admission section is capped
+at 32 KiB, omitting additional roles if necessary. A missing historical source
+remains unknown.
+Callers without spawn authority receive no admission view. Every read rechecks
+the current session generation. The snapshot is advisory; serialized admission
+rechecks all applicable ceilings before committing an intent. Replays consume
+no additional capacity.
+
+Worker exit releases concurrency and active role slots. It never releases the
+lifetime agent count or an explicit spawn's rolling-minute slot. Task recovery
+itself admits no agent; a fresh continuation or review spawn consumes another
+lifetime and rate slot. The view warns whenever at most two lifetime admissions
+remain, before a coordinator spends them on recovery or review. Bootstrap
+guidance directs coordinators to inspect this view before those operations.
+Admission conflicts name the specific exhausted limit, usage, ceiling, and
+source. They explain whether to wait for an active slot or the rolling window.
+For an exhausted lifetime budget, the supported operator path is to preserve
+work, stop the run, and start a new run with suitable trusted policy, carrying
+retained work forward through explicit review, integration, validation, and
+acceptance. Active snapshots cannot be increased by editing configuration or
+agent requests. Missing spawn authority requires an authorized coordinator or
+operator; inspection grants no additional authority.
+
 `prime [--after-task ID] [--limit 1..50]` returns compact task and assignment
 context, defaulting to 20 tasks ordered by stable task ID. `next_task` and
 `has_more` support continued inspection. This is a current view, so callers

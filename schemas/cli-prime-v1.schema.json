@@ -16,6 +16,106 @@
     "data"
   ],
   "$defs": {
+    "AdmissionBudget": {
+      "type": "object",
+      "properties": {
+        "exhausted": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "released_by": {
+          "$ref": "#/$defs/CapacityRelease"
+        },
+        "remaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicySource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "used": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "used",
+        "limit",
+        "remaining",
+        "exhausted",
+        "released_by",
+        "source"
+      ]
+    },
+    "AdmissionView": {
+      "type": "object",
+      "properties": {
+        "agents_per_run": {
+          "$ref": "#/$defs/AdmissionBudget"
+        },
+        "concurrent_agents": {
+          "$ref": "#/$defs/AdmissionBudget"
+        },
+        "guidance": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "omitted_roles": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "roles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RoleAdmission"
+          },
+          "maxItems": 16
+        },
+        "spawns_per_minute": {
+          "$ref": "#/$defs/AdmissionBudget"
+        },
+        "warning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "observed_at",
+        "concurrent_agents",
+        "agents_per_run",
+        "spawns_per_minute",
+        "roles",
+        "omitted_roles",
+        "warning",
+        "guidance"
+      ]
+    },
     "AgentId": {
       "type": "string",
       "pattern": "^cg-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -178,6 +278,14 @@
         "agent"
       ]
     },
+    "CapacityRelease": {
+      "type": "string",
+      "enum": [
+        "agent_terminal",
+        "rolling_minute",
+        "never"
+      ]
+    },
     "CliSchemaVersion": {
       "type": "integer",
       "const": 1
@@ -238,6 +346,16 @@
         "base_commit",
         "provider",
         "permission_profile"
+      ]
+    },
+    "ConfigLayer": {
+      "type": "string",
+      "enum": [
+        "compiled",
+        "builtin",
+        "global",
+        "project",
+        "operator"
       ]
     },
     "EvidencePreview": {
@@ -337,6 +455,21 @@
         "approval_reviewer"
       ]
     },
+    "PolicySource": {
+      "type": "object",
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/TextPreview"
+        },
+        "layer": {
+          "$ref": "#/$defs/ConfigLayer"
+        }
+      },
+      "required": [
+        "layer",
+        "field"
+      ]
+    },
     "PrimePage": {
       "description": "The bounded section of prime; identity and run configuration metadata are separate.",
       "type": "object",
@@ -345,6 +478,16 @@
           "anyOf": [
             {
               "$ref": "#/$defs/TaskBrief"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "admission": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdmissionView"
             },
             {
               "type": "null"
@@ -434,6 +577,7 @@
         }
       },
       "required": [
+        "admission",
         "session",
         "notifications",
         "identity",
@@ -658,6 +802,36 @@
         "unfinished_steps_count",
         "validation_evidence",
         "unfinished_step"
+      ]
+    },
+    "RoleAdmission": {
+      "type": "object",
+      "properties": {
+        "active_instances": {
+          "$ref": "#/$defs/AdmissionBudget"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "enabled_source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicySource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/TextPreview"
+        }
+      },
+      "required": [
+        "role",
+        "enabled",
+        "enabled_source",
+        "active_instances"
       ]
     },
     "RunId": {

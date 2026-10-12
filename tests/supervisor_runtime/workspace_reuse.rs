@@ -169,7 +169,7 @@ fn custom_shared_workspaces_preserve_limits_and_recover_without_duplicate_bindin
                         third["data"]["task"]["id"].as_str().unwrap(),
                         "--json",
                     ],
-                    "active instance limit",
+                    "roles.builder.max_instances",
                 );
             } else {
                 rejected(&fixture, &next_args, "workspace path is reserved");

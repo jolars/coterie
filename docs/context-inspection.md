@@ -38,6 +38,15 @@ source and the fresh continuation separately. Next actions describe mechanical
 prerequisites, not verified liveness, permission grants, or acceptance
 judgments.
 
+`prime.admission` adds fixed run counters and at most 16 authorized background
+roles with an omitted count. Role names and source fields use 512-byte previews;
+source file paths and provider bindings are excluded. This section is separate
+from the task budget and capped at 32 KiB by shortening the role list. Its usage
+is advisory and admission rechecks the saved policy. A warning at two remaining
+lifetime admissions prompts coordinators to reserve budget for recovery and
+review. Exit releases active slots only; a fresh continuation consumes another
+lifetime admission. See [admission capacity](admission-capacity.md).
+
 Prime's identity, projects, peers, commands, and active commit handoffs are
 outside the task budget. They scale with the configured run, its attached
 projects, agent count, and path lengths. The 64 KiB task budget is therefore

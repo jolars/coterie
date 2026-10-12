@@ -317,6 +317,22 @@ fn mcp_authenticates_forwards_and_replays_agent_operations() {
     );
     let prime = client.call("prime", json!({}));
     assert_eq!(prime["result"]["isError"], false);
+    let admission = &prime["result"]["structuredContent"]["data"]["admission"];
+    assert_eq!(admission["agents_per_run"]["used"], 1);
+    assert_eq!(admission["agents_per_run"]["limit"], 16);
+    assert_eq!(admission["agents_per_run"]["source"]["layer"], "compiled");
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "prime")
+            .unwrap()["description"]
+            .as_str()
+            .unwrap()
+            .contains("admission")
+    );
+
     assert_eq!(
         prime["result"]["structuredContent"]["data"]["identity"]["run_id"],
         environment_value(&environment, "COTERIE_RUN_ID")

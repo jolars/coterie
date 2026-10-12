@@ -45,6 +45,7 @@ fn example() -> PrimePage {
         next_action: NextAction::Ready,
     };
     PrimePage {
+        admission: Some(Box::new(admission_example())),
         session: None,
         notifications: Default::default(),
         identity: crate::protocol::CallerSummary {
@@ -72,6 +73,50 @@ fn example() -> PrimePage {
             "assignment show".into(),
             "logs".into(),
         ],
+    }
+}
+
+fn admission_example() -> crate::protocol::admission::AdmissionView {
+    use crate::protocol::admission::{
+        AdmissionBudget, AdmissionView, CapacityRelease, PolicySource,
+        RoleAdmission,
+    };
+    use crate::protocol::context::TextPreview;
+    let config = crate::config::resolve(
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+    let source = |field: &str| {
+        let source = &config.provenance[field].source;
+        Some(PolicySource {
+            layer: source.layer,
+            field: TextPreview::new(&source.field),
+        })
+    };
+    let budget = |field: &str, limit: u16, released_by| AdmissionBudget {
+        used: 0,
+        limit: Some(limit),
+        remaining: Some(u64::from(limit)),
+        exhausted: false,
+        released_by,
+        source: source(field),
+    };
+    AdmissionView {
+        observed_at: 1_700_000_000,
+        concurrent_agents: budget("limits.max_concurrent_agents", config.limits.max_concurrent_agents, CapacityRelease::AgentTerminal),
+        agents_per_run: budget("limits.max_agents_per_run", config.limits.max_agents_per_run, CapacityRelease::Never),
+        spawns_per_minute: budget("limits.max_spawns_per_minute", config.limits.max_spawns_per_minute, CapacityRelease::RollingMinute),
+        roles: ["reviewer", "worker"].into_iter().map(|name| RoleAdmission {
+            role: TextPreview::new(name),
+            enabled: true,
+            enabled_source: source(&format!("roles.{name}.enabled")),
+            active_instances: budget(&format!("roles.{name}.max_instances"), config.roles[name].max_instances.unwrap(), CapacityRelease::AgentTerminal),
+        }).collect(),
+        omitted_roles: 0,
+        warning: None,
+        guidance: "Inspect admission before recovery or review. Worker exit releases active slots, while lifetime admissions remain consumed. Rate slots expire after the rolling minute. A fresh continuation or review consumes another lifetime admission. Ask the operator to preserve work, stop the run, and start a new run if the lifetime budget is exhausted.".into(),
     }
 }
 

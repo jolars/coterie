@@ -52,7 +52,7 @@ agent_tools! {
         operation_id: OperationId, delivery_id: OperationId
     } => RpcRequest::ReceiveForegroundNotification { operation_id, delivery_id },
     Whoami("whoami", "Report the authenticated agent and session identity.", true) {} => RpcRequest::Whoami,
-    Prime("prime", "Read bounded current tasks, assignment summaries, recovery references, and commit_handoffs. Drain has_more using next_task as after_task; current_task stays pinned. Fetch full text with task_show and assignment_show. Establish an authorized coordinator for worktree commits before editing. Call at startup.", true) { after_task: Option<TaskId>, limit: Option<u16> } => RpcRequest::Prime { after_task, limit: limit.unwrap_or(20) },
+    Prime("prime", "Read bounded current tasks, assignment summaries, recovery references, and commit_handoffs. Drain has_more using next_task as after_task; current_task stays pinned. Fetch full text with task_show and assignment_show. Establish an authorized coordinator for worktree commits before editing. Inspect admission budgets and warnings before recovery or review spawns; worker exit never restores lifetime admissions. Call at startup.", true) { after_task: Option<TaskId>, limit: Option<u16> } => RpcRequest::Prime { after_task, limit: limit.unwrap_or(20) },
     Status("status", "Inspect the run, agents, and tasks within this agent's authority.", true) {} => RpcRequest::Status,
     Progress("progress", "Read lifecycle changes. Save next_cursor, drain has_more, and keep the inbox cursor separate. wait_seconds is bounded by the supervisor.", true) {
         after: Option<String>, limit: u16, wait_seconds: u8
@@ -72,7 +72,7 @@ agent_tools! {
         assignment_id: AssignmentId, after: Option<u64>, limit: Option<u32>, revision: Option<String>
     } => RpcRequest::AssignmentShow { assignment_id, after: after.unwrap_or(0), limit: limit.unwrap_or(16384), revision },
     TaskReady("task_ready", "List tasks ready for assignment.", true) {} => RpcRequest::TaskReady,
-    TaskRecover("task_recover", "Retire an exited agent's unfinished assignment, snapshot preserved Git state, and record a recovery handoff. Supply reported validation_evidence and unfinished_steps with text and source references in report; omitted evidence remains unknown. Full handoffs are available through assignment_show. Requires task:recover and an active run. For a stopped run, ask the operator to use coterie run list and coterie run recover <run-id> --reason TEXT, then launch a fresh session. Active-run reconnects cannot reactivate stopped runs or revive credentials. Reuse operation_id and identical arguments on retry.", false) {
+    TaskRecover("task_recover", "Retire an exited agent's unfinished assignment, snapshot preserved Git state, and record a recovery handoff. Inspect prime.admission before planning a fresh continuation; recovery itself creates no agent, but its continuation consumes lifetime and rate budget. Supply reported validation_evidence and unfinished_steps with text and source references in report; omitted evidence remains unknown. Full handoffs are available through assignment_show. Requires task:recover and an active run. For a stopped run, ask the operator to use coterie run list and coterie run recover <run-id> --reason TEXT, then launch a fresh session. Active-run reconnects cannot reactivate stopped runs or revive credentials. Reuse operation_id and identical arguments on retry.", false) {
         operation_id: OperationId, assignment_id: AssignmentId, reason: String, report: Option<crate::protocol::recovery::RecoveryReport>
     } => RpcRequest::TaskRecover { operation_id, assignment_id, reason, report, acknowledge_lost: false },
     TaskSubmitRetained("task_submit_retained", "Submit an independently reviewed exact retained commit after verified worker exit. Requires task:submit-retained. Supply summary with validation outcomes and blocked checks, reason, and review text and source. Preserves the original files and index. Integration, target validation, and accepted closure remain separate. Reuse operation_id and identical arguments on retry.", false) {
@@ -84,7 +84,7 @@ agent_tools! {
     TaskClose("task_close", "Accept a submitted task after review, integration when needed, and validation. Requires task:close. Reuse operation_id on retry.", false) {
         operation_id: OperationId, task_id: TaskId, summary: String
     } => RpcRequest::TaskClose { operation_id, task_id, summary, operator_override: None },
-    Spawn("spawn", "Launch a configured role on a ready task within run limits. Reuse operation_id on retry.", false) {
+    Spawn("spawn", "Launch a configured role on a ready task within run limits. Inspect prime.admission first and reserve remaining lifetime admissions for recovery and review; worker exit never restores them. Reuse operation_id on retry.", false) {
         operation_id: OperationId, role: String, task_id: TaskId
     } => RpcRequest::Spawn { operation_id, role, task_id },
     WorkspaceIntegrate("workspace_integrate", "Integrate a reviewed Git result into its clean, unchanged target. Defaults to rebase for linear history; merge is opt-in. Requires workspace:integrate. Reuse operation_id on retry.", false) {

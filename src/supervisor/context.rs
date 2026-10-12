@@ -16,6 +16,7 @@ pub(super) fn prime(
     after_task: Option<TaskId>,
     limit: u16,
 ) -> Result<RpcResponse, RpcFailure> {
+    require_current_caller(store, run_id, caller)?;
     if !(1..=50).contains(&limit) {
         return Err(invalid_argument("prime limit must be between 1 and 50"));
     }
@@ -86,6 +87,7 @@ pub(super) fn prime(
     }
     Ok(RpcResponse::Prime {
         page: crate::protocol::context::PrimePage {
+            admission: admission::view(store, run_id, caller)?.map(Box::new),
             session: match caller {
                 AuthenticatedCaller::Agent(scope) => Some(Box::new(*scope)),
                 AuthenticatedCaller::Operator => None,

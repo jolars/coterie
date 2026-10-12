@@ -74,7 +74,9 @@ pub(crate) enum Command {
     Doctor,
     /// Report the authenticated caller's identity.
     Whoami,
-    /// Read bounded current task and assignment context; use `task show` for full details.
+    /// Read bounded tasks, assignments, and authorized admission budgets.
+    ///
+    /// Inspect admission before recovery or review; use `task show` for full details.
     Prime(PrimeArguments),
     /// Inspect compact lifecycle changes; task submission and provider exit are separate.
     Progress(ProgressArguments),
