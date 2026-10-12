@@ -1194,6 +1194,20 @@ validation requests or infer that blocked checks passed. NixOS regression tests
 are opt-in and pin the build, provider and environment versions, commands, paths,
 and effective policy; ordinary CI does not require NixOS or model access.
 
+Before expensive implementation, agents agree on required validation commands,
+declared environment inputs, and a named validation owner through durable
+messages. Required checks remain visibly pending until results are recorded.
+Assignment preflight uses a minimal documented environment command; a denied
+prerequisite is recorded once and routed to an authorized owner rather than
+repeatedly probed. Each invocation retains its own exact source identity,
+session generation, relevant environment, actual policy, times, and outcomes.
+Historical success does not prove current environment access. Evidence reuse
+requires the same source and relevant environment; edits, recovery onto a new
+base, and integration require appropriate checks. Handoff request,
+acknowledgment, and result times distinguish waiting from execution and from
+separate Git commit authority. The detailed workflow is defined in
+[`docs/validation-environments.md`](docs/validation-environments.md).
+
 For a job agent, `COTERIE_PROJECT_ROOT` and the process working directory
 identify the task's target project or isolated worktree. For the lead, they
 initially identify the primary project. `coterie prime` always reports every

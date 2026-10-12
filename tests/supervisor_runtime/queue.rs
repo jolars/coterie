@@ -8,6 +8,13 @@ const WORKER_MESSAGE: &str = "COTERIE_QUEUE_WORKER_SUBMITTED";
 const WITNESS_TITLE: &str = "Coterie queue notification handled";
 const THREAD_ID: &str = "01234567-89ab-cdef-0123-456789abcdef";
 
+fn publish_response(path: &Path, response: &Value) {
+    // Readers use existence as readiness, so publish only complete documents.
+    let pending = path.with_extension("pending");
+    fs::write(&pending, serde_json::to_vec(response).unwrap()).unwrap();
+    fs::rename(pending, path).unwrap();
+}
+
 #[test]
 fn fake_queue_foreground() {
     let Ok(ready) = std::env::var("COTERIE_TEST_QUEUE_READY") else {
@@ -34,7 +41,7 @@ fn fake_queue_foreground() {
         "progress",
         json!({"after":null, "limit":50, "wait_seconds":0}),
     );
-    fs::write(&ready, serde_json::to_vec(&prime).unwrap()).unwrap();
+    publish_response(Path::new(&ready), &prime);
     if std::env::var_os("COTERIE_TEST_QUEUE_BUSY").is_some() {
         bridge.call("progress", json!({"after":progress["result"]["structuredContent"]["data"]["next_cursor"],"limit":50,"wait_seconds":5}));
         fs::write(format!("{ready}.idle"), "").unwrap();
@@ -43,11 +50,10 @@ fn fake_queue_foreground() {
     while std::io::stdin().read_line(&mut input).unwrap() != 0 {
         if input.trim() == "prime" {
             let prime = bridge.call("prime", json!({}));
-            fs::write(
-                format!("{ready}.reconnected"),
-                serde_json::to_vec(&prime).unwrap(),
-            )
-            .unwrap();
+            publish_response(
+                Path::new(&format!("{ready}.reconnected")),
+                &prime,
+            );
         } else if input.trim().starts_with('{') {
             let command: Value = serde_json::from_str(&input).unwrap();
             if command["reconnect"] == true {
@@ -61,11 +67,10 @@ fn fake_queue_foreground() {
                 command["name"].as_str().unwrap(),
                 command["arguments"].clone(),
             );
-            fs::write(
-                command["response_path"].as_str().unwrap(),
-                serde_json::to_vec(&response).unwrap(),
-            )
-            .unwrap();
+            publish_response(
+                Path::new(command["response_path"].as_str().unwrap()),
+                &response,
+            );
         } else {
             break;
         }

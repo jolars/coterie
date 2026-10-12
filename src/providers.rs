@@ -1243,8 +1243,20 @@ fn codex_bootstrap(
     let profile = serde_json::to_string(&specification.permission_profile)
         .expect("permission profiles serialize as JSON");
     let server = mcp::server_name(specification.scope);
+    let validation = concat!(
+        "Use non-login shell tools to preserve the inherited toolchain PATH. ",
+        "Before expensive work, agree on required validation argument arrays, declared environment inputs, and a named validation owner through durable messages. ",
+        "Run an assignment preflight using the smallest documented environment command. Keep required checks visibly pending until an authorized owner acknowledges them and records results. ",
+        "Diagnose validation environment access separately from Git permissions: record each command, working directory, selected policy, and whether it passed, failed, or blocked, with its diagnostic. ",
+        "Record request, acknowledgment, and result times separately from execution and Git commit wait. ",
+        "Each invocation needs its own exact source identity, session generation, environment inputs, start/end times, and result; an earlier pass does not prove later access in the same worktree. ",
+        "PATH alone does not establish a full development environment; use the repository's documented entry command in the assigned workspace when needed. ",
+        "Nix daemon denial, `.devenv` write denial, and fetcher-lock denial before Cargo or Python starts are separate blockers. ",
+        "Record a denied check once and route it through an authorized durable message without repeated denied probes. A handoff grants no authority; do not widen permissions or bypass required checks. ",
+        "Reuse validation evidence only for the exact source and relevant environment; edits, recovery onto a new base, and integration require appropriate checks. "
+    );
     let instruction = format!(
-        "Coterie MCP server: {server}. {} Selected permission profile: {profile}. Coterie executable: {executable:?}. Use non-login shell tools to preserve the inherited toolchain PATH. Diagnose validation environment access separately from Git permissions: record each command, working directory, selected policy, and whether it passed, failed, or blocked, with its diagnostic. PATH alone does not establish a full development environment; use the repository's documented entry command in the assigned workspace when needed. Nix daemon denial and `.devenv` write denial are separate blockers; do not widen permissions or bypass required checks. Report blocked validation to an authorized coordinator through durable messages. If the Coterie tools are missing or inaccessible, report the server name and error to the operator; do not bypass the sandbox or change permissions. Never print tokens or the complete environment.\n{}",
+        "Coterie MCP server: {server}. {} Selected permission profile: {profile}. Coterie executable: {executable:?}. {validation}If the Coterie tools are missing or inaccessible, report the server name and error to the operator; do not bypass the sandbox or change permissions. Never print tokens or the complete environment.\n{}",
         crate::mcp::INSTRUCTIONS,
         specification.bootstrap_instruction
     );
@@ -3421,6 +3433,17 @@ mod tests {
             "Nix daemon",
             ".devenv",
             "do not widen permissions",
+            "Before expensive work",
+            "declared environment inputs",
+            "named validation owner",
+            "visibly pending",
+            "request, acknowledgment, and result times",
+            "Each invocation",
+            "earlier pass does not prove later access",
+            "fetcher-lock",
+            "without repeated denied probes",
+            "exact source and relevant environment",
+            "recovery onto a new base",
         ] {
             assert!(bootstrap.contains(expected), "missing {expected}");
         }

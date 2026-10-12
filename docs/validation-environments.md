@@ -6,6 +6,116 @@ Git commit handoff does not establish that validation passed.
 
 ## Supported workflow
 
+### Assignment preflight and ownership
+
+Before expensive implementation, the assignee and coordinator agree on the
+required validation commands and a named validation owner. Record the agreement
+in a durable message, referencing the task and assignment IDs. Use the following
+fields so another session can reconstruct the handoff:
+
+- Required checks: exact argument arrays, working directories, and documented
+  environment entry commands.
+- Declared inputs: toolchain versions, lock files, required environment variable
+  names, services, kernel features, and network destinations. Record only safe
+  values; never include credentials or the complete environment.
+- Source: base commit and current commit, or an explicit dirty-tree description
+  with content hashes for changed and untracked inputs. A commit alone cannot
+  identify uncommitted work.
+- Actual policy: the assignment's saved filesystem, network, and approval
+  policy, session ID, and generation. Configuration on disk is insufficient.
+- Ownership: validation owner, checks pending, request time, and acknowledgment
+  time. Record completion time when results arrive. Keep Git commit authority
+  separate from validation ownership.
+
+Run the smallest documented command that establishes the required environment
+before implementation. A preflight result establishes only what that invocation
+observed. If the environment cannot start, record the block once and send its
+durable record to an authorized coordinator. The coordinator acknowledges which
+checks they own; until acknowledgment, ownership is pending. Continue
+independent work when useful, but keep blocked required checks pending after
+submission. Do not accept the task while required checks remain blocked or
+failed. Do not repeatedly probe a denied operation
+without a changed prerequisite or an explicitly requested diagnostic.
+
+Use the existing `send` and authenticated recipient's `inbox` tools for these
+records. The coordinator includes the validation owner and pending checks in its
+user-facing progress report. Operator `events` shows delivery metadata and
+message IDs, not the message bodies; the operator has no agent inbox. A validation
+owner is the agent or operator who agreed to perform specified checks under
+their existing policy. It is independent of role names, task assignment, and Git
+write authority. If that owner also encounters a block, record the new
+invocation and leave the check pending until its prerequisite changes or another
+authorized owner accepts it. A handoff never grants access.
+
+For example, a request can say:
+
+```text
+Validation request: task <task-id>, assignment <assignment-id>.
+Required: ["devenv", "--offline", "--no-tui", "shell", "--", "cargo", "test"].
+Directory: <assigned-worktree>. Source: <commit and changed-input hashes>.
+Inputs: <lock-file hashes, tool versions, required variables and services>.
+Actual policy/session: <saved profile, session ID, generation>.
+Preflight: blocked before Cargo started; <exit status and daemon diagnostic>.
+Validation owner: pending acknowledgment from <authorized coordinator>.
+Pending: Cargo test. Requested: <timestamp>. Git commit handoff: separate.
+```
+
+The coordinator replies with the request's message ID, owned checks, remaining
+pending checks, and acknowledgment time. Each result references that request and
+its own invocation record. Preserve the original request and observations rather
+than replacing them with a later summary. Use one operation ID and identical
+arguments when retrying delivery; retrying delivery does not require rerunning
+the check. These are reported message contents, not a new CLI schema or
+automatic validation gate. Agents review their source and environment scope
+before relying on them, and retain required tests in the task's acceptance
+criteria.
+
+### Invocation records and evidence reuse
+
+Give each invocation its own record, linked to the preflight or handoff message.
+Include its start and end times, source identity, assignment, session
+generation, declared inputs, actual policy, command, directory, exit status,
+outcome, and diagnostic. Distinguish **passed**, **failed** (the check ran and
+rejected the source), **blocked** (a prerequisite prevented the check), and
+**pending** (no result yet). Partial execution may produce a failed check and a
+separate blocked check; preserve both. A shell exit code alone does not
+distinguish these cases.
+
+Identify the source before and after execution. If it changed while the check
+ran, keep the observation but do not bind a pass to either version without a
+check on stable inputs. Record unknown source or environment inputs explicitly.
+
+Reuse a result only for the exact source and relevant environment that it
+validated. If either is unknown, record the evidence as historical and leave the
+required check pending. Edits invalidate checks affected by those inputs.
+Recovery onto a new base and integration into a target require appropriate
+checks on the resulting source. Matching source does not turn a historical
+environment observation into proof that a fresh invocation has access.
+
+For handoffs, measure request-to-acknowledgment and acknowledgment-to-result
+wait times separately from command execution. A Git commit wait is a separate
+record. These timestamps establish where time was spent without attributing
+every delay to sandbox policy or unavailable Git writes.
+
+The October 12 Basin case is a regression scenario: an initial documented devenv
+command passes, a later invocation in the same worktree cannot connect to the
+Nix daemon even though workspace-local `.devenv` writes succeed, and a fresh
+continuation cannot write a fetcher lock before Cargo or Python starts. Preserve
+all three invocation results. The initial pass does not satisfy checks on later
+edits or prove later environment access. Assign the blocked required checks to
+an authorized validation owner without changing the worker's permissions.
+
+The ordinary tests in
+[`tests/supervisor_runtime/validation_handoffs.rs`](../tests/supervisor_runtime/validation_handoffs.rs)
+exercise this workflow through authenticated messages, actual source edits,
+passing and failing content checks, session replacement, and recovery onto a new
+base. They retain reported fixture environment denials and verify that handoffs
+leave source files, worker policy, commit guards, and dependent task readiness
+intact. Their daemon and fetcher-lock diagnostics are synthetic; the opt-in
+regression below supplies real sandbox-access evidence.
+
+### Environment preparation
+
 1. Prepare the repository's documented development environment as the operator
    before starting Coterie, for example, `devenv shell -- coterie` in a devenv
    project. This can realize tools through the operator's existing Nix daemon

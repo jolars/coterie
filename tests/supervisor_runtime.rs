@@ -42,6 +42,9 @@ mod permissions;
 #[path = "supervisor_runtime/workspace_reuse.rs"]
 mod workspace_reuse;
 
+#[path = "supervisor_runtime/validation_handoffs.rs"]
+mod validation_handoffs;
+
 #[path = "supervisor_runtime/mcp.rs"]
 mod mcp;
 

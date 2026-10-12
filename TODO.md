@@ -587,7 +587,7 @@ exits to a particular limit; current defaults are not the run snapshot.
   and keeps dependencies blocked through integration and target validation
   until accepted closure. All 584 ordinary tests and the `task check` gates
   pass; real-provider tests remain opt-in.
-- [ ] **Medium: Make validation handoffs schedulable before expensive work.**
+- [x] **Medium: Make validation handoffs schedulable before expensive work.**
   Workers could edit and run some direct Cargo checks, but documented devenv
   entry encountered Nix daemon or fetcher-lock denials; some runtime checks
   also lacked kernels or permitted loopback access. Git metadata access was
@@ -615,6 +615,16 @@ exits to a particular limit; current defaults are not the run snapshot.
   Preserve invocation-specific results and declared environment inputs rather
   than treating an earlier successful check as proof of later access. Include
   this case in the preflight and validation-owner handoff tests.
+  The workflow and provider bootstrap now specify assignment preflight, named
+  validation ownership, pending checks, invocation-specific evidence, and
+  request/acknowledgment/result timing through durable messages. The bootstrap
+  contract test and ordinary authenticated handoff tests cover these
+  instructions, delivery retries, failed versus blocked checks, session
+  replacement, and the Basin sequence with recovery onto a new base. The complete
+  `task check` gate passed all 599 ordinary tests and the required formatting,
+  lint, documentation, site, dependency, release, and Nix checks. Fixture
+  environment denials remain explicitly reported observations; real-provider
+  sandbox-access regression remains an opt-in.
 - [ ] **Medium: Show useful progress separately from coordination activity.**
   The lead inbox reached sequence 161, but engine and cache implementation
   had not started. Expose elapsed time and recorded waits for review,
