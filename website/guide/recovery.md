@@ -36,7 +36,11 @@ coterie task submit-retained --assignment <assignment-id> --result <full-commit-
 
 Coterie requires a verified process exit, current assignment ownership, and a clean worktree at the specified commit. An acknowledgement message alone is insufficient. The command records the review as an attributed report; it does not execute checks or accept the task. Integrate the submitted result, validate the target, and explicitly close the task. Use the same operation ID and arguments to retry an uncertain response.
 
+Agents check MCP `prime.commands` for `task_submit_retained` and discover that exact tool name with `tool_search` when tools are deferred. The common tool catalogue grants no authority. If authority is missing, ask an authorized coordinator or the operator. If an authorized tool is absent, report the server name and diagnostic so the operator can inspect the deployed supervisor and bridge. After verified exit, ordinary `task recover` and a fresh worktree continuation provide the alternative path.
+
 Dirty work, an uncertain exit, or a changed commit requires inspection. A retired recovery source cannot use this path. Follow the fresh-worktree workflow below when further implementation is needed.
+
+Unchanged reviews in a Git worktree still require explicit guarded integration before closure, even when the result equals the base commit. Validate against the current target, and record which commit the review actually covered.
 
 ## Continue an interrupted worker task
 

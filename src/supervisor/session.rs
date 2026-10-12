@@ -303,6 +303,9 @@ impl<P: Provider> AgentSessionSupervisor<P> {
         let probe = self.provider.probe()?;
         validate_provider_probe(&probe, launch)?;
 
+        let configuration = store.configuration(launch.scope.run_id)?;
+        let launch_contract =
+            super::launch_contract::snapshot(&probe, launch, &configuration);
         let token = AgentToken::generate()?;
         let transcript_path =
             TranscriptStore::relative_path(launch.scope.session_id);
@@ -407,6 +410,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
                     "generation": launch.scope.generation,
                     "provider": probe.name,
                     "state": LifecycleState::Starting.as_str(),
+                    "launch_contract": launch_contract,
                 }),
                 summary: format!(
                     "Started session {} for agent {}.",
@@ -1365,7 +1369,7 @@ impl<P: Provider> AgentSessionSupervisor<P> {
     }
 }
 
-fn required_capabilities(
+pub(super) fn required_capabilities(
     launch: &AgentLaunch,
 ) -> impl Iterator<Item = ProviderCapability> {
     let mode = match launch.mode {

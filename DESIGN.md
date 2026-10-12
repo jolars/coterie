@@ -951,6 +951,17 @@ releases dependent tasks. No persistent schema change is needed: existing task
 results, operation results, and typed events retain the submission evidence.
 Internal RPC protocol 17 carries the new request and response.
 
+Retained submission discovery uses the existing `prime.commands` authorization
+view and MCP `task_submit_retained` catalogue entry. The common catalogue lists
+implemented tools for every role; presence alone grants no authority. Bootstrap
+instructs agents to discover deferred tools by their exact MCP name and to check
+`prime.commands`. Missing authority requires an authorized coordinator or the
+operator. An absent tool in an older deployment requires an operator audit of
+the running supervisor and bridge before choosing ordinary verified-exit
+recovery and a fresh worktree continuation. Unknown exits require inspection;
+only the operator may acknowledge lost exit evidence under the separate absence
+checks above. Neither discovery nor a provider error bypasses these guards.
+
 An incorrect unintegrated Git submission can be superseded explicitly with
 `coterie task resubmit --assignment ID --expected-result OLD --result NEW
 --summary TEXT --reason TEXT`. The operator or an agent with `task:resubmit`
@@ -1976,6 +1987,21 @@ rejected before forwarding.
 The adapter probes the installed provider's stdio configuration interface and
 requires its configured bridge to initialize. Unique session server names
 prevent a prior generation's tool catalog from proving startup readiness.
+
+Each new supervisor-owned worker's `session.started` event records a
+`launch_contract` with the supervisor version, Linux running-executable SHA-256
+(or null when unreadable), internal protocol version, probed provider version
+and capabilities, required provider capabilities, selected role and permission
+profile, saved configuration fingerprint, and compiled bridge catalogue names
+and SHA-256. This records the admitted contract before launch, not proof that a
+provider initialized or discovered every tool. The operator compares it with
+an authenticated bridge's actual `tools/list` and the provider's MCP inventory
+when auditing deployment. Historical events lack this evidence; do not infer
+it from a newly installed CLI or provider. The catalogue hash covers compact
+JSON of the ordered generated tool array. Launch evidence contains no commands,
+credentials, inherited environments, or role instructions. Existing events
+store it without a schema migration or a new agent inspection capability.
+
 For `codex exec`, all generated permission and MCP configuration overrides
 follow the `exec` subcommand so its own configuration parser receives them.
 Real-provider acceptance covers the foreground TUI in a PTY and actual worker

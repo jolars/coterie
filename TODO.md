@@ -702,7 +702,7 @@ session; these follow-ups do not authorize resuming it.
   task acceptance. The [admission capacity guide](docs/admission-capacity.md)
   records the bounded view, distinct diagnostics, operator continuation path,
   and tests. `task check` passes for this follow-up.
-- [ ] **Medium: Audit deployed capability discovery for interrupted workers.**
+- [x] **Medium: Audit deployed capability discovery for interrupted workers.**
   The running bridge did not expose retained-commit submission, and clean,
   acknowledged commits still needed fresh recovery assignments. Two provider
   transcripts explicitly reported "Selected model is at capacity"; other exits
@@ -719,6 +719,11 @@ session; these follow-ups do not authorize resuming it.
   unchanged read-only review required an explicit no-op integration before
   closure. Keep exact-commit review, exit proof, generation fencing, target
   validation, and task acceptance; do not count provider exit as completion.
+  The [discovery audit](docs/interrupted-worker-discovery.md) records historical
+  capacity frames and missing deployment evidence, fixes the authorized MCP
+  tool spelling, pins new worker launch contracts, and verifies discovery and
+  acceptance with deterministic providers. `task check` passes; real-provider
+  discovery remains opt-in.
 
 ### M7 gate
 

@@ -6,6 +6,7 @@ mod commit_handoff;
 mod context;
 mod doctor;
 mod idle;
+mod launch_contract;
 mod notifications;
 mod progress;
 mod projects;
@@ -5972,7 +5973,9 @@ fn bootstrap_instruction(
         bootstrap.push_str("\nBefore spawning a worker or reviewer, or recovering work needing a fresh continuation, inspect prime.admission for remaining lifetime admissions, active slots, spawn rate, and policy sources. Reserve the remaining budget for recovery and review. Worker exit never restores lifetime admissions; an exhausted lifetime ceiling requires the operator to preserve work, stop the run, and start a new run under suitable trusted policy. Inspecting capacity grants no authority and provider exit never accepts a task.");
     }
     if allowed("task", "submit-retained") {
-        bootstrap.push_str("\nIf a worker exits before finish with a clean retained commit, independently review that exact commit and use task_submit_retained with its full ID, review source, validation summary, and reason. Verified exit is required. This submits the original assignment without a replacement worker; integrate, validate the target, and explicitly close afterward. Dirty or uncertain work still requires task_recover.");
+        bootstrap.push_str("\nIf another worker exits before finish with a clean retained commit, independently review that exact commit and use task_submit_retained with its full lowercase ID, review source, validation summary, and reason. The current assignment must still own its claim, credentials must be revoked, and a recorded exit plus fresh provider proof is required. HEAD and the owned reference must equal the reviewed commit with a clean, fully inspectable index and worktree and no pending resource operations. You cannot submit your own assignment through this path. This submits the original assignment without a replacement worker; integrate, validate the target, and explicitly close afterward. Dirty work needs task_recover and a fresh continuation after verified exit. Unknown or lost exits require operator inspection, never an inferred exit.");
+    } else {
+        bootstrap.push_str("\nYour role lacks task:submit-retained. If a worker exits before submission, preserve its work and ask an authorized coordinator or the operator to independently review and submit its exact clean retained commit. Ordinary task_recover requires verified exit and recovery authority, then a fresh worktree continuation. Missing exit evidence requires operator inspection; do not infer exit from process absence.");
     }
     if allowed("task", "recover") {
         bootstrap.push_str("\nWhen using task_recover, supply report with validation_evidence and unfinished_steps arrays of {text, source} from available messages, logs, or artifacts. Report blocked checks explicitly. Coterie records this context without executing it or treating reported checks as verified acceptance.");
@@ -5982,7 +5985,7 @@ fn bootstrap_instruction(
     );
     if allowed("workspace", "integrate") {
         bootstrap.push_str(
-            "\nAfter reviewing a submitted Git result, use `workspace_integrate` with assignment_id=<assignment_id> when integration is needed, then validate the integrated target.",
+            "\nAfter reviewing a submitted Git worktree result, use `workspace_integrate` with assignment_id=<assignment_id>, including for an unchanged read-only review at its base commit. This explicit no-op integration is still required before closure. Then validate the integrated target; a review of an older commit does not establish review of a newer target.",
         );
     } else {
         bootstrap.push_str(

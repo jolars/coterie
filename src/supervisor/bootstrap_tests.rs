@@ -91,6 +91,23 @@ fn coordination_bootstrap_follows_capabilities_for_any_role_name() {
             assert!(bootstrap.contains("validation"));
             assert!(bootstrap.contains("Report blockers"));
             assert!(bootstrap.contains("prime.notifications"));
+            let retained = config
+                .archetype
+                .authorize(role, Capability::new("task", "submit-retained"))
+                == AuthorizationDecision::Allowed;
+            assert_eq!(
+                bootstrap.contains("use task_submit_retained"),
+                retained
+            );
+            assert_eq!(
+                bootstrap.contains("Your role lacks task:submit-retained"),
+                !retained
+            );
+            assert_eq!(
+                bootstrap.contains("explicit no-op integration"),
+                integrate
+            );
+
             assert_eq!(
                 bootstrap.contains("prime.admission"),
                 grants.contains("spawn:builder")

@@ -31,6 +31,15 @@ agents to `tool_search` when the tools are deferred. Other orchestration actions
 also use MCP. The public CLI remains available to operators and ordinary
 processes.
 
+MCP `prime.commands` reports callable tool names, including
+`task_submit_retained` when authorized. CLI `prime.commands` retains CLI
+spellings such as `task submit-retained`. Discover deferred tools by their
+exact MCP names. The shared catalogue advertises implementation, while the
+selected role and current generation determine authority. Missing or inaccessible
+authorized tools require an operator deployment audit; preserve work and use
+ordinary verified-exit recovery with a fresh continuation when retained
+submission is unavailable.
+
 The bootstrap includes conditional guidance for any role coordinating delegated
 work: keep coordinating while work remains, unless the user pauses it. Command
 guidance follows the role's snapshotted capabilities, including custom roles. It
@@ -1032,6 +1041,16 @@ than the requested limit. Mutations that would create a larger event return
 returned individually. Each response returns `next_cursor`, which can be passed
 to `--after` to resume without replaying earlier events. Full event-stream
 inspection is operator-only.
+
+New supervisor-owned worker `session.started` payloads include a
+`launch_contract` with the running supervisor's version, protocol version,
+executable SHA-256 (or null if unreadable), provider probe and required
+capabilities, selected role and permission profile, saved configuration
+fingerprint, and compiled bridge catalogue names and SHA-256. This records
+admission before launch; it does not prove provider initialization or tool
+discovery. Compare it with actual authenticated MCP discovery using the
+[deployment audit](interrupted-worker-discovery.md). Historical events without
+this evidence remain unknown.
 
 `--follow` emits nonempty pages as they become available and drains the stopped
 run through a final empty page before exiting. Operator followers reconnect to

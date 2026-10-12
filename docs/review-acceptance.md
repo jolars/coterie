@@ -31,6 +31,12 @@ this guide concerns assignments with a Git worktree result.
    submitted report and integration identities and records the validation
    summary. Only this transition to `closed` releases dependencies.
 
+Bootstrap and the `workspace_integrate` catalogue entry explicitly describe
+this unchanged-review requirement. The [interrupted worker discovery
+audit](interrupted-worker-discovery.md) includes it when selecting retained
+submission or recovery; neither path can bypass no-op integration and target
+validation.
+
 Use the corresponding Coterie MCP tools for agent orchestration. Allocate a new
 operation ID before each mutation. After an uncertain response, retry with the
 same operation ID and identical arguments. Successful retries replay the saved

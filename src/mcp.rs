@@ -19,7 +19,7 @@ mod tools;
 
 const MAXIMUM_MESSAGE_BYTES: usize = 1024 * 1024;
 const PROTOCOL_VERSION: &str = "2025-06-18";
-pub(crate) const INSTRUCTIONS: &str = "Use the Coterie MCP tools for all orchestration. Call prime at startup. If tools are deferred, discover them with tool_search using Coterie prime as the query. Call new_operation_id before each mutation. After uncertainty, call retry_mutation with that ID; if unavailable, repeat the original tool with the same ID and arguments. Tokens and caller identity are supplied by the bridge; never put them in tool arguments. Use poll for progress and pending inbox messages; inbox_handled acknowledges only explicitly handled messages. Shell commands retain their selected sandbox restrictions.";
+pub(crate) const INSTRUCTIONS: &str = "Use the Coterie MCP tools for all orchestration. Call prime at startup. If tools are deferred, discover them with tool_search using Coterie prime as the query, then search for the exact MCP tool name you need, such as Coterie task_submit_retained. Check prime.commands for your selected role's authorized commands; the common tool catalogue advertises implemented tools and grants no authority. If an authorized tool is absent or inaccessible, report the server name and diagnostic to the operator to audit the deployed supervisor and bridge. Preserve work; an authorized coordinator or operator can use verified-exit task_recover and a fresh worktree continuation when retained submission is unavailable. Unknown exits require operator inspection. Call new_operation_id before each mutation. After uncertainty, call retry_mutation with that ID; if unavailable, repeat the original tool with the same ID and arguments. Tokens and caller identity are supplied by the bridge; never put them in tool arguments. Use poll for progress and pending inbox messages; inbox_handled acknowledges only explicitly handled messages. Shell commands retain their selected sandbox restrictions.";
 
 #[derive(Debug, Error)]
 pub(crate) enum McpError {
@@ -344,7 +344,7 @@ async fn call_tool(
             if let crate::protocol::RpcResponse::Prime { page } = &mut response
             {
                 for command in page.commands.iter_mut() {
-                    *command = command.replace(' ', "_");
+                    *command = command.replace([' ', '-'], "_");
                 }
                 page.commands.extend([
                     "inbox_acknowledge".to_owned(),

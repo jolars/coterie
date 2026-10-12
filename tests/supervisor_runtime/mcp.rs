@@ -20,6 +20,9 @@ mod rediscovery;
 #[path = "client_bookkeeping.rs"]
 mod client_bookkeeping;
 
+#[path = "discovery.rs"]
+mod discovery;
+
 pub(super) struct McpClient {
     child: Child,
     input: Option<ChildStdin>,
@@ -500,6 +503,25 @@ fn installed_codex_mcp_routes_authenticated_rpc() {
             ),
             "the real provider must advertise the tool catalog: {inventory}"
         );
+        let expected: Value = serde_json::from_str(include_str!(
+            "../../schemas/mcp-tools-v1.json"
+        ))
+        .unwrap();
+        let advertised = inventory["result"]["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == server)
+            .unwrap()["tools"]
+            .as_object()
+            .unwrap();
+        for tool in expected["tools"].as_array().unwrap() {
+            let name = tool["name"].as_str().unwrap();
+            assert!(
+                advertised.contains_key(name),
+                "provider discovery omitted {name}"
+            );
+        }
         for tool in ["whoami", "prime"] {
             let result = app.request("mcpServer/tool/call", json!({"threadId":thread_id,"server":server,"tool":tool,"arguments":{}}));
             assert!(
@@ -876,7 +898,7 @@ fn installed_codex_jobs_use_mcp_and_preserve_the_sandbox() {
         wait_until("real Codex test lead", || capture.exists());
         let _run = StopRun(&fixture);
         let instruction = format!(
-            "Exercise Coterie's MCP bridge without changing the repository. Use only the Coterie MCP tools for orchestration. Call prime and inbox. Allocate an operation ID and call task_create with title=denied, description=capability test, project=primary, group=null, dependencies=[]; expect permission_denied and do not retry or escalate. Run this exact local policy observation with a non-login shell: python3 {} {} {} {} {profile}. Report its output in your finish summary. Allocate a fresh operation ID and call finish with status=completed. The worktree is clean and needs no commit. Do not perform any other work, change permissions, or print credentials.",
+            "Exercise Coterie's MCP bridge without changing the repository. Use only the Coterie MCP tools for orchestration. Call prime and inbox. Discover task_submit_retained by its exact name with tool_search if deferred. Confirm prime.commands omits it for your role. Allocate an operation ID and call task_submit_retained with submission containing assignment_id from prime.active_task.assignment.id, result_commit from that assignment base_commit, summary=discovery test, reason=discovery test, and review with text=discovery test and source=test prompt. Expect permission_denied and do not retry or escalate. Allocate a different operation ID and call task_create with title=denied, description=capability test, project=primary, group=null, dependencies=[]; expect permission_denied and do not retry or escalate. Run this exact local policy observation with a non-login shell: python3 {} {} {} {} {profile}. Report its output in your finish summary. Allocate a fresh operation ID and call finish with status=completed. The worktree is clean and needs no commit. Do not perform any other work, change permissions, or print credentials.",
             script.display(),
             socket.display(),
             tcp.local_addr().unwrap().port(),
@@ -947,6 +969,12 @@ fn installed_codex_jobs_use_mcp_and_preserve_the_sandbox() {
                 && item["tool"] == "task_create"
                 && item.to_string().contains("permission_denied")),
             "{profile}: no capability denial; {transcript}"
+        );
+        assert!(
+            completed.iter().any(|item| item["type"] == "mcp_tool_call"
+                && item["tool"] == "task_submit_retained"
+                && item.to_string().contains("permission_denied")),
+            "{profile}: deferred retained-tool discovery or authority enforcement failed; {transcript}"
         );
         // Unified-exec output can arrive after Codex emits the completed JSONL
         // item. The immutable helper asserts the policy itself, so its exact

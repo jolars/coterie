@@ -55,7 +55,7 @@
         "idempotentHint": true,
         "readOnlyHint": true
       },
-      "description": "Read bounded current tasks, assignment summaries, recovery references, and commit_handoffs. Drain has_more using next_task as after_task; current_task stays pinned. Fetch full text with task_show and assignment_show. Establish an authorized coordinator for worktree commits before editing. Inspect admission budgets and warnings before recovery or review spawns; worker exit never restores lifetime admissions. Call at startup.",
+      "description": "Read bounded current tasks, assignment summaries, recovery references, and commit_handoffs. commands lists authorized MCP tool names, including task_submit_retained when granted; discover deferred tools by their exact names. Catalogue presence alone grants no authority. Drain has_more using next_task as after_task; current_task stays pinned. Fetch full text with task_show and assignment_show. Establish an authorized coordinator for worktree commits before editing. Inspect admission budgets and warnings before recovery or review spawns; worker exit never restores lifetime admissions. Call at startup.",
       "inputSchema": {
         "$defs": {
           "TaskId": {
@@ -470,7 +470,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Submit an independently reviewed exact retained commit after verified worker exit. Requires task:submit-retained. Supply summary with validation outcomes and blocked checks, reason, and review text and source. Preserves the original files and index. Integration, target validation, and accepted closure remain separate. Reuse operation_id and identical arguments on retry.",
+      "description": "Submit another worker's independently reviewed exact retained commit after verified exit. Check prime.commands for task_submit_retained authority (task:submit-retained); catalogue presence grants none. Requires an active run, current unfinished assignment and claim, revoked worker credentials, recorded exit and fresh provider proof, and no pending resource operations. The full lowercase result_commit must equal HEAD and the owned reference in a clean, fully inspectable worktree and index. Supply summary with validation outcomes and blocked checks, reason, and independent review text and source. Preserves files and index. If unavailable, ask an authorized coordinator or operator; verified-exit task_recover permits a fresh continuation, while unknown exits need operator inspection. Integration, target validation, and accepted closure remain separate. Reuse operation_id and identical arguments on retry.",
       "inputSchema": {
         "$defs": {
           "AssignmentId": {
@@ -700,7 +700,7 @@
         "idempotentHint": true,
         "readOnlyHint": false
       },
-      "description": "Integrate a reviewed Git result into its clean, unchanged target. Defaults to rebase for linear history; merge is opt-in. Requires workspace:integrate. Reuse operation_id on retry.",
+      "description": "Integrate a reviewed Git result into its clean, unchanged target. Explicit integration is required even for an unchanged read-only worktree review; a no-op record does not establish review of a newer target. Validate the target and explicitly close afterward. Defaults to rebase for linear history; merge is opt-in. Requires workspace:integrate. Reuse operation_id on retry.",
       "inputSchema": {
         "$defs": {
           "AssignmentId": {
