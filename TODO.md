@@ -745,12 +745,15 @@ session; these follow-ups do not authorize resuming it.
 
 ## Future work to scope
 
-- [ ] Upgrade the documentation toolchain when stable VitePress supports a
-  patched Vite release. VitePress 1.6.4 requires Vite 5, while the four open
-  documentation alerts have fixes beginning with Vite 6.4.3 and esbuild
-  0.25.0. Remove the scoped exceptions in `scripts/check-npm-audit.mjs`
-  after the upgrade. Verify a clean raw `pnpm audit`, the site build, and
-  the development and preview commands before closing this item.
+- [x] Patch the documentation toolchain's Vite and esbuild vulnerabilities.
+  Stable VitePress 1.6.4 still declares Vite 5, so a scoped `vitepress>vite`
+  override selects Vite 6.4.5 with esbuild 0.25.12. Raw `pnpm audit` reports
+  no vulnerabilities, and the site build and HTTP smoke checks for the
+  development and preview commands pass. The audit gate now runs `pnpm audit`
+  directly, and the advisory exceptions and their checker have been removed.
+- [ ] Remove the scoped `vitepress>vite` override when stable VitePress declares
+  a patched Vite release. Recheck raw `pnpm audit`, the site build, and the
+  development and preview commands.
 - [ ] Scope an optional transfer helper for the [research recovery
   handoff](docs/field-report-normreg-multi.md#3-recovery-preserved-work-but-required-a-manual-handoff).
   Require an explicit selection of changes, identify conflicts before
