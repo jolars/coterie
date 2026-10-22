@@ -60,8 +60,7 @@ tasks:
     cmds:
       - cargo audit
       - cargo deny check advisories bans licenses sources
-      - node --test scripts/check-npm-audit.test.mjs
-      - pnpm audit --json | node scripts/check-npm-audit.mjs
+      - pnpm audit
 
   check:
     desc: Run every required local and CI gate except coverage.

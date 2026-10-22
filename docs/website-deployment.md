@@ -1,6 +1,12 @@
 # Documentation site deployment
 
-The public site source is in `website/`. `task docs:site` installs its pinned pnpm dependencies, copies the generated JSON Schemas into the build input, and runs the VitePress production build with broken-link checking. `pnpm docs:dev` binds to `127.0.0.1`. Do not expose the development server to a network while the current Vite alerts remain open. `task check` includes the site build and the npm dependency audit. The existing `task docs` remains the rustdoc gate.
+The public site source is in `website/`. `task docs:site` installs its pinned pnpm dependencies, copies the generated JSON Schemas into the build input, and runs the VitePress production build with broken-link checking. `pnpm docs:dev` binds to `127.0.0.1`. `task check` includes the site build and the npm dependency audit without advisory exceptions. The existing `task docs` remains the rustdoc gate.
+
+Stable VitePress 1.6.4 declares Vite 5, which has unpatched security advisories.
+The scoped `vitepress>vite` override in `package.json` selects Vite 6.4.5 or a
+later Vite 6 patch, which also brings in patched esbuild. Its Vue plugin supports
+Vite 6. Keep the override until stable VitePress declares a patched Vite version,
+and verify the site build, development server, and preview when changing it.
 
 The Pages workflow builds automatically from the tag of a **published GitHub
 release** and sets `COTERIE_DOCS_REF` to that tag. Public links to repository
