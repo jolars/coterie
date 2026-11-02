@@ -23,7 +23,7 @@ getrandom = "0.4.3"
 git2 = { version = "0.21.0", features = ["vendored-libgit2"] }
 hmac = "0.13.0"
 nix = { version = "0.31.3", features = ["fs", "signal", "user"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 schemars = "1.2.2"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
