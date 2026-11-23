@@ -22,8 +22,8 @@ clap = { version = "4.5.48", default-features = false, features = [
 getrandom = "0.4.3"
 git2 = { version = "0.21.0", features = ["vendored-libgit2"] }
 hmac = "0.13.0"
-nix = { version = "0.31.3", features = ["fs", "signal", "user"] }
-rusqlite = { version = "0.42.0", features = ["bundled"] }
+nix = { version = "0.32.0", features = ["fs", "signal", "user"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 schemars = "1.2.2"
 semver = "1.0.28"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -49,7 +49,7 @@ tokio = { version = "1.53.1", features = [
 ulid = "3.0.0"
 
 [dev-dependencies]
-nix = { version = "0.31.3", features = ["term"] }
+nix = { version = "0.32.0", features = ["term"] }
 tokio = { version = "1.53.1", features = ["test-util"] }
 
 [lints.rust]
